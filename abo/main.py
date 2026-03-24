@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from abo.config import load_config, save_config
 from abo.game.state import init_state, load_state, save_state
 from abo.vault.writer import ensure_vault_structure
+from abo.obsidian.uri import open_file, search_vault
 
 app = FastAPI(title="ABO Backend", version="0.1.0")
 
@@ -96,6 +97,30 @@ async def update_game_state(updates: dict):
     if not config.get("is_configured"):
         raise HTTPException(status_code=404, detail="Vault not configured")
     return save_state(config["vault_path"], updates)
+
+
+
+# ── Obsidian URI ─────────────────────────────────────────────────────────────
+
+class ObsidianOpenRequest(BaseModel):
+    vault_name: str
+    file_path: str
+
+class ObsidianSearchRequest(BaseModel):
+    vault_name: str
+    query: str
+
+@app.post("/api/obsidian/open")
+async def obsidian_open(body: ObsidianOpenRequest):
+    """Open a file in local Obsidian via obsidian:// URI scheme."""
+    open_file(body.vault_name, body.file_path)
+    return {"status": "opened"}
+
+@app.post("/api/obsidian/search")
+async def obsidian_search(body: ObsidianSearchRequest):
+    """Trigger Obsidian search via URI scheme."""
+    search_vault(body.vault_name, body.query)
+    return {"status": "searching"}
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

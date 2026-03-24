@@ -20,22 +20,24 @@ export interface AboConfig {
   is_configured: boolean;
 }
 
+export type ActiveTab = "overview" | "literature" | "mindmap" | "claude";
+
 interface AboStore {
   config: AboConfig | null;
   gameState: GameState | null;
-  activeTab: "literature" | "mindmap" | "claude";
+  activeTab: ActiveTab;
   darkMode: boolean;
 
   setConfig: (c: AboConfig) => void;
   setGameState: (g: GameState) => void;
-  setActiveTab: (t: AboStore["activeTab"]) => void;
+  setActiveTab: (t: ActiveTab) => void;
   toggleDarkMode: () => void;
 }
 
 export const useStore = create<AboStore>((set) => ({
   config: null,
   gameState: null,
-  activeTab: "literature",
+  activeTab: "overview",
   darkMode: false,
 
   setConfig: (config) => set({ config }),

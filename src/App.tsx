@@ -2,19 +2,17 @@ import { useEffect, useState } from "react";
 import { api } from "./core/api";
 import { useStore, AboConfig, GameState } from "./core/store";
 import SetupWizard from "./components/SetupWizard";
-import Sidebar from "./modules/sidebar/Sidebar";
+import NavSidebar from "./modules/nav/NavSidebar";
 import MainContent from "./modules/MainContent";
 
 export default function App() {
   const { config, setConfig, setGameState, darkMode } = useStore();
   const [loading, setLoading] = useState(true);
 
-  // Apply dark class on initial render from store
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
   }, [darkMode]);
 
-  // On mount: check config, then load game state
   useEffect(() => {
     (async () => {
       try {
@@ -25,7 +23,7 @@ export default function App() {
           setGameState(gs);
         }
       } catch {
-        // Backend not ready — show setup
+        // Backend not reachable yet — show setup
       } finally {
         setLoading(false);
       }
@@ -45,8 +43,8 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-slate-950">
-      <Sidebar />
+    <div className="flex h-screen overflow-hidden">
+      <NavSidebar />
       <MainContent />
     </div>
   );
