@@ -108,6 +108,7 @@ python -m abo.cli skill xp add critical-reading 40
 5. **XP 基于行为不基于时间**：鼓励深度质量。
 6. **模块解耦**：FastAPI 路由隔离后端，事件总线解耦前端模块。
 7. **Rust 是退路**：热路径（PDF、向量检索）瓶颈出现后再迁移。
+8. **阶段性开发结束后**，同步到github仓库
 
 ---
 
@@ -181,11 +182,11 @@ interface AboModule {
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| 0 | Tauri 骨架 + FastAPI + Vault 配置 + 侧边栏框架 | `[ ]` |
-| 1 | 精力值系统 + 技能树 + 日记/任务 | `[ ]` |
-| 2 | 文献引擎 MVP（PDF/DOI 导入、Ollama 笔记、FTS 搜索、Lv.0-2） | `[ ]` |
-| 3 | Claude Code 面板（WebSocket 流式 + 快捷指令） | `[ ]` |
-| 4 | React Flow 思维导图 + A+B 撞击 | `[ ]` |
+| 0 | Tauri 骨架 + FastAPI + Vault 配置 + 侧边栏框架 | `[x]` |
+| 1 | 精力值系统 + 技能树 + 日记/任务 | `[x]` |
+| 2 | 文献引擎 MVP（PDF/DOI 导入、Claude 笔记、FTS 搜索、Lv.0-4） | `[x]` |
+| 3 | Claude Code 面板（WebSocket 流式 + 快捷指令） | `[x]` |
+| 4 | React Flow 思维导图 + A+B 撞击 | `[x]` |
 | 5 | 语义搜索、引用关系图、成就系统、Rust 优化 | `[ ]` |
 
 ---
