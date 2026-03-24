@@ -1,51 +1,53 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { useEffect, useState } from "react";
+import { api } from "./core/api";
+import { useStore, AboConfig, GameState } from "./core/store";
+import SetupWizard from "./components/SetupWizard";
+import Sidebar from "./modules/sidebar/Sidebar";
+import MainContent from "./modules/MainContent";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+export default function App() {
+  const { config, setConfig, setGameState, darkMode } = useStore();
+  const [loading, setLoading] = useState(true);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  // Apply dark class on initial render from store
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", darkMode);
+  }, [darkMode]);
+
+  // On mount: check config, then load game state
+  useEffect(() => {
+    (async () => {
+      try {
+        const cfg = await api.get<AboConfig>("/api/config");
+        if (cfg.is_configured) {
+          setConfig(cfg);
+          const gs = await api.get<GameState>("/api/game/state");
+          setGameState(gs);
+        }
+      } catch {
+        // Backend not ready — show setup
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [setConfig, setGameState]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950">
+        <div className="w-8 h-8 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+      </div>
+    );
+  }
+
+  if (!config?.is_configured) {
+    return <SetupWizard />;
   }
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-slate-950">
+      <Sidebar />
+      <MainContent />
+    </div>
   );
 }
-
-export default App;
