@@ -5,3 +5,4 @@ pypdf>=5.0
 pdfminer.six>=20231228
 httpx>=0.28
 watchdog>=6.0
+pyyaml>=6.0

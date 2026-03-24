@@ -1,11 +1,12 @@
 import { BookOpen, Network, Bot } from "lucide-react";
 import { useStore, ActiveTab } from "../core/store";
 import Overview from "./overview/Overview";
+import SkillTree from "./skilltree/SkillTree";
 
 function PlaceholderSection({
   tab,
 }: {
-  tab: Exclude<ActiveTab, "overview">;
+  tab: Exclude<ActiveTab, "overview" | "skilltree">;
 }) {
   const INFO = {
     literature: {
@@ -61,10 +62,11 @@ export default function MainContent() {
 
   return (
     <main className="flex-1 min-h-0 bg-slate-50 dark:bg-slate-950 overflow-hidden">
-      {activeTab === "overview" && <Overview />}
+      {activeTab === "overview"   && <Overview />}
+      {activeTab === "skilltree"  && <SkillTree />}
       {activeTab === "literature" && <PlaceholderSection tab="literature" />}
-      {activeTab === "mindmap" && <PlaceholderSection tab="mindmap" />}
-      {activeTab === "claude" && <PlaceholderSection tab="claude" />}
+      {activeTab === "mindmap"    && <PlaceholderSection tab="mindmap" />}
+      {activeTab === "claude"     && <PlaceholderSection tab="claude" />}
     </main>
   );
 }

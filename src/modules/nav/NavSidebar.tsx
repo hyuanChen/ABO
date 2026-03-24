@@ -1,11 +1,12 @@
-import { LayoutDashboard, BookOpen, Network, Bot, Sun, Moon, Zap } from "lucide-react";
+import { LayoutDashboard, BookOpen, Network, Bot, Sun, Moon, Zap, GitBranch } from "lucide-react";
 import { useStore, ActiveTab, GameState } from "../../core/store";
 
 const NAV_ITEMS: { id: ActiveTab; label: string; Icon: React.ElementType }[] = [
-  { id: "overview",    label: "总览",    Icon: LayoutDashboard },
-  { id: "literature",  label: "文献库",  Icon: BookOpen },
-  { id: "mindmap",     label: "思维导图", Icon: Network },
-  { id: "claude",      label: "Claude",  Icon: Bot },
+  { id: "overview",   label: "总览",   Icon: LayoutDashboard },
+  { id: "literature", label: "文献库", Icon: BookOpen },
+  { id: "skilltree",  label: "技能树", Icon: GitBranch },
+  { id: "mindmap",    label: "思维导图", Icon: Network },
+  { id: "claude",     label: "Claude", Icon: Bot },
 ];
 
 function energyBarColor(current: number, max: number) {
