@@ -1,0 +1,61 @@
+# .abo/skill-tree.yaml — ABO 默认技能树定义（用户可编辑）
+
+skills:
+  - id: literature-search
+    name: 文献检索
+    category: academic-foundation
+    max_level: 10
+    xp_curve: [100, 250, 500, 1000, 2000, 3500, 5500, 8000, 12000, 20000]
+    unlocks: []
+
+  - id: critical-reading
+    name: 批判性阅读
+    category: academic-foundation
+    max_level: 10
+    xp_curve: [150, 350, 700, 1400, 2800, 5000, 8000, 12000, 18000, 28000]
+    unlocks: [literature-search]
+    unlock_condition:
+      papers_digested: 10
+
+  - id: structured-writing
+    name: 结构化写作
+    category: academic-foundation
+    max_level: 10
+    xp_curve: [200, 450, 900, 1800, 3500, 6000, 9500, 14000, 20000, 30000]
+    unlocks: [critical-reading]
+    unlock_condition:
+      papers_digested: 20
+
+  - id: idea-generation
+    name: 创意联想
+    category: creativity
+    max_level: 10
+    xp_curve: [100, 250, 500, 1000, 2000, 3500, 5500, 8000, 12000, 20000]
+    unlocks: []
+    unlock_condition:
+      ab_collisions: 5
+
+  - id: hypothesis-building
+    name: 假设构建
+    category: creativity
+    max_level: 10
+    xp_curve: [200, 500, 1000, 2000, 4000, 7000, 11000, 16000, 23000, 35000]
+    unlocks: [idea-generation]
+    unlock_condition:
+      ab_collisions: 15
+
+  - id: research-planning
+    name: 研究规划
+    category: productivity
+    max_level: 10
+    xp_curve: [100, 250, 500, 1000, 2000, 3500, 5500, 8000, 12000, 20000]
+    unlocks: []
+
+  - id: energy-management
+    name: 精力管理
+    category: productivity
+    max_level: 10
+    xp_curve: [100, 250, 500, 1000, 2000, 3500, 5500, 8000, 12000, 20000]
+    unlocks: []
+    unlock_condition:
+      energy_logs: 7

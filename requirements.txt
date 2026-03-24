@@ -1,0 +1,7 @@
+fastapi>=0.115
+uvicorn[standard]>=0.34
+python-frontmatter>=1.1
+pypdf>=5.0
+pdfminer.six>=20231228
+httpx>=0.28
+watchdog>=6.0

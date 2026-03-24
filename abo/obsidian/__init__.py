@@ -1,0 +1,1 @@
+"""ABO obsidian sub-package."""
