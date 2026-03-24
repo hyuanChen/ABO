@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -17,6 +17,10 @@ from abo.game.state import init_state, load_state, save_state
 from abo.game.energy import log_energy_event, ALL_EVENTS
 from abo.game.skills import get_skills_with_state, award_xp
 from abo.game.tasks import get_today_tasks, add_task, complete_task, delete_task
+from abo.literature.indexer import search_papers, list_papers
+from abo.literature.importer import import_pdf, import_doi, upgrade_digest
+from abo.claude_bridge.runner import stream_call, batch_call
+from abo.claude_bridge.context_builder import build_context
 from abo.vault.writer import ensure_vault_structure
 from abo.obsidian.uri import open_file, search_vault
 
@@ -193,6 +197,86 @@ async def delete_task_route(task_id: str):
     return {"deleted": task_id}
 
 
+# ── Literature ───────────────────────────────────────────────────────────────
+
+@app.get("/api/literature")
+async def get_literature():
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    papers = list_papers(config["vault_path"])
+    # Enrich with frontmatter title/authors
+    from pathlib import Path
+    import frontmatter as fm
+    enriched = []
+    for p in papers:
+        md = Path(p["md_path"])
+        if md.exists():
+            post = fm.load(str(md))
+            p["title"] = post.get("title", p["paper_id"])
+            p["authors"] = post.get("authors", "")
+        else:
+            p["title"] = p["paper_id"]
+            p["authors"] = ""
+        enriched.append(p)
+    return {"papers": enriched}
+
+
+@app.get("/api/literature/search")
+async def search_literature(q: str):
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    return {"results": search_papers(config["vault_path"], q)}
+
+
+class ImportPdfRequest(BaseModel):
+    pdf_path: str
+    run_claude: bool = False
+
+
+@app.post("/api/literature/import/pdf")
+async def literature_import_pdf(body: ImportPdfRequest):
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    try:
+        return await import_pdf(body.pdf_path, config["vault_path"], run_claude=body.run_claude)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+class ImportDoiRequest(BaseModel):
+    doi: str
+    run_claude: bool = False
+
+
+@app.post("/api/literature/import/doi")
+async def literature_import_doi(body: ImportDoiRequest):
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    try:
+        return await import_doi(body.doi, config["vault_path"], run_claude=body.run_claude)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class DigestRequest(BaseModel):
+    level: int
+
+
+@app.post("/api/literature/{paper_id}/digest")
+async def literature_upgrade_digest(paper_id: str, body: DigestRequest):
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    try:
+        return upgrade_digest(config["vault_path"], paper_id, body.level)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+
+
 # ── Obsidian URI ─────────────────────────────────────────────────────────────
 
 class ObsidianOpenRequest(BaseModel):
@@ -214,6 +298,91 @@ async def obsidian_search(body: ObsidianSearchRequest):
     """Trigger Obsidian search via URI scheme."""
     search_vault(body.vault_name, body.query)
     return {"status": "searching"}
+
+
+# ── Claude WebSocket ─────────────────────────────────────────────────────────
+
+@app.websocket("/ws/claude")
+async def claude_ws(websocket: WebSocket, current_file: str | None = None):
+    """Stream Claude responses over WebSocket. Send text prompt, receive stream-json lines."""
+    await websocket.accept()
+    config = load_config()
+    if not config.get("is_configured"):
+        await websocket.close(code=1008)
+        return
+    try:
+        while True:
+            prompt = await websocket.receive_text()
+            context = build_context(config["vault_path"], current_file)
+            await stream_call(prompt, context, websocket)
+            # Send sentinel to signal end of response
+            await websocket.send_text('{"type":"done"}')
+    except WebSocketDisconnect:
+        pass
+
+
+# ── Mindmap ───────────────────────────────────────────────────────────────────
+
+from abo.mindmap.canvas import load_canvas, save_canvas, list_canvases, create_canvas
+from abo.mindmap.collider import collide_ab
+
+
+@app.get("/api/mindmap/canvases")
+async def get_canvases():
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    return {"canvases": list_canvases(config["vault_path"])}
+
+
+class CanvasCreateRequest(BaseModel):
+    name: str
+
+
+@app.post("/api/mindmap/canvases")
+async def post_canvas(body: CanvasCreateRequest):
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    return create_canvas(config["vault_path"], body.name)
+
+
+@app.get("/api/mindmap/{canvas_id}")
+async def get_canvas(canvas_id: str):
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    data = load_canvas(config["vault_path"], canvas_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Canvas not found")
+    return data
+
+
+class CanvasSaveRequest(BaseModel):
+    nodes: list
+    edges: list
+
+
+@app.put("/api/mindmap/{canvas_id}")
+async def put_canvas(canvas_id: str, body: CanvasSaveRequest):
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    return save_canvas(config["vault_path"], canvas_id, body.nodes, body.edges)
+
+
+class CollideRequest(BaseModel):
+    idea_a: str
+    idea_b: str
+
+
+@app.post("/api/mindmap/collide")
+async def mindmap_collide(body: CollideRequest):
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    result = await collide_ab(body.idea_a, body.idea_b)
+    return result
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
