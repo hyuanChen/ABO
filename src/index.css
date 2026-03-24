@@ -1,0 +1,44 @@
+@import url('https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Crimson+Pro:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+:root {
+  --bg: #F8FAFC;
+  --surface: #FFFFFF;
+  --surface-2: #F1F5F9;
+  --border: #E2E8F0;
+  --text: #1E293B;
+  --text-muted: #475569;
+  --primary: #6366F1;
+  --primary-dim: #818CF8;
+  --cta: #10B981;
+  --xp: #F59E0B;
+  --danger: #EF4444;
+}
+
+.dark {
+  --bg: #020617;
+  --surface: #0F172A;
+  --surface-2: #1E293B;
+  --border: #334155;
+  --text: #F8FAFC;
+  --text-muted: #94A3B8;
+  --primary: #818CF8;
+  --cta: #22C55E;
+  --xp: #FBBF24;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: 'Atkinson Hyperlegible', sans-serif;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Crimson Pro', Georgia, serif;
+}
