@@ -4,6 +4,17 @@
 
 ---
 
+## 工作目录规范（重要）
+
+**所有代码修改必须直接在主目录 `/Users/huanc/Desktop/ABO/` 进行，禁止使用 git worktree。**
+
+- 开发服务器：`cd /Users/huanc/Desktop/ABO && npm run dev`
+- 后端：`cd /Users/huanc/Desktop/ABO && python -m abo.main`
+- 不得创建新的 worktree（`.worktrees/` 已加入 `.gitignore`）
+- 提交和推送直接在主目录操作：`git add / git commit / git push origin main`
+
+---
+
 ## Tech Stack
 
 | Layer | Choice | Notes |
