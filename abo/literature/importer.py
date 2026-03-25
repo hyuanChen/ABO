@@ -161,6 +161,11 @@ def _write_paper_note(vault_path: str, paper_id: str, metadata: dict, content: s
 
 def _award_import_xp(vault_path: str) -> None:
     award_xp(vault_path, "literature-search", 5)
+    from abo.game.state import increment_stat
+    from abo.game.achievements import check_and_unlock
+    increment_stat(vault_path, "papers_imported")
+    increment_stat(vault_path, "active_days")
+    check_and_unlock(vault_path)
 
 
 # ── Digest level upgrade ──────────────────────────────────────────────────────
@@ -187,5 +192,12 @@ def upgrade_digest(vault_path: str, paper_id: str, target_level: int) -> dict:
     from abo.literature.indexer import update_digest_level
     update_digest_level(vault_path, paper_id, target_level)
     award_xp(vault_path, "critical-reading", xp)
+
+    # Track digest stats
+    from abo.game.state import increment_stat
+    from abo.game.achievements import check_and_unlock
+    if target_level >= 2:
+        increment_stat(vault_path, "papers_digested_lv2_plus")
+    check_and_unlock(vault_path)
 
     return {"paper_id": paper_id, "digest_level": target_level, "xp_awarded": xp}

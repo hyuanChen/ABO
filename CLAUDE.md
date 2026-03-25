@@ -1,4 +1,4 @@
-# ABO — Academic Buddy OS · CLAUDE.md
+# ABO — Agent Boost Obsidian · CLAUDE.md
 
 > 把科研生活变成一场 RPG，本地 Mac 程序。设计文档见 `DESIGN.md`。
 

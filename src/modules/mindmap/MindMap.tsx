@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ReactFlow as ReactFlowComponent,
   addEdge,
@@ -13,6 +13,8 @@ import {
   EdgeChange,
   applyNodeChanges,
   applyEdgeChanges,
+  useReactFlow,
+  ReactFlowProvider,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
@@ -39,19 +41,69 @@ interface CollideResult {
 
 // ── Idea node (custom) ────────────────────────────────────────────────────────
 
-function IdeaNode({ data, selected }: { data: Record<string, unknown>; selected: boolean }) {
+function IdeaNode({ id, data, selected }: { id: string; data: Record<string, unknown>; selected: boolean }) {
+  const { setNodes } = useReactFlow();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(String(data.label ?? ""));
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  function commit() {
+    const trimmed = draft.trim() || String(data.label ?? "新想法");
+    setNodes((nds) => nds.map((n) => {
+      if (n.id !== id) return n;
+      const newData = { ...n.data, label: trimmed };
+      // strip the onEdit callback so it doesn't get serialized to JSON on save
+      delete (newData as Record<string, unknown>).onEdit;
+      const onEdit = n.data.onEdit as (() => void) | undefined;
+      if (onEdit) onEdit();
+      return { ...n, data: newData };
+    }));
+    setEditing(false);
+  }
+
   const label = String(data.label ?? "");
   const color = String(data.color ?? "");
   return (
-    <div className={`px-4 py-3 rounded-2xl border-2 shadow-sm min-w-[120px] max-w-[200px] text-center transition-all ${
-      selected
-        ? "border-indigo-500 shadow-indigo-200 dark:shadow-indigo-900/40"
-        : "border-slate-200 dark:border-slate-600"
-    } ${color === "amber"
-        ? "bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-700"
-        : "bg-white dark:bg-slate-800"
-    }`}>
-      <p className="text-sm font-medium text-slate-800 dark:text-slate-100 leading-snug">{label}</p>
+    <div
+      className={`px-4 py-3 rounded-2xl border-2 shadow-sm min-w-[120px] max-w-[200px] text-center transition-all ${
+        selected
+          ? "border-indigo-500 shadow-indigo-200 dark:shadow-indigo-900/40"
+          : "border-slate-200 dark:border-slate-600"
+      } ${color === "amber"
+          ? "bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-700"
+          : "bg-white dark:bg-slate-800"
+      }`}
+    >
+      {editing ? (
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); commit(); }
+            if (e.key === "Escape") { setDraft(label); setEditing(false); }
+          }}
+          onClick={(e) => e.stopPropagation()}
+          className="w-full text-sm text-center bg-transparent focus:outline-none text-slate-800 dark:text-slate-100 placeholder:text-slate-400"
+          placeholder="输入想法…"
+        />
+      ) : (
+        <p
+          onDoubleClick={(e) => { e.preventDefault(); setDraft(label); setEditing(true); }}
+          className="text-sm font-medium text-slate-800 dark:text-slate-100 leading-snug select-none cursor-text"
+          title="双击编辑"
+        >
+          {label}
+        </p>
+      )}
     </div>
   );
 }
@@ -235,7 +287,7 @@ function CanvasSelector({
 // @xyflow/react v12 default export workaround for TS "typeof module" issue
 const Flow = ReactFlowComponent as unknown as React.ComponentType<Parameters<typeof ReactFlowComponent>[0]>;
 
-export default function MindMap() {
+function MindMapInner() {
   const [canvases, setCanvases] = useState<Canvas[]>([]);
   const [currentId, setCurrentId] = useState<string | null>(null);
   const [nodes, setNodes] = useState<Node[]>([]);
@@ -283,7 +335,14 @@ export default function MindMap() {
     if (!currentId) return;
     setSaving(true);
     try {
-      await api.put(`/api/mindmap/${currentId}`, { nodes, edges });
+      // Strip function callbacks from node data before JSON serialization
+      const cleanNodes = nodes.map((n) => ({
+        ...n,
+        data: Object.fromEntries(
+          Object.entries(n.data as Record<string, unknown>).filter(([, v]) => typeof v !== "function")
+        ),
+      }));
+      await api.put(`/api/mindmap/${currentId}`, { nodes: cleanNodes, edges });
       setDirty(false);
     } catch { /* ignore */ } finally { setSaving(false); }
   }
@@ -302,7 +361,10 @@ export default function MindMap() {
       {
         id, type: "idea",
         position: { x: 100 + Math.random() * 300, y: 100 + Math.random() * 200 },
-        data: { label: "新想法" },
+        data: {
+          label: "新想法",
+          onEdit: () => setDirty(true),
+        },
       },
     ]);
     setDirty(true);
@@ -322,7 +384,7 @@ export default function MindMap() {
       {
         id, type: "idea",
         position: { x: 200, y: 300 },
-        data: { label: hypothesis.slice(0, 80), color: "amber" },
+        data: { label: hypothesis.slice(0, 80), color: "amber", onEdit: () => setDirty(true) },
       },
     ]);
     setDirty(true);
@@ -404,7 +466,7 @@ export default function MindMap() {
               const id = crypto.randomUUID();
               setNodes((prev) => [
                 ...prev,
-                { id, type: "idea", position: pos, data: { label: "新想法" } },
+                { id, type: "idea", position: pos, data: { label: "新想法", onEdit: () => setDirty(true) } },
               ]);
               setDirty(true);
             }}
@@ -436,5 +498,13 @@ export default function MindMap() {
         />
       )}
     </div>
+  );
+}
+
+export default function MindMap() {
+  return (
+    <ReactFlowProvider>
+      <MindMapInner />
+    </ReactFlowProvider>
   );
 }

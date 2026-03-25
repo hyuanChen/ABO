@@ -1,5 +1,6 @@
 """Canvas JSON persistence — React Flow nodes/edges stored in Ideas/."""
 import json
+import os
 import re
 import uuid
 from datetime import datetime
@@ -14,6 +15,12 @@ def _ideas_dir(vault_path: str) -> Path:
 
 def _canvas_path(vault_path: str, canvas_id: str) -> Path:
     return _ideas_dir(vault_path) / f"{canvas_id}.json"
+
+
+def _atomic_write(path: Path, data: str) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(data, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def list_canvases(vault_path: str) -> list[dict]:
@@ -47,7 +54,7 @@ def create_canvas(vault_path: str, name: str) -> dict:
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
     }
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2))
     return data
 
 
@@ -67,5 +74,5 @@ def save_canvas(vault_path: str, canvas_id: str, nodes: list, edges: list) -> di
     data["nodes"] = nodes
     data["edges"] = edges
     data["updated_at"] = datetime.now().isoformat()
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2))
     return data

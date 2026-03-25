@@ -4,6 +4,7 @@ import { useStore, AboConfig, GameState } from "./core/store";
 import SetupWizard from "./components/SetupWizard";
 import NavSidebar from "./modules/nav/NavSidebar";
 import MainContent from "./modules/MainContent";
+import ToastContainer from "./components/Toast";
 
 export default function App() {
   const { config, setConfig, setGameState, darkMode } = useStore();
@@ -46,6 +47,7 @@ export default function App() {
     <div className="flex h-screen overflow-hidden">
       <NavSidebar />
       <MainContent />
+      <ToastContainer />
     </div>
   );
 }

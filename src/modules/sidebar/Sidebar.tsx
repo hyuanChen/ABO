@@ -36,6 +36,8 @@ export default function Sidebar() {
     achievements: [],
     level: 1,
     title: "初入江湖",
+    total_xp: 0,
+    stats: { tasks_completed_total: 0, papers_imported: 0, papers_digested_lv2_plus: 0, ab_collisions: 0, claude_sessions: 0, active_days: [], monthly_tasks: {} },
   };
 
   const { current, max } = gs.energy;

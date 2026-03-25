@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 import {
   Zap, CheckSquare, Square, Trophy, TrendingUp,
   Plus, X, Trash2, Coffee, Dumbbell, Brain, Moon as MoonIcon, Bed,
+  BarChart3, BookOpen, Flame, PenLine,
 } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, GameState, Task } from "../../core/store";
+import { useToast } from "../../components/Toast";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -50,10 +52,14 @@ const RECOVERY_ACTIONS = [
 
 export default function Overview() {
   const { gameState, tasks, setGameState, setTasks } = useStore();
+  const toast = useToast();
   const [energyLoading, setEnergyLoading] = useState<string | null>(null);
   const [newTask, setNewTask] = useState("");
   const [addingTask, setAddingTask] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [journalContent, setJournalContent] = useState("");
+  const [journalSaving, setJournalSaving] = useState(false);
+  const [journalDate, setJournalDate] = useState("");
 
   const gs: GameState = gameState ?? {
     energy: { current: 100, max: 100, lastUpdated: "", log: [] },
@@ -61,6 +67,16 @@ export default function Overview() {
     achievements: [],
     level: 1,
     title: "初入江湖",
+    total_xp: 0,
+    stats: {
+      tasks_completed_total: 0,
+      papers_imported: 0,
+      papers_digested_lv2_plus: 0,
+      ab_collisions: 0,
+      claude_sessions: 0,
+      active_days: [],
+      monthly_tasks: {},
+    },
   };
 
   const energyPct = Math.min(100, Math.round((gs.energy.current / gs.energy.max) * 100));
@@ -70,6 +86,22 @@ export default function Overview() {
   useEffect(() => {
     api.get<{ tasks: Task[] }>("/api/tasks/today").then((r) => setTasks(r.tasks)).catch(() => {});
   }, [setTasks]);
+
+  // Refresh game state on window focus (keeps energy current if user interacted via CLI)
+  useEffect(() => {
+    function onFocus() {
+      api.get<GameState>("/api/game/state").then(setGameState).catch(() => {});
+    }
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [setGameState]);
+
+  // Load today's journal
+  useEffect(() => {
+    api.get<{ date: string; content: string }>("/api/journal/today")
+      .then((r) => { setJournalContent(r.content); setJournalDate(r.date); })
+      .catch(() => {});
+  }, []);
 
   async function logEnergy(eventType: string) {
     setEnergyLoading(eventType);
@@ -95,7 +127,26 @@ export default function Overview() {
 
   async function handleComplete(taskId: string) {
     try {
-      await api.post(`/api/tasks/${taskId}/complete`, {});
+      const result = await api.patch<{
+        xp_awarded?: number;
+        skill?: string | null;
+        level_info?: { leveled_up: boolean; new_level: number; new_title: string };
+        new_achievements?: Array<{ id: string; name: string; desc: string }>;
+      }>(`/api/tasks/${taskId}/complete`, {});
+
+      // Fire XP toast
+      if (result.xp_awarded && result.xp_awarded > 0) {
+        toast.xp(result.skill ?? "通用技能", result.xp_awarded);
+      }
+      // Fire level-up toast
+      if (result.level_info?.leveled_up) {
+        toast.levelUp(result.level_info.new_level, result.level_info.new_title);
+      }
+      // Fire achievement toasts
+      for (const ach of result.new_achievements ?? []) {
+        toast.achievement(ach.name, ach.desc);
+      }
+
       // Refresh tasks and game state
       const [tasksRes, stateRes] = await Promise.all([
         api.get<{ tasks: Task[] }>("/api/tasks/today"),
@@ -111,6 +162,14 @@ export default function Overview() {
       await api.delete(`/api/tasks/${taskId}`);
       setTasks(tasks.filter((t) => t.id !== taskId));
     } catch { /* ignore */ }
+  }
+
+  async function handleSaveJournal() {
+    setJournalSaving(true);
+    try {
+      await api.post("/api/journal/today", { content: journalContent });
+    } catch { /* ignore */ }
+    finally { setJournalSaving(false); }
   }
 
   const doneTasks = tasks.filter((t) => t.done).length;
@@ -265,9 +324,41 @@ export default function Overview() {
             <SkillSnapshot />
           </Card>
 
+          {/* ── Journal quick-entry ────────────────────────────────── */}
+          <Card className="md:col-span-2">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-slate-100 dark:bg-slate-700/60 flex items-center justify-center">
+                  <PenLine className="w-4 h-4 text-emerald-500" aria-hidden />
+                </div>
+                <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500">今日日志</p>
+              </div>
+              {journalDate && (
+                <span className="text-xs text-slate-400 dark:text-slate-500">{journalDate}</span>
+              )}
+            </div>
+            <textarea
+              value={journalContent}
+              onChange={(e) => setJournalContent(e.target.value)}
+              placeholder="记录今日进展、想法、计划…"
+              rows={6}
+              aria-label="今日日志内容"
+              className="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 resize-none leading-relaxed"
+            />
+            <div className="flex justify-end mt-2">
+              <button
+                onClick={handleSaveJournal}
+                disabled={journalSaving}
+                className="px-4 py-1.5 rounded-lg bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-medium transition-colors cursor-pointer disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-indigo-500"
+              >
+                {journalSaving ? "保存中…" : "保存日志"}
+              </button>
+            </div>
+          </Card>
+
           {/* ── Achievements ──────────────────────────────────────── */}
           <Card className="md:col-span-2">
-            <SectionLabel icon={<Trophy className="w-4 h-4 text-amber-500" />}>最近成就</SectionLabel>
+            <SectionLabel icon={<Trophy className="w-4 h-4 text-amber-500" />}>已解锁成就</SectionLabel>
             {gs.achievements.length === 0 ? (
               <p className="text-sm text-slate-400 dark:text-slate-500">完成任务和文献阅读以解锁成就</p>
             ) : (
@@ -280,6 +371,32 @@ export default function Overview() {
                 ))}
               </div>
             )}
+          </Card>
+
+          {/* ── Stats ─────────────────────────────────────────────── */}
+          <Card className="md:col-span-2">
+            <SectionLabel icon={<BarChart3 className="w-4 h-4 text-indigo-500" />}>累计统计</SectionLabel>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              {[
+                { label: "任务完成", value: gs.stats?.tasks_completed_total ?? 0, Icon: CheckSquare, color: "text-emerald-500" },
+                { label: "文献导入", value: gs.stats?.papers_imported ?? 0, Icon: BookOpen, color: "text-indigo-500" },
+                { label: "A+B 撞击", value: gs.stats?.ab_collisions ?? 0, Icon: Flame, color: "text-amber-500" },
+                { label: "Claude 会话", value: gs.stats?.claude_sessions ?? 0, Icon: TrendingUp, color: "text-violet-500" },
+              ].map(({ label, value, Icon, color }) => (
+                <div key={label} className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-700/40">
+                  <Icon className={`w-5 h-5 ${color}`} aria-hidden />
+                  <span className="font-heading text-2xl font-bold text-slate-800 dark:text-slate-100">{value}</span>
+                  <span className="text-xs text-slate-400 dark:text-slate-500">{label}</span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 pt-3 border-t border-slate-100 dark:border-slate-700/50 flex items-center gap-3 text-sm text-slate-500 dark:text-slate-400">
+              <span>活跃天数：{gs.stats?.active_days?.length ?? 0} 天</span>
+              <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-slate-600" />
+              <span>总 XP：{gs.total_xp ?? 0}</span>
+              <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-slate-600" />
+              <span>Lv.{gs.level} {gs.title}</span>
+            </div>
           </Card>
 
         </div>

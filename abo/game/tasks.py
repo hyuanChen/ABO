@@ -8,7 +8,7 @@ import frontmatter
 
 from abo.game.skills import award_xp
 from abo.game.energy import get_multiplier, log_energy_event
-from abo.game.state import load_state
+from abo.game.state import load_state, increment_stat
 
 
 def _today_path(vault_path: str) -> Path:
@@ -70,13 +70,27 @@ def complete_task(vault_path: str, task_id: str) -> dict | None:
     multiplier = get_multiplier(energy["current"], energy["max"])
     skill = target.get("skill")
     xp = int(target.get("xp", 20) * multiplier)
+    xp_result: dict = {}
     if skill:
-        award_xp(vault_path, skill, xp)
+        xp_result = award_xp(vault_path, skill, xp)
+
+    # Track stats + achievements
+    increment_stat(vault_path, "tasks_completed_total")
+    increment_stat(vault_path, "monthly_tasks")
+    increment_stat(vault_path, "active_days")
+    from abo.game.achievements import check_and_unlock
+    new_achievements = check_and_unlock(vault_path)
 
     # Deduct energy for the task
     log_energy_event(vault_path, "focus")
 
-    return {**target, "xp_awarded": xp, "multiplier": multiplier}
+    return {
+        **target,
+        "xp_awarded": xp,
+        "multiplier": multiplier,
+        "level_info": xp_result.get("level_info"),
+        "new_achievements": new_achievements,
+    }
 
 
 def delete_task(vault_path: str, task_id: str) -> bool:

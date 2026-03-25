@@ -95,6 +95,7 @@ function SkillCard({ skill }: { skill: SkillDef }) {
 
 function DependencyGraph({ skills }: { skills: SkillDef[] }) {
   const svgRef = useRef<SVGSVGElement>(null);
+  const darkMode = useStore((s) => s.darkMode);
 
   const nodes = useMemo(() =>
     skills.map((s) => ({ id: s.id, name: s.name, unlocked: s.unlocked, level: s.level })),
@@ -114,6 +115,17 @@ function DependencyGraph({ skills }: { skills: SkillDef[] }) {
     const W = el.clientWidth || 600;
     const H = el.clientHeight || 260;
 
+    // Dark-mode-aware colors
+    const nodeUnlocked = "#6366F1";
+    const nodeLocked  = darkMode ? "#334155" : "#E2E8F0";
+    const nodeStroke  = darkMode ? "#818CF8" : "#CBD5E1";
+    const nodeLockedStroke = darkMode ? "#475569" : "#CBD5E1";
+    const textUnlocked = "#fff";
+    const textLocked  = darkMode ? "#64748B" : "#94A3B8";
+    const textLabel   = darkMode ? "#94A3B8" : "#64748B";
+    const linkColor   = darkMode ? "#475569" : "#CBD5E1";
+    const arrowColor  = darkMode ? "#64748B" : "#94A3B8";
+
     d3.select(el).selectAll("*").remove();
 
     const svg = d3.select(el);
@@ -125,7 +137,7 @@ function DependencyGraph({ skills }: { skills: SkillDef[] }) {
       .attr("markerWidth", 6).attr("markerHeight", 6)
       .attr("orient", "auto")
       .append("path").attr("d", "M0,-5L10,0L0,5")
-      .attr("fill", "#94A3B8");
+      .attr("fill", arrowColor);
 
     const sim = d3.forceSimulation(nodes as d3.SimulationNodeDatum[])
       .force("link", d3.forceLink(links).id((d: any) => d.id).distance(120))
@@ -137,7 +149,7 @@ function DependencyGraph({ skills }: { skills: SkillDef[] }) {
       .selectAll("line")
       .data(links)
       .join("line")
-      .attr("stroke", "#CBD5E1")
+      .attr("stroke", linkColor)
       .attr("stroke-width", 1.5)
       .attr("marker-end", "url(#arrow)");
 
@@ -149,20 +161,20 @@ function DependencyGraph({ skills }: { skills: SkillDef[] }) {
 
     node.append("circle")
       .attr("r", 22)
-      .attr("fill", (d: any) => d.unlocked ? "#6366F1" : "#E2E8F0")
-      .attr("stroke", (d: any) => d.unlocked ? "#818CF8" : "#CBD5E1")
+      .attr("fill", (d: any) => d.unlocked ? nodeUnlocked : nodeLocked)
+      .attr("stroke", (d: any) => d.unlocked ? nodeStroke : nodeLockedStroke)
       .attr("stroke-width", 2);
 
     node.append("text")
       .attr("text-anchor", "middle").attr("dy", "0.35em")
-      .attr("fill", (d: any) => d.unlocked ? "#fff" : "#94A3B8")
+      .attr("fill", (d: any) => d.unlocked ? textUnlocked : textLocked)
       .attr("font-size", "11px")
       .attr("font-weight", "600")
       .text((d: any) => `Lv${d.level}`);
 
     node.append("text")
       .attr("text-anchor", "middle").attr("dy", "2.4em")
-      .attr("fill", "#64748B").attr("font-size", "9px")
+      .attr("fill", textLabel).attr("font-size", "9px")
       .text((d: any) => d.name.length > 6 ? d.name.slice(0, 5) + "…" : d.name);
 
     sim.on("tick", () => {
@@ -175,10 +187,10 @@ function DependencyGraph({ skills }: { skills: SkillDef[] }) {
     });
 
     return () => { sim.stop(); };
-  }, [nodes, links]);
+  }, [nodes, links, darkMode]);
 
   return (
-    <svg ref={svgRef} className="w-full h-64 rounded-xl bg-slate-50 dark:bg-slate-900/50" aria-label="技能依赖关系图" />
+    <svg ref={svgRef} className="w-full h-64 rounded-xl bg-slate-50 dark:bg-slate-900/80" aria-label="技能依赖关系图" />
   );
 }
 

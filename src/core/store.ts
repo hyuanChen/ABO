@@ -13,6 +13,16 @@ export interface GameState {
   achievements: string[];
   level: number;
   title: string;
+  total_xp: number;
+  stats: {
+    tasks_completed_total: number;
+    papers_imported: number;
+    papers_digested_lv2_plus: number;
+    ab_collisions: number;
+    claude_sessions: number;
+    active_days: string[];
+    monthly_tasks: Record<string, number>;
+  };
 }
 
 export interface SkillDef {
@@ -42,7 +52,19 @@ export interface AboConfig {
   is_configured: boolean;
 }
 
-export type ActiveTab = "overview" | "literature" | "mindmap" | "claude" | "skilltree";
+// ── Toast system ──────────────────────────────────────────────────────────────
+
+export type ToastKind = "xp" | "achievement" | "level_up" | "info" | "error";
+
+export interface Toast {
+  id: string;
+  kind: ToastKind;
+  title: string;
+  subtitle?: string;
+  duration?: number; // ms, default 3500
+}
+
+export type ActiveTab = "overview" | "literature" | "mindmap" | "claude" | "skilltree" | "settings";
 
 interface AboStore {
   config: AboConfig | null;
@@ -51,6 +73,7 @@ interface AboStore {
   tasks: Task[];
   activeTab: ActiveTab;
   darkMode: boolean;
+  toasts: Toast[];
 
   setConfig: (c: AboConfig) => void;
   setGameState: (g: GameState) => void;
@@ -58,6 +81,8 @@ interface AboStore {
   setTasks: (t: Task[]) => void;
   setActiveTab: (t: ActiveTab) => void;
   toggleDarkMode: () => void;
+  addToast: (toast: Omit<Toast, "id">) => void;
+  removeToast: (id: string) => void;
 }
 
 export const useStore = create<AboStore>((set) => ({
@@ -67,6 +92,7 @@ export const useStore = create<AboStore>((set) => ({
   tasks: [],
   activeTab: "overview",
   darkMode: false,
+  toasts: [],
 
   setConfig: (config) => set({ config }),
   setGameState: (gameState) => set({ gameState }),
@@ -79,4 +105,10 @@ export const useStore = create<AboStore>((set) => ({
       document.documentElement.classList.toggle("dark", next);
       return { darkMode: next };
     }),
+  addToast: (toast) =>
+    set((s) => ({
+      toasts: [...s.toasts, { ...toast, id: crypto.randomUUID() }],
+    })),
+  removeToast: (id) =>
+    set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }));

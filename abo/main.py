@@ -13,16 +13,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from abo.config import load_config, save_config
-from abo.game.state import init_state, load_state, save_state
+from abo.game.state import init_state, load_state, save_state, increment_stat
 from abo.game.energy import log_energy_event, ALL_EVENTS
 from abo.game.skills import get_skills_with_state, award_xp
 from abo.game.tasks import get_today_tasks, add_task, complete_task, delete_task
+from abo.game.achievements import check_and_unlock, list_achievements
 from abo.literature.indexer import search_papers, list_papers
 from abo.literature.importer import import_pdf, import_doi, upgrade_digest
 from abo.claude_bridge.runner import stream_call, batch_call
 from abo.claude_bridge.context_builder import build_context
 from abo.vault.writer import ensure_vault_structure
 from abo.obsidian.uri import open_file, search_vault
+from abo.journal.daily import read_today, write_today
 
 app = FastAPI(title="ABO Backend", version="0.1.0")
 
@@ -151,6 +153,39 @@ async def post_skill_xp(skill_id: str, body: XpRequest):
     return award_xp(config["vault_path"], skill_id, body.xp)
 
 
+# ── Achievements ──────────────────────────────────────────────────────────────
+
+@app.get("/api/achievements")
+async def get_achievements():
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    return {"achievements": list_achievements(config["vault_path"])}
+
+
+@app.post("/api/achievements/check")
+async def post_check_achievements():
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    new = check_and_unlock(config["vault_path"])
+    return {"newly_unlocked": new}
+
+
+@app.get("/api/stats")
+async def get_stats():
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    state = load_state(config["vault_path"])
+    return {
+        "stats": state.get("stats", {}),
+        "level": state.get("level", 1),
+        "title": state.get("title", "初入江湖"),
+        "total_xp": state.get("total_xp", 0),
+    }
+
+
 # ── Tasks ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/tasks/today")
@@ -277,7 +312,51 @@ async def literature_upgrade_digest(paper_id: str, body: DigestRequest):
         raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
 
 
-# ── Obsidian URI ─────────────────────────────────────────────────────────────
+@app.get("/api/literature/{paper_id}/note")
+async def get_paper_note(paper_id: str):
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    from pathlib import Path
+    import frontmatter as fm
+    md = Path(config["vault_path"]) / "Literature" / f"{paper_id}.md"
+    if not md.exists():
+        raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
+    post = fm.load(str(md))
+    return {
+        "paper_id": paper_id,
+        "title": post.get("title", paper_id),
+        "authors": post.get("authors", ""),
+        "year": post.get("year"),
+        "doi": post.get("doi"),
+        "digest_level": post.get("digest-level", 0),
+        "content": post.content,
+    }
+
+
+# ── Journal ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/journal/today")
+async def get_journal_today():
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    return read_today(config["vault_path"])
+
+
+class JournalSaveRequest(BaseModel):
+    content: str
+
+
+@app.post("/api/journal/today")
+async def save_journal_today(body: JournalSaveRequest):
+    config = load_config()
+    if not config.get("is_configured"):
+        raise HTTPException(status_code=404, detail="Vault not configured")
+    return write_today(config["vault_path"], body.content)
+
+
+
 
 class ObsidianOpenRequest(BaseModel):
     vault_name: str
@@ -300,6 +379,23 @@ async def obsidian_search(body: ObsidianSearchRequest):
     return {"status": "searching"}
 
 
+# ── File system helpers ───────────────────────────────────────────────────────
+
+@app.get("/api/fs/pick-pdf")
+async def pick_pdf():
+    """Show a native macOS file picker and return the selected PDF path."""
+    import subprocess
+    result = subprocess.run(
+        ["osascript", "-e",
+         'POSIX path of (choose file of type {"pdf"} with prompt "选择 PDF 文献")'],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode == 0:
+        return {"path": result.stdout.strip(), "cancelled": False}
+    # returncode 1 = user cancelled
+    return {"path": None, "cancelled": True}
+
+
 # ── Claude WebSocket ─────────────────────────────────────────────────────────
 
 @app.websocket("/ws/claude")
@@ -310,12 +406,15 @@ async def claude_ws(websocket: WebSocket, current_file: str | None = None):
     if not config.get("is_configured"):
         await websocket.close(code=1008)
         return
+    # Track Claude session
+    increment_stat(config["vault_path"], "claude_sessions")
+    increment_stat(config["vault_path"], "active_days")
+    check_and_unlock(config["vault_path"])
     try:
         while True:
             prompt = await websocket.receive_text()
             context = build_context(config["vault_path"], current_file)
             await stream_call(prompt, context, websocket)
-            # Send sentinel to signal end of response
             await websocket.send_text('{"type":"done"}')
     except WebSocketDisconnect:
         pass

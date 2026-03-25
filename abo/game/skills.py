@@ -4,7 +4,7 @@ from typing import Any
 
 import yaml
 
-from abo.game.state import load_state, save_state
+from abo.game.state import load_state, save_state, add_total_xp, increment_stat
 
 
 def _load_tree(vault_path: str) -> list[dict]:
@@ -22,7 +22,6 @@ def _calc_level(xp: int, xp_curve: list[int]) -> tuple[int, int, int]:
         if xp < cumulative + threshold:
             return i + 1, xp - cumulative, threshold
         cumulative += threshold
-    # Max level
     return len(xp_curve), xp_curve[-1], xp_curve[-1]
 
 
@@ -57,13 +56,30 @@ def get_skills_with_state(vault_path: str) -> list[dict]:
 
 
 def award_xp(vault_path: str, skill_id: str, xp: int) -> dict:
-    """Add XP to a skill; auto-unlock if conditions met."""
+    """Add XP to a skill; auto-unlock, update total XP, check level-up + achievements."""
     state = load_state(vault_path)
     skills: dict[str, Any] = state.get("skills", {})
 
     entry = skills.get(skill_id, {"xp": 0, "unlocked": False})
     entry["xp"] = entry.get("xp", 0) + xp
-    entry["unlocked"] = True  # awarding XP implicitly unlocks
+    entry["unlocked"] = True
     skills[skill_id] = entry
+    updated = save_state(vault_path, {"skills": skills})
 
-    return save_state(vault_path, {"skills": skills})
+    # Update total XP + check level-up
+    level_info = add_total_xp(vault_path, xp)
+
+    # Track activity day
+    increment_stat(vault_path, "active_days")
+
+    # Check achievements (deferred import to avoid circular)
+    from abo.game.achievements import check_and_unlock
+    new_achievements = check_and_unlock(vault_path)
+
+    return {
+        **updated,
+        "xp_awarded": xp,
+        "skill_id": skill_id,
+        "level_info": level_info,
+        "new_achievements": new_achievements,
+    }
