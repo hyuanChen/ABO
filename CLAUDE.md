@@ -1,6 +1,6 @@
-# ABO — Agent Boost Obsidian · CLAUDE.md
+# ABO — Academic Buddy OS · CLAUDE.md
 
-> 把科研生活变成一场 RPG，本地 Mac 程序。设计文档见 `DESIGN.md`。
+> Obsidian 驱动的研究自动化伴侣。设计文档见 `DESIGN.md`。
 
 ---
 
@@ -22,11 +22,11 @@
 | App Shell | Tauri 2.x | macOS wrapper，管理 Python sidecar 生命周期 |
 | Frontend | React + TypeScript + Tailwind | UI 模块 |
 | Backend | Python + FastAPI | sidecar 进程，port 8765 |
+| Scheduler | APScheduler | 内嵌 Python 调度器，cron/interval 任务 |
 | Data | Markdown + YAML frontmatter + SQLite FTS5 | Vault is source of truth |
-| LLM | `claude --print --output-format stream-json` | **唯一 LLM 后端**，本机 Claude Code CLI；笔记生成、A+B 撞击、AI 面板均走此桥接，无 Ollama 依赖 |
+| LLM | `claude --print` / `--output-format stream-json` | **唯一 LLM 后端**，本机 Claude Code CLI，无 API Key |
 | State (frontend) | Zustand | 轻量全局状态 |
-| Canvas | React Flow | 思维导图 |
-| Skill tree viz | D3.js | 力导向图 / 树状布局 |
+| Canvas | React Flow (`@xyflow/react`) | Idea 工坊画布 |
 
 ---
 
@@ -38,28 +38,37 @@ ABO/
 ├── CLAUDE.md                  # 本文件
 │
 ├── src/                       # React 前端 (TypeScript)
-│   ├── App.tsx                # 主布局（侧边栏 240px + 内容区）
+│   ├── App.tsx                # 主布局
 │   ├── core/
 │   │   ├── api.ts             # fetch 封装 → http://127.0.0.1:8765
 │   │   ├── store.ts           # Zustand 全局状态
 │   │   └── events.ts          # 模块间事件总线
 │   ├── modules/
-│   │   ├── sidebar/           # Overview 侧边栏（精力值、今日任务、技能进度）
-│   │   ├── literature/        # 文献吃透引擎 UI
-│   │   ├── mindmap/           # React Flow 画布
-│   │   ├── energy/            # 精力值打卡 UI
-│   │   ├── skilltree/         # 技能树 D3 可视化
-│   │   └── claude-panel/      # Claude Code 包装（ClaudePanel / StreamOutput / QuickActions）
-│   └── components/            # 通用 UI 组件
+│   │   ├── nav/               # 导航侧边栏（调度状态指示器）
+│   │   ├── arxiv/             # ArXiv 追踪器 UI
+│   │   ├── meeting/           # 组会生成器 UI
+│   │   ├── ideas/             # Idea 工坊（React Flow 画布 + AI 拆解）
+│   │   ├── health/            # 健康仪表盘（打卡 + D3 趋势图）
+│   │   ├── podcast/           # 播客代听（队列 + 进度）
+│   │   ├── trends/            # Trend 追踪 Feed
+│   │   ├── literature/        # 文献库（PDF/DOI 导入、FTS 搜索）
+│   │   ├── claude-panel/      # Claude 对话面板（WebSocket 流式）
+│   │   └── settings/          # 设置（Vault 路径、调度配置）
+│   └── components/            # Toast、Modal、MarkdownRenderer 等通用组件
 │
 ├── abo/                       # Python 后端包
-│   ├── main.py                # FastAPI 入口
-│   ├── config.py              # vault 路径、Ollama URL
-│   ├── vault/                 # frontmatter 读写（python-frontmatter + pathlib）
-│   ├── literature/            # importer / indexer / searcher / digest
-│   ├── mindmap/               # canvas JSON 读写 + A+B collider
-│   ├── game/                  # energy / skills / achievements
+│   ├── main.py                # FastAPI 入口 + APScheduler 启动
+│   ├── config.py              # vault 路径持久化（~/.abo-config.json）
+│   ├── scheduler.py           # APScheduler 配置
+│   ├── arxiv/                 # arXiv API 爬取 + Claude 摘要 + 订阅管理
+│   ├── meeting/               # Claude 大纲生成 + HTML/PPTX 渲染
+│   ├── ideas/                 # React Flow 画布 JSON + Idea 拆解
+│   ├── health/                # 健康打卡 + Journal 写入 + SQLite 统计
+│   ├── podcast/               # yt-dlp 下载 + faster-whisper 转录 + Claude 摘要
+│   ├── trends/                # RSS + GitHub Trending + Claude 分析
+│   ├── literature/            # PDF/DOI 导入 + SQLite FTS5 索引
 │   ├── claude_bridge/         # runner.py (subprocess) + context_builder.py
+│   ├── vault/                 # frontmatter 读写（python-frontmatter + pathlib）
 │   └── obsidian/              # URI scheme 调用
 │
 └── src-tauri/                 # Tauri shell
@@ -70,17 +79,24 @@ ABO/
 ```
 ~/Documents/MyVault/
 ├── Literature/
-│   └── AuthorYYYY-ShortTitle.md   # YAML frontmatter: abo-type, digest-level, abo-xp
+│   └── AuthorYYYY-ShortTitle.md   # YAML frontmatter: abo-type, source, relevance-score
 ├── Ideas/
 │   ├── canvas-main.json           # React Flow 节点/边状态
-│   └── nodes/idea-{uuid}.md
+│   └── idea-{uuid}.md
 ├── Journal/
-│   └── YYYY-MM-DD.md
-└── .abo/                          # ABO 私有数据（gitignore + Obsidian 排除）
+│   └── YYYY-MM-DD.md              # 每日记录（含健康数据）
+├── Meetings/
+│   ├── YYYY-MM-DD-title.md
+│   └── YYYY-MM-DD-title.html      # 生成的网页版汇报
+├── Podcasts/
+│   └── podcast-episode-title.md
+├── Trends/
+│   └── YYYY-MM-DD-trends.md
+└── .abo/                          # ABO 私有元数据（Obsidian 排除）
     ├── config.json
-    ├── game-state.json
-    ├── skill-tree.yaml
+    ├── scheduler.json
     ├── literature.db              # SQLite FTS5
+    ├── health.db
     └── logs/
 ```
 
@@ -90,40 +106,83 @@ ABO/
 
 ```bash
 # 后端（独立运行，无需 Tauri）
-cd abo && python main.py              # FastAPI on :8765
-uvicorn abo.main:app --reload --port 8765
+python -m abo.main                        # FastAPI on :8765
+uvicorn abo.main:app --reload --port 8765 # 热重载模式
 
 # 前端开发
-npm run dev                           # Vite dev server
+npm run dev                               # Vite dev server :1420
 
 # Tauri 完整开发模式
 npm run tauri dev
 
-# 打包
-npm run tauri build                   # PyInstaller sidecar + Tauri bundle
+# 类型检查（提交前必跑）
+npx tsc --noEmit
 
-# CLI 直接调用（调试）
-python -m abo.cli paper import paper.pdf
-python -m abo.cli energy status
-python -m abo.cli skill xp add critical-reading 40
+# 打包
+npm run tauri build
 ```
 
 ---
 
 ## Architecture Principles
 
-1. **CLI 优先**：所有功能先有 Python CLI，GUI 是展示层，脱离 GUI 能独立运行。
-2. **Vault is Source of Truth**：删除 ABO 后 Markdown 数据完好。SQLite 是索引，不是主存储。
-3. **无文件系统抽象层**：直接用 `pathlib`，不封装虚拟路径。
-4. **精力值不锁功能**：仅提示引导，不强制。
-5. **XP 基于行为不基于时间**：鼓励深度质量。
-6. **模块解耦**：FastAPI 路由隔离后端，事件总线解耦前端模块。
-7. **Rust 是退路**：热路径（PDF、向量检索）瓶颈出现后再迁移。
-8. **阶段性开发结束后**，同步到github仓库
+1. **Obsidian is Source of Truth**：所有输出写入 Vault Markdown，ABO 删除后数据完好。
+2. **自动化优先**：能调度的不手动，能后台处理的不阻塞 UI。
+3. **Claude CLI 是唯一 LLM**：不依赖任何远程 API Key，只用本机 `claude` CLI。
+4. **CLI 优先**：所有核心逻辑先实现为 Python 函数/CLI，GUI 是调用层。
+5. **无文件系统抽象层**：直接用 `pathlib`，不封装虚拟路径。
+6. **模块解耦**：FastAPI 路由隔离后端，Zustand + 事件总线解耦前端模块。
+7. **Rust 是退路**：热路径瓶颈出现后再迁移。
+8. **阶段性开发完成后同步推送 GitHub main 分支**。
 
 ---
 
 ## Key Patterns
+
+### Python: Claude CLI Bridge
+
+```python
+# ── 模式 A：流式（WebSocket 推送，Claude 面板实时展示）──
+async def stream_call(prompt: str, ws: WebSocket):
+    process = await asyncio.create_subprocess_exec(
+        "claude", "--print", "--output-format", "stream-json", prompt,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    async for line in process.stdout:
+        await ws.send_text(line.decode())
+    await ws.send_text('{"type":"done"}')
+    await process.wait()
+
+# ── 模式 B：批处理（后端内部调用，返回完整文本）──
+async def batch_call(prompt: str) -> str:
+    proc = await asyncio.create_subprocess_exec(
+        "claude", "--print", prompt,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    return stdout.decode().strip()
+```
+
+| 场景 | 模式 |
+|------|------|
+| Claude 面板（用户可见对话） | 流式 A |
+| ArXiv 摘要 + 相关性评分 | 批处理 B |
+| 组会大纲生成 | 批处理 B |
+| Idea 拆解子任务 | 批处理 B |
+| 播客摘要生成 | 批处理 B |
+| Trend 分析报告 | 批处理 B |
+
+### Python: APScheduler 定时任务
+
+```python
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+scheduler = AsyncIOScheduler()
+scheduler.add_job(run_arxiv_crawl, CronTrigger(hour=6), id="arxiv-daily")
+scheduler.start()
+```
 
 ### Python: Frontmatter 读写
 
@@ -134,40 +193,14 @@ post["digest-level"] = 3
 frontmatter.dump(post, path)
 ```
 
-### Python: Claude CLI Bridge
-
-两种调用模式，共用同一个 subprocess 封装：
+### Python: 原子文件写入
 
 ```python
-# ── 模式 A：流式（WebSocket 推送，AI 面板实时展示）──
-async def run_claude_stream(prompt: str, ws: WebSocket):
-    process = await asyncio.create_subprocess_exec(
-        "claude", "--print", "--output-format", "stream-json", prompt,
-        stdout=asyncio.subprocess.PIPE,
-    )
-    async for line in process.stdout:
-        await ws.send_text(line.decode())
-    await process.wait()
-
-# ── 模式 B：批处理（后端内部调用，返回完整文本）──
-async def run_claude_batch(prompt: str) -> str:
-    proc = await asyncio.create_subprocess_exec(
-        "claude", "--print", prompt,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, _ = await proc.communicate()
-    return stdout.decode().strip()
+def _atomic_write(path: Path, data: str) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(data, encoding="utf-8")
+    os.replace(tmp, path)
 ```
-
-**适用场景**
-
-| 场景 | 模式 |
-|------|------|
-| Claude Code 面板（用户可见对话） | 流式 A |
-| 文献导入时自动生成结构化笔记 | 批处理 B |
-| A+B 撞击生成研究假设 | 批处理 B |
-| AI 问答吃透测试（Lv.3） | 流式 A |
 
 ### Python: Obsidian URI
 
@@ -176,15 +209,12 @@ uri = f"obsidian://open?vault={vault_name}&file={file_path}"
 subprocess.run(["open", uri])
 ```
 
-### TypeScript: Module Interface
+### TypeScript: 后端调用（只走 api.ts）
 
 ```typescript
-interface AboModule {
-  id: string; name: string
-  onEnergyChange?: (current: number, max: number) => void
-  onXPGain?: (skill: string, xp: number) => void
-  onVaultChange?: (changedPath: string) => void
-}
+import { api } from "../core/api";
+const result = await api.get<{ papers: Paper[] }>("/api/literature");
+const updated = await api.post("/api/health/checkin", { sleep: 7.5 });
 ```
 
 ---
@@ -194,11 +224,16 @@ interface AboModule {
 | Phase | Focus | Status |
 |-------|-------|--------|
 | 0 | Tauri 骨架 + FastAPI + Vault 配置 + 侧边栏框架 | `[x]` |
-| 1 | 精力值系统 + 技能树 + 日记/任务 | `[x]` |
-| 2 | 文献引擎 MVP（PDF/DOI 导入、Claude 笔记、FTS 搜索、Lv.0-4） | `[x]` |
+| 1 | 精力值系统 + 技能树 + 日记/任务（旧版） | `[x]` |
+| 2 | 文献引擎 MVP（PDF/DOI 导入、Claude 笔记、FTS） | `[x]` |
 | 3 | Claude Code 面板（WebSocket 流式 + 快捷指令） | `[x]` |
 | 4 | React Flow 思维导图 + A+B 撞击 | `[x]` |
-| 5 | 语义搜索、引用关系图、成就系统、Rust 优化 | `[ ]` |
+| 5 | 移除游戏化 UI，重构为自动化工具框架 | `[ ]` |
+| 6 | ArXiv 追踪器（定时爬取 + Claude 摘要 + 相关性评分） | `[ ]` |
+| 7 | 组会生成器（素材选择 + Claude 大纲 + HTML/PPTX） | `[ ]` |
+| 8 | 健康管理（打卡 + Journal 写入 + D3 趋势图） | `[ ]` |
+| 9 | 播客代听（yt-dlp + faster-whisper + Claude 摘要） | `[ ]` |
+| 10 | Trend 追踪（RSS + GitHub Trending + Claude 分析） | `[ ]` |
 
 ---
 
@@ -209,7 +244,7 @@ interface AboModule {
 ```css
 @import url('https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Crimson+Pro:wght@400;500;600;700&display=swap');
 
-font-family: 'Crimson Pro', Georgia, serif;    /* 标题 heading */
+font-family: 'Crimson Pro', Georgia, serif;       /* 标题 font-heading */
 font-family: 'Atkinson Hyperlegible', sans-serif; /* 正文 body */
 ```
 
@@ -217,88 +252,64 @@ font-family: 'Atkinson Hyperlegible', sans-serif; /* 正文 body */
 
 ```css
 :root {
-  /* ── Light Mode ── */
-  --bg:          #F8FAFC;   /* slate-50 */
+  --bg:          #F8FAFC;
   --surface:     #FFFFFF;
-  --surface-2:   #F1F5F9;   /* slate-100 */
-  --border:      #E2E8F0;   /* slate-200 */
-  --text:        #1E293B;   /* slate-800 */
-  --text-muted:  #475569;   /* slate-600 (min for contrast) */
-  --primary:     #6366F1;   /* indigo-500 */
-  --primary-dim: #818CF8;   /* indigo-400 */
-  --cta:         #10B981;   /* emerald-500 */
-  --xp:          #F59E0B;   /* amber (XP/成就) */
+  --surface-2:   #F1F5F9;
+  --border:      #E2E8F0;
+  --text:        #1E293B;
+  --text-muted:  #475569;
+  --primary:     #6366F1;
+  --primary-dim: #818CF8;
+  --cta:         #10B981;
   --danger:      #EF4444;
-
-  /* ── Dark Mode (OLED) ── */
-  --bg-dark:          #020617;   /* slate-950 */
-  --surface-dark:     #0F172A;   /* slate-900 */
-  --surface-2-dark:   #1E293B;   /* slate-800 */
-  --border-dark:      #334155;   /* slate-700 */
-  --text-dark:        #F8FAFC;
-  --text-muted-dark:  #94A3B8;   /* slate-400 */
-  --primary-dark:     #818CF8;   /* brighter on dark bg */
-  --cta-dark:         #22C55E;   /* green-500 */
-  --xp-dark:          #FBBF24;   /* amber-400 */
+}
+.dark {
+  --bg:          #020617;
+  --surface:     #0F172A;
+  --surface-2:   #1E293B;
+  --border:      #334155;
+  --text:        #F8FAFC;
+  --text-muted:  #94A3B8;
+  --primary:     #818CF8;
+  --cta:         #22C55E;
 }
 ```
 
-### Tailwind Dark Mode Setup
+### Tailwind Dark Mode
 
 ```ts
 // tailwind.config.ts
-export default {
-  darkMode: 'class',   // 切换 <html class="dark">
-  // ...
-}
+export default { darkMode: 'class' }
 ```
 
-Toggle via: `document.documentElement.classList.toggle('dark')`
+Toggle: `document.documentElement.classList.toggle('dark')`
 
 ### Component Conventions
 
 | Context | Light | Dark |
 |---------|-------|------|
 | Card background | `bg-white border border-slate-200` | `bg-slate-900 border border-slate-700` |
-| Sidebar bg | `bg-slate-50` | `bg-slate-950` |
+| Sidebar bg | `bg-slate-900` (always dark) | — |
 | Body text | `text-slate-800` | `text-slate-100` |
 | Muted text | `text-slate-600` | `text-slate-400` |
-| Progress bar (精力) | `bg-indigo-500` | `bg-indigo-400` |
-| Progress bar (XP) | `bg-amber-500` | `bg-amber-400` |
-| Skill locked | `text-slate-400 opacity-50` | `text-slate-600 opacity-40` |
-| Glass panel | `bg-white/80 backdrop-blur-sm` | `bg-slate-900/80 backdrop-blur-sm` |
 
 ### Interaction Standards
 
-- All clickable elements: `cursor-pointer`
-- Transitions: `transition-colors duration-150` (hover) / `duration-300` (panel open/close)
-- Micro-interactions: 150–300ms, use `transform` + `opacity` only
-- Skeleton loading for async content (reserve space to avoid layout jump)
-- Respect `prefers-reduced-motion`: wrap animations in `@media (prefers-reduced-motion: no-preference)`
-
-### Gamification UI Patterns
-
-```
-精力值 Progress Bar:
-  High (80-100): bg-emerald-500  → "高效模式"
-  Normal (50-79): bg-indigo-500  → "正常模式"
-  Low (20-49): bg-amber-500      → 侧边栏高亮提示
-  Critical (<20): bg-red-500     → 弹出温和提醒
-
-XP 经验条: amber/yellow 系
-技能树节点: 已解锁 = 亮色 + 进度环 | 未解锁 = 灰色 + 锁图标
-成就 Toast: 右下角，dark:bg-slate-800，light:bg-white，持续 3s
-```
+- 所有可点击元素：`cursor-pointer`
+- Hover 过渡：`transition-colors duration-150`
+- 微交互：150–300ms，仅用 `transform` + `opacity`
+- 异步内容用 Skeleton loading（预留空间，防布局跳动）
+- 尊重 `prefers-reduced-motion`
 
 ### Icon Rule
 
-使用 SVG 图标（Lucide React 或 Heroicons），**禁止用 emoji 作为 UI 图标**。
+使用 SVG 图标（Lucide React），**禁止用 emoji 作为 UI 图标**。
 
 ### Accessibility Checklist
 
 - [ ] 文字对比度 ≥ 4.5:1（light mode: text-slate-600 最低）
-- [ ] 所有表单 input 有 label
-- [ ] 可交互元素有 focus ring（`focus-visible:ring-2 ring-indigo-500`）
+- [ ] 所有表单 input 有 label 或 aria-label
+- [ ] 可交互元素有 focus ring：`focus-visible:ring-2 focus-visible:ring-indigo-400`
 - [ ] Tab 顺序与视觉顺序一致
 - [ ] 图标按钮有 `aria-label`
 
@@ -309,20 +320,23 @@ XP 经验条: amber/yellow 系
 ### Python
 
 ```
-fastapi uvicorn python-frontmatter pypdf pdfminer.six
-httpx sqlite3(builtin) watchdog sentence-transformers(phase5)
+fastapi>=0.115  uvicorn[standard]>=0.34
+python-frontmatter>=1.1  pypdf>=5.0  pdfminer.six>=20231228
+httpx>=0.28  feedparser  apscheduler
+yt-dlp  faster-whisper  python-pptx  jinja2
+pyyaml  sqlite3(builtin)
 # 无 Ollama 依赖：所有 LLM 调用走本机 claude CLI subprocess
 ```
 
 ### Frontend
 
 ```
-react typescript zustand react-flow d3 tailwindcss
-gray-matter lucide-react
+react  typescript  zustand  @xyflow/react  d3
+tailwindcss  lucide-react  react-markdown  remark-gfm
 ```
 
 ### Build
 
 ```
-tauri@2.x pyinstaller
+tauri@2.x  pyinstaller
 ```
