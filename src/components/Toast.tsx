@@ -1,27 +1,15 @@
 import { useEffect } from "react";
-import { Zap, Trophy, Star, Info, AlertCircle, X } from "lucide-react";
+import { CheckCircle2, Info, AlertCircle, X } from "lucide-react";
 import { useStore, Toast } from "../core/store";
 
 // ── Individual toast ──────────────────────────────────────────────────────────
 
 const KIND_CONFIG = {
-  xp: {
-    icon: Zap,
-    bg: "bg-amber-50 dark:bg-amber-900/30 border-amber-200 dark:border-amber-700/50",
-    icon_color: "text-amber-500 dark:text-amber-400",
-    icon_bg: "bg-amber-100 dark:bg-amber-900/50",
-  },
-  achievement: {
-    icon: Trophy,
-    bg: "bg-violet-50 dark:bg-violet-900/30 border-violet-200 dark:border-violet-700/50",
-    icon_color: "text-violet-500 dark:text-violet-400",
-    icon_bg: "bg-violet-100 dark:bg-violet-900/50",
-  },
-  level_up: {
-    icon: Star,
-    bg: "bg-indigo-50 dark:bg-indigo-900/30 border-indigo-200 dark:border-indigo-700/50",
-    icon_color: "text-indigo-500 dark:text-indigo-400",
-    icon_bg: "bg-indigo-100 dark:bg-indigo-900/50",
+  success: {
+    icon: CheckCircle2,
+    bg: "bg-emerald-50 dark:bg-emerald-900/30 border-emerald-200 dark:border-emerald-700/50",
+    icon_color: "text-emerald-500 dark:text-emerald-400",
+    icon_bg: "bg-emerald-100 dark:bg-emerald-900/50",
   },
   info: {
     icon: Info,
@@ -94,18 +82,14 @@ export default function ToastContainer() {
   );
 }
 
-// ── Helper hooks ──────────────────────────────────────────────────────────────
+// ── Helper hook ───────────────────────────────────────────────────────────────
 
 export function useToast() {
   const addToast = useStore((s) => s.addToast);
 
   return {
-    xp: (skillName: string, amount: number) =>
-      addToast({ kind: "xp", title: `+${amount} XP`, subtitle: skillName }),
-    achievement: (name: string, desc: string) =>
-      addToast({ kind: "achievement", title: `成就解锁：${name}`, subtitle: desc, duration: 5000 }),
-    levelUp: (level: number, title: string) =>
-      addToast({ kind: "level_up", title: `升级！Lv.${level} ${title}`, subtitle: "恭喜你！", duration: 5000 }),
+    success: (title: string, subtitle?: string) =>
+      addToast({ kind: "success", title, subtitle }),
     info: (title: string, subtitle?: string) =>
       addToast({ kind: "info", title, subtitle }),
     error: (title: string, subtitle?: string) =>

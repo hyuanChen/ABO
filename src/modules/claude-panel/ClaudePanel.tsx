@@ -273,9 +273,7 @@ function WelcomeHero({
   connected: boolean;
   onSend: (text: string) => void;
 }) {
-  const gameState = useStore((s) => s.gameState);
-  const level = gameState?.level ?? 1;
-  const title = gameState?.title ?? "初入江湖";
+  const config = useStore((s) => s.config);
 
   return (
     <div className="flex flex-col items-center justify-center h-full gap-6 px-6 py-8 text-center">
@@ -288,7 +286,7 @@ function WelcomeHero({
           <h2 className="font-heading text-2xl font-bold text-slate-800 dark:text-slate-100">Claude 科研助手</h2>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
             {connected
-              ? `Lv.${level} ${title} · 本地 Claude CLI 已连接`
+              ? `${config?.vault_path ? "Vault 已连接" : ""} · 本地 Claude CLI 已连接`
               : "正在连接本地 Claude CLI…"}
           </p>
         </div>

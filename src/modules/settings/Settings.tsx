@@ -129,12 +129,10 @@ export default function Settings() {
             <Section title="键盘快捷键">
               <div className="py-4 grid grid-cols-1 gap-2.5">
                 {[
-                  { label: "今日总览",  shortcut: "⌘1" },
-                  { label: "文献库",    shortcut: "⌘2" },
-                  { label: "技能树",    shortcut: "⌘3" },
-                  { label: "思维导图",  shortcut: "⌘4" },
-                  { label: "Claude",    shortcut: "⌘5" },
-                  { label: "设置",      shortcut: "⌘6" },
+                  { label: "今日",     shortcut: "⌘1" },
+                  { label: "文献库",   shortcut: "⌘2" },
+                  { label: "Idea工坊", shortcut: "⌘3" },
+                  { label: "Claude",   shortcut: "⌘4" },
                 ].map(({ label, shortcut }) => (
                   <div key={label} className="flex items-center justify-between text-sm">
                     <span className="text-slate-600 dark:text-slate-400">{label}</span>
@@ -156,7 +154,7 @@ export default function Settings() {
                 {config?.vault_path ?? "未配置"}
               </code>
               <p className="text-xs text-slate-400 dark:text-slate-500 mt-3 leading-relaxed">
-                Vault 包含所有文献笔记、日记、思维导图以及 ABO 游戏数据（<code className="font-mono text-xs">.abo/</code> 目录）。
+                Vault 包含所有文献笔记、日记、Idea 画布以及 ABO 元数据（<code className="font-mono text-xs">.abo/</code> 目录）。
                 重置 Vault 路径需重启应用。
               </p>
             </div>
@@ -172,14 +170,14 @@ export default function Settings() {
               <h2 className="font-heading text-xl font-bold text-slate-800 dark:text-slate-100">ABO</h2>
               <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Academic Buddy OS</p>
               <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
-                Version 0.1.0 · Phase 4
+                Version 0.5.0 · Phase 5
               </p>
             </div>
             <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed">
-              把科研生活变成一场 RPG。本地 Mac 程序，基于 Tauri + React + FastAPI 构建。
+              Obsidian 驱动的研究自动化伴侣。本地 Mac 程序，基于 Tauri + React + FastAPI 构建。
             </p>
             <div className="flex flex-col gap-2 text-xs text-slate-400 dark:text-slate-500">
-              <p>Tauri 2.x · React 19 · FastAPI · Tailwind CSS v4</p>
+              <p>Tauri 2.x · React 19 · FastAPI · APScheduler · Tailwind CSS v4</p>
               <p>LLM: Claude Code CLI (subprocess)</p>
             </div>
           </div>

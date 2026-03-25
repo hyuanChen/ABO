@@ -1,21 +1,10 @@
 import { useEffect, useState } from "react";
 import {
-  Zap, CheckSquare, Square, Trophy, TrendingUp,
-  Plus, X, Trash2, Coffee, Dumbbell, Brain, Moon as MoonIcon, Bed,
-  BarChart3, BookOpen, Flame, PenLine,
+  CheckSquare, Square, Plus, X, Trash2,
+  PenLine, Rss, Heart, TrendingUp, Clock,
 } from "lucide-react";
 import { api } from "../../core/api";
-import { useStore, GameState, Task } from "../../core/store";
-import { useToast } from "../../components/Toast";
-
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-function energyMeta(pct: number) {
-  if (pct >= 80) return { bar: "bg-emerald-500", badge: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300", label: "高效模式 ×1.5 XP" };
-  if (pct >= 50) return { bar: "bg-indigo-500",  badge: "bg-indigo-500/15  text-indigo-600  dark:text-indigo-300",  label: "正常模式 ×1.0 XP" };
-  if (pct >= 20) return { bar: "bg-amber-500",   badge: "bg-amber-500/15   text-amber-600   dark:text-amber-300",   label: "疲惫模式 ×0.7 XP" };
-  return            { bar: "bg-red-500",     badge: "bg-red-500/15     text-red-600     dark:text-red-300",     label: "耗尽状态 ×0.5 XP" };
-}
+import { useStore, Task } from "../../core/store";
 
 function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
@@ -38,22 +27,37 @@ function SectionLabel({ icon, children }: { icon: React.ReactNode; children: Rea
   );
 }
 
-// ── Energy recovery buttons ───────────────────────────────────────────────────
-
-const RECOVERY_ACTIONS = [
-  { type: "rest",       label: "午休",  delta: "+20", Icon: MoonIcon,  color: "text-indigo-500 dark:text-indigo-400" },
-  { type: "exercise",   label: "运动",  delta: "+25", Icon: Dumbbell,  color: "text-emerald-500 dark:text-emerald-400" },
-  { type: "meditation", label: "冥想",  delta: "+15", Icon: Brain,     color: "text-violet-500 dark:text-violet-400" },
-  { type: "coffee",     label: "咖啡",  delta: "+15", Icon: Coffee,    color: "text-amber-500 dark:text-amber-400" },
-  { type: "sleep",      label: "睡眠",  delta: "满",  Icon: Bed,       color: "text-slate-500 dark:text-slate-400" },
-] as const;
-
-// ── Main component ────────────────────────────────────────────────────────────
+function ComingSoonCard({
+  icon,
+  label,
+  description,
+  phase,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  description: string;
+  phase: string;
+}) {
+  return (
+    <Card className="flex items-start gap-4 opacity-70">
+      <div className="w-10 h-10 rounded-xl bg-slate-100 dark:bg-slate-700/60 flex items-center justify-center shrink-0">
+        {icon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 mb-1">
+          <p className="text-sm font-medium text-slate-700 dark:text-slate-300">{label}</p>
+          <span className="text-xs px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700 text-slate-400 dark:text-slate-500">
+            {phase}
+          </span>
+        </div>
+        <p className="text-xs text-slate-400 dark:text-slate-500 leading-relaxed">{description}</p>
+      </div>
+    </Card>
+  );
+}
 
 export default function Overview() {
-  const { gameState, tasks, setGameState, setTasks } = useStore();
-  const toast = useToast();
-  const [energyLoading, setEnergyLoading] = useState<string | null>(null);
+  const { tasks, setTasks } = useStore();
   const [newTask, setNewTask] = useState("");
   const [addingTask, setAddingTask] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -61,56 +65,15 @@ export default function Overview() {
   const [journalSaving, setJournalSaving] = useState(false);
   const [journalDate, setJournalDate] = useState("");
 
-  const gs: GameState = gameState ?? {
-    energy: { current: 100, max: 100, lastUpdated: "", log: [] },
-    skills: {},
-    achievements: [],
-    level: 1,
-    title: "初入江湖",
-    total_xp: 0,
-    stats: {
-      tasks_completed_total: 0,
-      papers_imported: 0,
-      papers_digested_lv2_plus: 0,
-      ab_collisions: 0,
-      claude_sessions: 0,
-      active_days: [],
-      monthly_tasks: {},
-    },
-  };
-
-  const energyPct = Math.min(100, Math.round((gs.energy.current / gs.energy.max) * 100));
-  const em = energyMeta(energyPct);
-
-  // Fetch tasks on mount
   useEffect(() => {
     api.get<{ tasks: Task[] }>("/api/tasks/today").then((r) => setTasks(r.tasks)).catch(() => {});
   }, [setTasks]);
 
-  // Refresh game state on window focus (keeps energy current if user interacted via CLI)
-  useEffect(() => {
-    function onFocus() {
-      api.get<GameState>("/api/game/state").then(setGameState).catch(() => {});
-    }
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [setGameState]);
-
-  // Load today's journal
   useEffect(() => {
     api.get<{ date: string; content: string }>("/api/journal/today")
       .then((r) => { setJournalContent(r.content); setJournalDate(r.date); })
       .catch(() => {});
   }, []);
-
-  async function logEnergy(eventType: string) {
-    setEnergyLoading(eventType);
-    try {
-      const updated = await api.post<GameState>("/api/energy/log", { event_type: eventType });
-      setGameState(updated);
-    } catch { /* ignore */ }
-    finally { setEnergyLoading(null); }
-  }
 
   async function handleAddTask(e: React.FormEvent) {
     e.preventDefault();
@@ -127,33 +90,9 @@ export default function Overview() {
 
   async function handleComplete(taskId: string) {
     try {
-      const result = await api.patch<{
-        xp_awarded?: number;
-        skill?: string | null;
-        level_info?: { leveled_up: boolean; new_level: number; new_title: string };
-        new_achievements?: Array<{ id: string; name: string; desc: string }>;
-      }>(`/api/tasks/${taskId}/complete`, {});
-
-      // Fire XP toast
-      if (result.xp_awarded && result.xp_awarded > 0) {
-        toast.xp(result.skill ?? "通用技能", result.xp_awarded);
-      }
-      // Fire level-up toast
-      if (result.level_info?.leveled_up) {
-        toast.levelUp(result.level_info.new_level, result.level_info.new_title);
-      }
-      // Fire achievement toasts
-      for (const ach of result.new_achievements ?? []) {
-        toast.achievement(ach.name, ach.desc);
-      }
-
-      // Refresh tasks and game state
-      const [tasksRes, stateRes] = await Promise.all([
-        api.get<{ tasks: Task[] }>("/api/tasks/today"),
-        api.get<GameState>("/api/game/state"),
-      ]);
-      setTasks(tasksRes.tasks);
-      setGameState(stateRes);
+      await api.patch(`/api/tasks/${taskId}/complete`, {});
+      const { tasks: updated } = await api.get<{ tasks: Task[] }>("/api/tasks/today");
+      setTasks(updated);
     } catch { /* ignore */ }
   }
 
@@ -172,83 +111,23 @@ export default function Overview() {
     finally { setJournalSaving(false); }
   }
 
+  const today = new Date().toLocaleDateString("zh-CN", {
+    year: "numeric", month: "long", day: "numeric", weekday: "long",
+  });
   const doneTasks = tasks.filter((t) => t.done).length;
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="max-w-3xl mx-auto px-6 py-6">
-        {/* Page header */}
+        {/* Header */}
         <div className="mb-6">
-          <h2 className="font-heading text-2xl text-slate-800 dark:text-slate-100">今日总览</h2>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-            Lv.{gs.level} · {gs.title}
-          </p>
+          <h2 className="font-heading text-2xl text-slate-800 dark:text-slate-100">今日</h2>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">{today}</p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="flex flex-col gap-4">
 
-          {/* ── Energy ───────────────────────────────────────────── */}
-          <Card className="md:col-span-2">
-            <SectionLabel icon={<Zap className="w-4 h-4 text-amber-500" />}>精力值</SectionLabel>
-
-            <div className="flex items-end gap-3 mb-3">
-              <span className="font-heading text-4xl font-bold text-slate-800 dark:text-slate-100 leading-none">
-                {gs.energy.current}
-              </span>
-              <span className="text-slate-400 text-lg mb-0.5">/ {gs.energy.max}</span>
-              <span className={`ml-auto text-xs px-2.5 py-1 rounded-full font-medium ${em.badge}`}>
-                {em.label}
-              </span>
-            </div>
-
-            <div className="h-3 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden mb-4">
-              <div
-                className={`h-full rounded-full transition-all duration-500 ${em.bar}`}
-                style={{ width: `${energyPct}%` }}
-                role="progressbar" aria-valuenow={gs.energy.current}
-                aria-valuemin={0} aria-valuemax={gs.energy.max} aria-label="精力值"
-              />
-            </div>
-
-            {/* Recovery buttons */}
-            <div className="flex flex-wrap gap-2">
-              {RECOVERY_ACTIONS.map(({ type, label, delta, Icon, color }) => (
-                <button
-                  key={type}
-                  onClick={() => logEnergy(type)}
-                  disabled={energyLoading !== null}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-50 dark:bg-slate-700/50 border border-slate-200 dark:border-slate-600/50 text-sm text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-500 hover:bg-white dark:hover:bg-slate-700 transition-all duration-150 cursor-pointer disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-indigo-500"
-                >
-                  {energyLoading === type
-                    ? <span className="w-3.5 h-3.5 rounded-full border border-current border-t-transparent animate-spin" />
-                    : <Icon className={`w-3.5 h-3.5 ${color}`} aria-hidden />
-                  }
-                  {label}
-                  <span className="text-xs text-slate-400 dark:text-slate-500 ml-0.5">{delta}</span>
-                </button>
-              ))}
-            </div>
-
-            {/* Recent energy log */}
-            {gs.energy.log.length > 0 && (
-              <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-700/50">
-                <p className="text-xs text-slate-400 dark:text-slate-500 mb-2">最近记录</p>
-                <div className="flex flex-wrap gap-x-4 gap-y-1">
-                  {gs.energy.log.slice(-5).reverse().map((entry, i) => (
-                    <span key={i} className="text-xs text-slate-500 dark:text-slate-400">
-                      {entry.time}&nbsp;
-                      <span className={entry.delta >= 0 ? "text-emerald-500" : "text-red-400"}>
-                        {entry.delta >= 0 ? "+" : ""}{entry.delta}
-                      </span>
-                      &nbsp;{entry.reason}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-          </Card>
-
-          {/* ── Tasks ─────────────────────────────────────────────── */}
+          {/* ── Tasks ──────────────────────────────────────────── */}
           <Card>
             <SectionLabel icon={<CheckSquare className="w-4 h-4 text-indigo-500" />}>今日任务</SectionLabel>
 
@@ -272,9 +151,6 @@ export default function Overview() {
                   <span className={`flex-1 text-sm ${t.done ? "line-through text-slate-400 dark:text-slate-600" : "text-slate-700 dark:text-slate-300"}`}>
                     {t.label}
                   </span>
-                  {!t.done && (
-                    <span className="text-xs text-amber-500 dark:text-amber-400 shrink-0">{t.xp} XP</span>
-                  )}
                   <button
                     onClick={() => handleDelete(t.id)}
                     aria-label="删除任务"
@@ -286,7 +162,6 @@ export default function Overview() {
               ))}
             </ul>
 
-            {/* Add task form */}
             {showAddForm ? (
               <form onSubmit={handleAddTask} className="flex gap-2 mt-1">
                 <input
@@ -318,14 +193,8 @@ export default function Overview() {
             </div>
           </Card>
 
-          {/* ── Skill progress snapshot ───────────────────────────── */}
+          {/* ── Journal ────────────────────────────────────────── */}
           <Card>
-            <SectionLabel icon={<TrendingUp className="w-4 h-4 text-violet-500" />}>技能快照</SectionLabel>
-            <SkillSnapshot />
-          </Card>
-
-          {/* ── Journal quick-entry ────────────────────────────────── */}
-          <Card className="md:col-span-2">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-xl bg-slate-100 dark:bg-slate-700/60 flex items-center justify-center">
@@ -356,90 +225,38 @@ export default function Overview() {
             </div>
           </Card>
 
-          {/* ── Achievements ──────────────────────────────────────── */}
-          <Card className="md:col-span-2">
-            <SectionLabel icon={<Trophy className="w-4 h-4 text-amber-500" />}>已解锁成就</SectionLabel>
-            {gs.achievements.length === 0 ? (
-              <p className="text-sm text-slate-400 dark:text-slate-500">完成任务和文献阅读以解锁成就</p>
-            ) : (
-              <div className="flex gap-3 flex-wrap">
-                {gs.achievements.map((badge) => (
-                  <div key={badge} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-100 dark:border-amber-800/40">
-                    <Trophy className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400" aria-hidden />
-                    <span className="text-sm font-medium text-amber-700 dark:text-amber-300">{badge}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
+          {/* ── Upcoming automation features ───────────────────── */}
+          <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 dark:text-slate-500 px-1 pt-2">
+            即将推出
+          </p>
 
-          {/* ── Stats ─────────────────────────────────────────────── */}
-          <Card className="md:col-span-2">
-            <SectionLabel icon={<BarChart3 className="w-4 h-4 text-indigo-500" />}>累计统计</SectionLabel>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              {[
-                { label: "任务完成", value: gs.stats?.tasks_completed_total ?? 0, Icon: CheckSquare, color: "text-emerald-500" },
-                { label: "文献导入", value: gs.stats?.papers_imported ?? 0, Icon: BookOpen, color: "text-indigo-500" },
-                { label: "A+B 撞击", value: gs.stats?.ab_collisions ?? 0, Icon: Flame, color: "text-amber-500" },
-                { label: "Claude 会话", value: gs.stats?.claude_sessions ?? 0, Icon: TrendingUp, color: "text-violet-500" },
-              ].map(({ label, value, Icon, color }) => (
-                <div key={label} className="flex flex-col items-center gap-1.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-700/40">
-                  <Icon className={`w-5 h-5 ${color}`} aria-hidden />
-                  <span className="font-heading text-2xl font-bold text-slate-800 dark:text-slate-100">{value}</span>
-                  <span className="text-xs text-slate-400 dark:text-slate-500">{label}</span>
-                </div>
-              ))}
-            </div>
-            <div className="mt-3 pt-3 border-t border-slate-100 dark:border-slate-700/50 flex items-center gap-3 text-sm text-slate-500 dark:text-slate-400">
-              <span>活跃天数：{gs.stats?.active_days?.length ?? 0} 天</span>
-              <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-slate-600" />
-              <span>总 XP：{gs.total_xp ?? 0}</span>
-              <span className="w-1 h-1 rounded-full bg-slate-300 dark:bg-slate-600" />
-              <span>Lv.{gs.level} {gs.title}</span>
-            </div>
-          </Card>
+          <ComingSoonCard
+            icon={<Rss className="w-5 h-5 text-orange-500" />}
+            label="ArXiv 每日推送"
+            description="订阅关键词，每天自动爬取新论文并生成相关性评分和摘要，写入 Literature/ 目录。"
+            phase="Phase 6"
+          />
+          <ComingSoonCard
+            icon={<TrendingUp className="w-5 h-5 text-violet-500" />}
+            label="趋势摘要"
+            description="聚合 RSS / GitHub Trending 等来源，每日生成领域动态摘要，写入 Trends/ 目录。"
+            phase="Phase 10"
+          />
+          <ComingSoonCard
+            icon={<Heart className="w-5 h-5 text-rose-500" />}
+            label="健康快速打卡"
+            description="记录睡眠、运动、专注时段和心情，自动写入每日 Journal 并生成周趋势图。"
+            phase="Phase 8"
+          />
+          <ComingSoonCard
+            icon={<Clock className="w-5 h-5 text-indigo-500" />}
+            label="调度中心"
+            description="查看所有自动化任务的运行状态、下次执行时间和历史日志。"
+            phase="Phase 6+"
+          />
 
         </div>
       </div>
     </div>
-  );
-}
-
-function SkillSnapshot() {
-  const skills = useStore((s) => s.skills);
-  const setSkills = useStore((s) => s.setSkills);
-
-  useEffect(() => {
-    api.get<{ skills: import("../../core/store").SkillDef[] }>("/api/skills")
-      .then((r) => setSkills(r.skills))
-      .catch(() => {});
-  }, [setSkills]);
-
-  const unlocked = skills.filter((s) => s.unlocked).slice(0, 4);
-  if (unlocked.length === 0) {
-    return <p className="text-sm text-slate-400 dark:text-slate-500">前往技能树查看详情</p>;
-  }
-
-  return (
-    <ul className="flex flex-col gap-4">
-      {unlocked.map((sk) => {
-        const pct = Math.round((sk.xp_in_level / sk.xp_for_next) * 100);
-        return (
-          <li key={sk.id}>
-            <div className="flex justify-between text-sm mb-1.5">
-              <span className="text-slate-700 dark:text-slate-300 font-medium">{sk.name}</span>
-              <span className="text-xs text-slate-400">Lv.{sk.level}</span>
-            </div>
-            <div className="h-1.5 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
-              <div className="h-full rounded-full bg-amber-500 dark:bg-amber-400 transition-all duration-500"
-                style={{ width: `${pct}%` }}
-                role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}
-                aria-label={`${sk.name} Lv.${sk.level} 进度`}
-              />
-            </div>
-          </li>
-        );
-      })}
-    </ul>
   );
 }

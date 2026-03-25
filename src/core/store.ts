@@ -1,44 +1,5 @@
 import { create } from "zustand";
 
-export interface EnergyState {
-  current: number;
-  max: number;
-  lastUpdated: string;
-  log: Array<{ time: string; delta: number; reason: string }>;
-}
-
-export interface GameState {
-  energy: EnergyState;
-  skills: Record<string, { xp: number; unlocked: boolean }>;
-  achievements: string[];
-  level: number;
-  title: string;
-  total_xp: number;
-  stats: {
-    tasks_completed_total: number;
-    papers_imported: number;
-    papers_digested_lv2_plus: number;
-    ab_collisions: number;
-    claude_sessions: number;
-    active_days: string[];
-    monthly_tasks: Record<string, number>;
-  };
-}
-
-export interface SkillDef {
-  id: string;
-  name: string;
-  category: string;
-  max_level: number;
-  level: number;
-  xp_total: number;
-  xp_in_level: number;
-  xp_for_next: number;
-  unlocked: boolean;
-  unlocks: string[];
-  unlock_condition: Record<string, number> | null;
-}
-
 export interface Task {
   id: string;
   label: string;
@@ -54,7 +15,7 @@ export interface AboConfig {
 
 // ── Toast system ──────────────────────────────────────────────────────────────
 
-export type ToastKind = "xp" | "achievement" | "level_up" | "info" | "error";
+export type ToastKind = "info" | "error" | "success";
 
 export interface Toast {
   id: string;
@@ -64,20 +25,26 @@ export interface Toast {
   duration?: number; // ms, default 3500
 }
 
-export type ActiveTab = "overview" | "literature" | "mindmap" | "claude" | "skilltree" | "settings";
+export type ActiveTab =
+  | "overview"
+  | "literature"
+  | "arxiv"
+  | "meeting"
+  | "ideas"
+  | "health"
+  | "podcast"
+  | "trends"
+  | "claude"
+  | "settings";
 
 interface AboStore {
   config: AboConfig | null;
-  gameState: GameState | null;
-  skills: SkillDef[];
   tasks: Task[];
   activeTab: ActiveTab;
   darkMode: boolean;
   toasts: Toast[];
 
   setConfig: (c: AboConfig) => void;
-  setGameState: (g: GameState) => void;
-  setSkills: (s: SkillDef[]) => void;
   setTasks: (t: Task[]) => void;
   setActiveTab: (t: ActiveTab) => void;
   toggleDarkMode: () => void;
@@ -87,16 +54,12 @@ interface AboStore {
 
 export const useStore = create<AboStore>((set) => ({
   config: null,
-  gameState: null,
-  skills: [],
   tasks: [],
   activeTab: "overview",
   darkMode: false,
   toasts: [],
 
   setConfig: (config) => set({ config }),
-  setGameState: (gameState) => set({ gameState }),
-  setSkills: (skills) => set({ skills }),
   setTasks: (tasks) => set({ tasks }),
   setActiveTab: (activeTab) => set({ activeTab }),
   toggleDarkMode: () =>

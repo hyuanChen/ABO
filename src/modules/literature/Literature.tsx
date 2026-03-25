@@ -203,7 +203,7 @@ function PaperDetail({
       onDigestUp(paperId, note.digest_level + 1);
       setNote((n) => (n ? { ...n, digest_level: n.digest_level + 1 } : n));
       if (r.xp_awarded && r.xp_awarded > 0) {
-        toast.xp("批判性阅读", r.xp_awarded);
+        toast.success("Digest 升级", `批判性阅读 +${r.xp_awarded} XP`);
       }
     } catch {
       /* ignore */
@@ -389,7 +389,7 @@ function PaperRow({
       );
       onDigestUp(paper.paper_id, paper.digest_level + 1);
       if (r.xp_awarded && r.xp_awarded > 0) {
-        toast.xp("批判性阅读", r.xp_awarded);
+        toast.success("Digest 升级", `批判性阅读 +${r.xp_awarded} XP`);
       }
     } catch { /* ignore */ }
     finally { setUpgrading(false); }

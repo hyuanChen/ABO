@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import { api } from "./core/api";
-import { useStore, AboConfig, GameState } from "./core/store";
+import { useStore, AboConfig } from "./core/store";
 import SetupWizard from "./components/SetupWizard";
 import NavSidebar from "./modules/nav/NavSidebar";
 import MainContent from "./modules/MainContent";
 import ToastContainer from "./components/Toast";
 
 export default function App() {
-  const { config, setConfig, setGameState, darkMode } = useStore();
+  const { config, setConfig, darkMode } = useStore();
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -20,8 +20,6 @@ export default function App() {
         const cfg = await api.get<AboConfig>("/api/config");
         if (cfg.is_configured) {
           setConfig(cfg);
-          const gs = await api.get<GameState>("/api/game/state");
-          setGameState(gs);
         }
       } catch {
         // Backend not reachable yet — show setup
@@ -29,7 +27,7 @@ export default function App() {
         setLoading(false);
       }
     })();
-  }, [setConfig, setGameState]);
+  }, [setConfig]);
 
   if (loading) {
     return (
