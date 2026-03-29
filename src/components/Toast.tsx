@@ -2,6 +2,15 @@ import { useEffect } from "react";
 import { X, CheckCircle, AlertCircle, Info } from "lucide-react";
 import { useStore, ToastKind } from "../core/store";
 
+export function useToast() {
+  const addToast = useStore((s) => s.addToast);
+  return {
+    success: (title: string, message?: string) => addToast({ kind: "success", title, message }),
+    error: (title: string, message?: string) => addToast({ kind: "error", title, message }),
+    info: (title: string, message?: string) => addToast({ kind: "info", title, message }),
+  };
+}
+
 const ICONS: Record<ToastKind, React.FC<{ className?: string }>> = {
   success: CheckCircle,
   error: AlertCircle,

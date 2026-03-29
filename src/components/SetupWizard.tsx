@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api } from "../core/api";
-import { useStore, AboConfig } from "../core/store";
+import { useStore, AppConfig } from "../core/store";
 import { BookOpen } from "lucide-react";
 
 export default function SetupWizard() {
@@ -15,7 +15,7 @@ export default function SetupWizard() {
     setLoading(true);
     setError("");
     try {
-      const config = await api.post<AboConfig>("/api/config", {
+      const config = await api.post<AppConfig>("/api/config", {
         vault_path: path.trim(),
       });
       setConfig(config);
