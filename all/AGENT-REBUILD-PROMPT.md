@@ -7,7 +7,7 @@
 
 ## 你的任务
 
-你是一个负责从零重新构建 **ABO（Academic Buddy OS）** 的开发 Agent。
+你是一个负责从零重新构建 **ABO（Agent Boost OS）** 的开发 Agent。
 工作目录：`/Users/huanc/Desktop/ABO/`（直接在此目录操作，禁止使用 git worktree）。
 
 完整需求和架构设计已写在：
