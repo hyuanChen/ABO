@@ -65,18 +65,21 @@ export type ActiveTab =
 
 ## 3. Profile Tab 页面结构
 
-从上到下三个区块：
+从上到下四个区块：
 
 ```
 ┌───────────────────────────────────────────────┐
 │  A. 角色卡（Role Card）                         │
 │     像素小人 | 身份信息 | 座右铭                 │
 ├───────────────────────────────────────────────┤
-│  B. 六边形雷达图（HexagonRadar）                 │
-│     研究力 / 产出力 / 健康力 / 学习力 / SAN / 幸福 │
+│  B. 今日待办（DailyTodo）                       │
+│     任务列表 → 完成率 → 精力修正分               │
 ├───────────────────────────────────────────────┤
-│  C. 技能节点 + 成就徽章                          │
-│     六维里程碑节点蜂窝 + 稀有徽章横向滚动           │
+│  C. 六边形雷达图（HexagonRadar）                 │
+│     JoJo 面板风格，E→A 字母评级                  │
+├───────────────────────────────────────────────┤
+│  D. 技能节点 + 成就徽章                          │
+│     六维里程碑进度节点 + 稀有徽章横向滚动           │
 └───────────────────────────────────────────────┘
 ```
 
@@ -144,20 +147,34 @@ async def generate_daily_motto(profile, last_7_days_summary, today_todos, energy
 
 **SVG 绘制，六顶点，填充区带渐变透明度，D3 optional（可纯 SVG 计算）。**
 
+### JoJo 替身面板评级系统
+
+每个维度在雷达图顶点外侧显示字母评级，风格致敬 JoJo 替身能力面板：
+
+| 评级 | 分数范围 | 含义 |
+|------|---------|------|
+| **E** | 0–19 | 初始状态 |
+| **D** | 20–39 | 入门 |
+| **C** | 40–59 | 进阶 |
+| **B** | 60–79 | 精通 |
+| **A** | 80–100 | 卓越 |
+
+**初始空状态：** 新用户六维全为 E，雷达图为一个小六边形居中。视觉效果参考 JoJo 替身卡，字母用等宽黄色字体（如 `font-mono text-amber-400`），给用户"我要把所有 E 推到 A"的驱动感。
+
 ### 六维定义与数据源
 
 | 维度 | 计算方式 | 数据源 |
 |------|---------|--------|
 | **研究力** | `min(100, 近30天文献保存数×2 + ArXiv star数×3)` | CardStore + literature DB |
 | **产出力** | `min(100, 组会生成次数×10 + Idea节点新增数×5)` | Vault Ideas/ + Meetings/ 计数 |
-| **健康力** | `min(100, 打卡连续天数×10 + 近7天睡眠均分×5)` | health.db |
+| **健康力** | `min(100, 打卡连续天数×10 + 近7天睡眠均分×5)` | health.db（未实现时默认 0） |
 | **学习力** | `min(100, 播客完成数×8 + Trend deep_dive数×5)` | CardStore feedback |
 | **SAN值** | 近7天手动打分均值 × 10 | `~/.abo/san_log.json` |
 | **幸福指数** | `(主观打分×0.6 + 精力均值×0.4) × 10` | 每日弹窗 + energy memory |
 
 **UI 规格：**
-- 顶点外侧显示当前数值
-- 悬停显示维度名 + 详细数据来源
+- 顶点外侧显示字母评级（E/D/C/B/A）+ 数值
+- 悬停显示维度名 + 具体数值 + 达到下一级还差多少
 - 每日缓存到 `~/.abo/stats_cache.json`，启动时读取，后台更新
 
 ---
@@ -165,7 +182,13 @@ async def generate_daily_motto(profile, last_7_days_summary, today_todos, energy
 ## 7. 技能节点系统
 
 ### 节点 UI
-六边形蜂窝网格，按维度分组。未达成：灰色轮廓。已达成：彩色填充 + 微光效果 + 达成日期。
+六边形蜂窝网格，按维度分组。
+
+- **未达成：** 灰色轮廓 + 进度百分比（如 `46%`，对应 23/50 篇）
+- **已达成：** 彩色填充 + 微光效果 + 达成日期
+- **进度显示：** 节点内显示 `当前值/目标值`，节点下方弧形进度条
+
+**解锁通知：** Toast 弹出（"🎉 技能解锁：文献猎手"）+ profile 页新解锁节点高亮 3 秒后恢复正常彩色。
 
 ### 各维度节点（各 3-5 个）
 
@@ -223,7 +246,7 @@ async def generate_daily_motto(profile, last_7_days_summary, today_todos, energy
 
 ```
 精力基础分 = f(睡眠时长, 睡眠质量)           # 健康模块提供
-精力修正分 = g(今日待办完成率, 推迟次数)       # 任务系统提供
+精力修正分 = g(今日待办完成率, 推迟次数)       # profile 内嵌 to-do 提供
 当前精力   = 基础分 × 0.6 + 修正分 × 0.4
 ```
 
@@ -232,10 +255,16 @@ async def generate_daily_motto(profile, last_7_days_summary, today_todos, energy
 - 无任务数据 → 修正分默认 70
 - 用户可手动 override 当日精力
 
+**Profile 内嵌最小化 to-do（`DailyTodo` 组件）：**
+- 位置：角色卡下方，六边形上方
+- 功能：当日任务列表（添加/勾选/删除），勾选率实时影响精力修正分
+- 存储：`~/.abo/daily_todos.json`（按日期分组）
+- 交互：勾选一项 → 精力条轻微上升动画，强化正反馈
+
 存储：`~/.abo/energy_memory.json`
 ```json
 {
-  "history": [{"date": "2026-03-30", "energy": 68}],
+  "history": [{"date": "2026-03-31", "energy": 68}],
   "today": {"current": 68, "manual_override": null}
 }
 ```
@@ -278,10 +307,11 @@ src/modules/profile/
 ├── Profile.tsx              # 主页面，组合所有区块
 ├── PixelAvatar.tsx          # 像素小人，4种状态，CSS box-shadow
 ├── RoleCard.tsx             # 角色卡：目标 + 描述 + 座右铭
-├── HexagonRadar.tsx         # SVG 六边形雷达图
-├── SkillGrid.tsx            # 六维技能节点蜂窝网格
+├── DailyTodo.tsx            # 今日待办列表（影响精力修正分）
+├── HexagonRadar.tsx         # SVG 六边形雷达图，JoJo E→A 评级
+├── SkillGrid.tsx            # 六维技能节点蜂窝网格，带进度百分比
 ├── AchievementGallery.tsx   # 徽章横向滚动展示
-└── DailyCheckInModal.tsx    # 每日 SAN + 幸福度打分弹窗
+└── DailyCheckInModal.tsx    # 每日 SAN + 幸福度打分弹窗（首次打开自动弹）
 
 src/modules/nav/
 └── NavSidebar.tsx           # 修改：顶部新增缩略卡（PixelAvatar + 精力条 + 座右铭）
@@ -313,8 +343,9 @@ src/core/store.ts            # 修改：ActiveTab 新增 "profile"
 4. **Profile.tsx** — 主页面骨架
 5. **PixelAvatar.tsx** — 4 种状态 CSS 像素画
 6. **RoleCard.tsx** — 角色卡 + 手动填写 + 座右铭显示
-7. **HexagonRadar.tsx** — SVG 六边形
-8. **SkillGrid.tsx** — 技能节点网格
-9. **AchievementGallery.tsx** — 徽章展示
-10. **DailyCheckInModal.tsx** — SAN + 幸福度打分弹窗
+7. **HexagonRadar.tsx** — SVG 六边形 + JoJo E→A 评级
+8. **DailyTodo.tsx** — 今日待办列表
+9. **SkillGrid.tsx** — 技能节点网格（带进度百分比）
+10. **AchievementGallery.tsx** — 徽章展示
+11. **DailyCheckInModal.tsx** — SAN + 幸福度打分弹窗（首次打开自动弹）
 11. **MainContent.tsx** — 接入 profile Tab
