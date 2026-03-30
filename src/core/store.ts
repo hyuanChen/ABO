@@ -3,6 +3,7 @@ import { create } from "zustand";
 // ── 类型定义 ──────────────────────────────────────────────────────
 
 export type ActiveTab =
+  | "profile"
   | "overview"
   | "literature"
   | "arxiv"
@@ -51,6 +52,21 @@ export interface FeedModule {
   next_run: string | null;
 }
 
+export interface DimStat {
+  score: number;
+  grade: "E" | "D" | "C" | "B" | "A";
+  raw: Record<string, unknown>;
+}
+
+export interface ProfileStats {
+  research: DimStat;
+  output: DimStat;
+  health: DimStat;
+  learning: DimStat;
+  san: DimStat;
+  happiness: DimStat;
+}
+
 // ── Store ─────────────────────────────────────────────────────────
 
 interface AboStore {
@@ -72,6 +88,16 @@ interface AboStore {
   setFeedModules: (modules: FeedModule[]) => void;
   setActiveModuleFilter: (id: string | null) => void;
   setUnreadCounts: (counts: Record<string, number>) => void;
+
+  // Profile
+  profileEnergy: number;
+  profileSan: number;
+  profileMotto: string;
+  profileStats: ProfileStats | null;
+  setProfileEnergy: (e: number) => void;
+  setProfileSan: (s: number) => void;
+  setProfileMotto: (m: string) => void;
+  setProfileStats: (s: ProfileStats) => void;
 
   // Toast
   toasts: Toast[];
@@ -95,6 +121,15 @@ export const useStore = create<AboStore>((set) => ({
   setFeedModules: (feedModules) => set({ feedModules }),
   setActiveModuleFilter: (activeModuleFilter) => set({ activeModuleFilter }),
   setUnreadCounts: (unreadCounts) => set({ unreadCounts }),
+
+  profileEnergy: 70,
+  profileSan: 0,
+  profileMotto: "",
+  profileStats: null,
+  setProfileEnergy: (profileEnergy) => set({ profileEnergy }),
+  setProfileSan: (profileSan) => set({ profileSan }),
+  setProfileMotto: (profileMotto) => set({ profileMotto }),
+  setProfileStats: (profileStats) => set({ profileStats }),
 
   toasts: [],
   addToast: (t) =>
