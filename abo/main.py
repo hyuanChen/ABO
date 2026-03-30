@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from .config import get_vault_path, load as load_config, save as save_config
 from .preferences.engine import PreferenceEngine
+from .profile.routes import router as profile_router, init_routes as init_profile_routes
 from .runtime.broadcaster import broadcaster
 from .runtime.discovery import ModuleRegistry, start_watcher
 from .runtime.runner import ModuleRunner
@@ -22,6 +23,8 @@ _registry = ModuleRegistry()
 _card_store = CardStore()
 _prefs = PreferenceEngine()
 _scheduler: ModuleScheduler | None = None
+
+init_profile_routes(_card_store)
 
 
 def _write_sdk_readme():
@@ -87,6 +90,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(profile_router)
 
 
 # ── Health ───────────────────────────────────────────────────────

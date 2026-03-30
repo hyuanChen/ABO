@@ -78,6 +78,15 @@ class CardStore:
             conn.execute("UPDATE cards SET feedback=?, read=1 WHERE id=?",
                          (action, card_id))
 
+    def count_feedback(self, module_id: str, action: str) -> int:
+        """Count cards from a module that received a specific feedback action."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM cards WHERE module_id=? AND feedback=?",
+                (module_id, action),
+            ).fetchone()
+            return row[0] if row else 0
+
     def unread_counts(self) -> dict[str, int]:
         with self._conn() as conn:
             rows = conn.execute(
