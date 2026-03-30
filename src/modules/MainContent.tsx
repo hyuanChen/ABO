@@ -4,6 +4,7 @@ import FeedSidebar from "./feed/FeedSidebar";
 import Literature from "./literature/Literature";
 import MindMap from "./ideas/MindMap";
 import ClaudePanel from "./claude-panel/ClaudePanel";
+import Profile from "./profile/Profile";
 import ArxivTracker from "./arxiv/ArxivTracker";
 import MeetingGenerator from "./meeting/MeetingGenerator";
 import HealthDashboard from "./health/HealthDashboard";
@@ -27,6 +28,7 @@ export default function MainContent() {
 
   return (
     <main className="flex-1 h-full bg-slate-50 dark:bg-slate-950 overflow-hidden">
+      {activeTab === "profile"    && <Profile />}
       {activeTab === "literature" && <Literature />}
       {activeTab === "ideas"      && <MindMap />}
       {activeTab === "claude"     && <ClaudePanel />}
