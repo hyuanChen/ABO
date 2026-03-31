@@ -9,7 +9,7 @@ export default function App() {
   const setConfig = useStore((s) => s.setConfig);
 
   useEffect(() => {
-    api.get<{ vault_path: string; version: string }>("/api/config")
+    api.get<{ vault_path: string; literature_path?: string; version: string }>("/api/config")
       .then(setConfig)
       .catch(() => {});
   }, [setConfig]);

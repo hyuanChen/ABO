@@ -25,7 +25,10 @@ def get_literature_path() -> Path | None:
 
 def load() -> dict:
     if _CONFIG_PATH.exists():
-        return {**_DEFAULTS, **json.loads(_CONFIG_PATH.read_text())}
+        saved = json.loads(_CONFIG_PATH.read_text())
+        # Filter out empty strings to use defaults instead
+        saved = {k: v for k, v in saved.items() if v != ""}
+        return {**_DEFAULTS, **saved}
     return _DEFAULTS.copy()
 
 

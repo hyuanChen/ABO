@@ -249,8 +249,8 @@ function GeneralSection() {
 
 function VaultSection() {
   const { config, setConfig } = useStore();
-  const vaultPath = config?.vault_path ?? "未配置";
-  const literaturePath = config?.literature_path ?? "";
+  const vaultPath = config?.vault_path?.trim() || "未配置";
+  const literaturePath = config?.literature_path?.trim() || "";
 
   async function openInFinder() {
     if (!vaultPath || vaultPath === "未配置") return;
@@ -280,12 +280,11 @@ function VaultSection() {
         title: "选择情报库文件夹",
       });
       if (selected && typeof selected === "string") {
-        const payload: { vault_path: string; literature_path?: string } = { vault_path: selected };
-        // Only send literature_path if it has a value
-        if (config?.literature_path) {
-          payload.literature_path = config.literature_path;
-        }
-        const newConfig = await api.post<{ vault_path: string; literature_path?: string; version: string }>("/api/config", payload);
+        // Always send both paths to backend
+        const newConfig = await api.post<{ vault_path: string; literature_path?: string; version: string }>("/api/config", {
+          vault_path: selected,
+          literature_path: config?.literature_path || "",
+        });
         setConfig(newConfig);
         alert("情报库路径已更新，请重启应用以生效");
       }
@@ -303,12 +302,11 @@ function VaultSection() {
         title: "选择文献库存储文件夹",
       });
       if (selected && typeof selected === "string") {
-        const payload: { vault_path?: string; literature_path: string } = { literature_path: selected };
-        // Only send vault_path if it has a value
-        if (config?.vault_path) {
-          payload.vault_path = config.vault_path;
-        }
-        const newConfig = await api.post<{ vault_path: string; literature_path?: string; version: string }>("/api/config", payload);
+        // Always send both paths to backend
+        const newConfig = await api.post<{ vault_path: string; literature_path?: string; version: string }>("/api/config", {
+          vault_path: config?.vault_path || "",
+          literature_path: selected,
+        });
         setConfig(newConfig);
         alert("文献库路径已更新");
       }
