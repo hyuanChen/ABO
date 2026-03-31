@@ -263,10 +263,8 @@ async def open_vault_item(data: dict):
         raise HTTPException(400, "Vault not configured")
 
     item_path = data.get("path", "")
-    if not item_path:
-        raise HTTPException(400, "Path required")
-
-    target = Path(vault_path) / item_path
+    # Allow empty path to open vault root
+    target = Path(vault_path) / item_path if item_path else Path(vault_path)
 
     # Security check - must be within vault
     if not str(target.resolve()).startswith(str(Path(vault_path).resolve())):
