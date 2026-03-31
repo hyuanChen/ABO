@@ -5,6 +5,20 @@ import { api } from "../../core/api";
 import { useStore } from "../../core/store";
 import { open } from "@tauri-apps/plugin-dialog";
 
+// Obsidian Icon SVG Component
+function ObsidianIcon({ style }: { style?: React.CSSProperties }) {
+  return (
+    <svg
+      viewBox="0 0 32 32"
+      fill="currentColor"
+      style={style}
+    >
+      <path d="M16 2C8.268 2 2 8.268 2 16s6.268 14 14 14 14-6.268 14-14S23.732 2 16 2zm0 3c.552 0 1 .448 1 1v5.172c0 .553-.448 1-1 1s-1-.447-1-1V6c0-.552.448-1 1-1zm0 11c3.314 0 6 2.686 6 6s-2.686 6-6 6-6-2.686-6-6 2.686-6 6-6z" />
+      <path d="M16 8.5c-.828 0-1.5-.672-1.5-1.5s.672-1.5 1.5-1.5 1.5.672 1.5 1.5-.672 1.5-1.5 1.5z" fill="currentColor" />
+    </svg>
+  );
+}
+
 interface LiteratureItem {
   name: string;
   path: string;
@@ -131,6 +145,17 @@ export default function Literature() {
     }
   }
 
+  async function openInObsidian() {
+    // Open literature folder in Obsidian via vault API (Obsidian can open any folder)
+    try {
+      await api.post("/api/vault/open-obsidian", { path: "" });
+    } catch (err) {
+      console.error("Failed to open Obsidian:", err);
+      // Fallback: try URL scheme directly
+      window.location.href = "obsidian://open?vault=Literature";
+    }
+  }
+
   async function openWithSystem(item: LiteratureItem) {
     try {
       await api.post("/api/literature/open", { path: item.path });
@@ -241,6 +266,39 @@ export default function Literature() {
         icon={BookOpen}
         actions={
           <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            {/* Open in Obsidian */}
+            <button
+              onClick={openInObsidian}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "8px 16px",
+                borderRadius: "var(--radius-full)",
+                background: "linear-gradient(135deg, #7B68EE, #9D7BDB)",
+                border: "none",
+                color: "white",
+                fontSize: "0.875rem",
+                fontWeight: 600,
+                cursor: "pointer",
+                transition: "all 0.3s ease",
+                boxShadow: "0 2px 8px rgba(123, 104, 238, 0.4)",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = "translateY(-2px)";
+                e.currentTarget.style.boxShadow = "0 4px 16px rgba(123, 104, 238, 0.5)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = "translateY(0)";
+                e.currentTarget.style.boxShadow = "0 2px 8px rgba(123, 104, 238, 0.4)";
+              }}
+            >
+              <ObsidianIcon style={{ width: "16px", height: "16px" }} />
+              在 Obsidian 中打开
+            </button>
+
+            <div style={{ width: "1px", height: "24px", background: "var(--border-light)", margin: "0 4px" }} />
+
             {/* Open in Finder */}
             <button
               onClick={openInFinder}

@@ -30,7 +30,10 @@ def load() -> dict:
 
 
 def save(data: dict) -> None:
-    _CONFIG_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    """Save config, merging with existing config to preserve other fields."""
+    existing = load()
+    merged = {**existing, **data}
+    _CONFIG_PATH.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
 
 
 def get_vault_path() -> Path:
