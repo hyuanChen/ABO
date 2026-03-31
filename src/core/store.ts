@@ -24,6 +24,7 @@ export interface Toast {
 
 export interface AppConfig {
   vault_path: string;
+  literature_path?: string;
   version: string;
 }
 

@@ -10,8 +10,17 @@ _ABO_DIR = Path.home() / ".abo"
 
 _DEFAULTS = {
     "vault_path": str(Path.home() / "Documents" / "MyVault"),
+    "literature_path": "",  # Second folder for literature/papers
     "version": "1.0.0",
 }
+
+
+def get_literature_path() -> Path | None:
+    """Get literature folder path, returns None if not configured."""
+    path = load().get("literature_path", "")
+    if path:
+        return Path(path)
+    return None
 
 
 def load() -> dict:

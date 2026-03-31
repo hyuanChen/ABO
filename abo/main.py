@@ -193,7 +193,7 @@ async def get_config():
 @app.post("/api/config")
 async def update_config(data: dict):
     save_config(data)
-    return {"ok": True}
+    return load_config()
 
 
 # ── Preferences ──────────────────────────────────────────────────
@@ -225,10 +225,26 @@ async def browse_vault(path: str = ""):
     vault_path = get_vault_path()
     if not vault_path:
         raise HTTPException(400, "Vault not configured")
+    return _browse_folder(vault_path, path)
 
-    target = Path(vault_path) / path if path else Path(vault_path)
 
-    if not str(target.resolve()).startswith(str(Path(vault_path).resolve())):
+@app.get("/api/literature/browse")
+async def browse_literature(path: str = ""):
+    """Browse literature folder structure."""
+    from .config import get_literature_path
+    lit_path = get_literature_path()
+    if not lit_path:
+        raise HTTPException(400, "Literature path not configured")
+    if not lit_path.exists():
+        raise HTTPException(404, "Literature folder not found")
+    return _browse_folder(lit_path, path)
+
+
+def _browse_folder(base_path: Path, sub_path: str = ""):
+    """Common logic for browsing folders."""
+    target = base_path / sub_path if sub_path else base_path
+
+    if not str(target.resolve()).startswith(str(base_path.resolve())):
         raise HTTPException(403, "Access denied")
 
     if not target.exists():
@@ -237,13 +253,12 @@ async def browse_vault(path: str = ""):
     items = []
     try:
         for item in sorted(target.iterdir()):
-            # Skip hidden files/folders (starting with .)
             if item.name.startswith("."):
                 continue
             stat = item.stat()
             items.append(VaultItem(
                 name=item.name,
-                path=str(item.relative_to(vault_path)),
+                path=str(item.relative_to(base_path)),
                 type="folder" if item.is_dir() else "file",
                 size=stat.st_size if item.is_file() else None,
                 modified=stat.st_mtime,
@@ -251,7 +266,7 @@ async def browse_vault(path: str = ""):
     except PermissionError:
         raise HTTPException(403, "Permission denied")
 
-    return {"items": items, "current_path": path}
+    return {"items": items, "current_path": sub_path}
 
 
 @app.post("/api/vault/open")
@@ -261,20 +276,31 @@ async def open_vault_item(data: dict):
     vault_path = get_vault_path()
     if not vault_path:
         raise HTTPException(400, "Vault not configured")
+    return _open_in_finder(vault_path, data.get("path", ""))
 
-    item_path = data.get("path", "")
-    # Allow empty path to open vault root
-    target = Path(vault_path) / item_path if item_path else Path(vault_path)
 
-    # Security check - must be within vault
-    if not str(target.resolve()).startswith(str(Path(vault_path).resolve())):
+@app.post("/api/literature/open")
+async def open_literature_item(data: dict):
+    """Open file or folder in literature folder with system default."""
+    from .config import get_literature_path
+    lit_path = get_literature_path()
+    if not lit_path:
+        raise HTTPException(400, "Literature path not configured")
+    return _open_in_finder(lit_path, data.get("path", ""))
+
+
+def _open_in_finder(base_path: Path, item_path: str = ""):
+    """Common logic for opening files/folders in Finder."""
+    import subprocess
+    target = base_path / item_path if item_path else base_path
+
+    if not str(target.resolve()).startswith(str(base_path.resolve())):
         raise HTTPException(403, "Access denied")
 
     if not target.exists():
         raise HTTPException(404, "Path not found")
 
     try:
-        # Use macOS 'open' command to open with default application
         subprocess.run(["open", str(target.resolve())], check=True)
         return {"ok": True}
     except Exception as e:

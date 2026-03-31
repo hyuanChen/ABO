@@ -11,6 +11,7 @@ import {
   Zap,
   ChevronRight,
   ExternalLink,
+  BookOpen,
 } from "lucide-react";
 import { useStore } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
@@ -249,15 +250,25 @@ function GeneralSection() {
 function VaultSection() {
   const { config, setConfig } = useStore();
   const vaultPath = config?.vault_path ?? "未配置";
+  const literaturePath = config?.literature_path ?? "";
 
   async function openInFinder() {
     if (!vaultPath || vaultPath === "未配置") return;
     try {
-      // Use backend API to open folder in Finder
       await api.post("/api/vault/open", { path: "" });
     } catch (err) {
       console.error("Failed to open vault:", err);
       alert("打开失败，请检查情报库路径是否正确");
+    }
+  }
+
+  async function openLiteratureInFinder() {
+    if (!literaturePath) return;
+    try {
+      await api.post("/api/literature/open", { path: "" });
+    } catch (err) {
+      console.error("Failed to open literature folder:", err);
+      alert("打开失败，请检查文献库路径是否正确");
     }
   }
 
@@ -269,9 +280,9 @@ function VaultSection() {
         title: "选择情报库文件夹",
       });
       if (selected && typeof selected === "string") {
-        // Save new vault path to backend
-        const newConfig = await api.post<{ vault_path: string; version: string }>("/api/config", {
+        const newConfig = await api.post<{ vault_path: string; literature_path?: string; version: string }>("/api/config", {
           vault_path: selected,
+          literature_path: config?.literature_path,
         });
         setConfig(newConfig);
         alert("情报库路径已更新，请重启应用以生效");
@@ -282,8 +293,30 @@ function VaultSection() {
     }
   }
 
+  async function selectLiteraturePath() {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "选择文献库存储文件夹",
+      });
+      if (selected && typeof selected === "string") {
+        const newConfig = await api.post<{ vault_path: string; literature_path?: string; version: string }>("/api/config", {
+          vault_path: config?.vault_path,
+          literature_path: selected,
+        });
+        setConfig(newConfig);
+        alert("文献库路径已更新");
+      }
+    } catch (err) {
+      console.error("Failed to select literature path:", err);
+      alert("选择文件夹失败，请重试");
+    }
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      {/* Vault Config */}
       <Card title="情报库配置" icon={<HardDrive style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
           <SettingItem
@@ -395,6 +428,111 @@ function VaultSection() {
                 .abo/
               </code>{" "}
               目录以保留您的数据。
+            </p>
+          </div>
+        </div>
+      </Card>
+
+      {/* Literature Config */}
+      <Card title="文献库配置" icon={<BookOpen style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          <SettingItem
+            icon={<BookOpen style={{ width: "20px", height: "20px" }} />}
+            title="文献库存储路径"
+            description={literaturePath ? "PDF 等文献文件的独立存储位置" : "未配置，将使用情报库下的 Literature/ 目录"}
+          >
+            <div style={{ display: "flex", gap: "8px" }}>
+              <button
+                onClick={openLiteratureInFinder}
+                disabled={!literaturePath}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "var(--radius-full)",
+                  background: literaturePath ? "var(--bg-hover)" : "var(--bg-card)",
+                  border: "1px solid var(--border-light)",
+                  color: literaturePath ? "var(--text-secondary)" : "var(--text-muted)",
+                  fontSize: "0.8125rem",
+                  fontWeight: 600,
+                  cursor: literaturePath ? "pointer" : "not-allowed",
+                  opacity: literaturePath ? 1 : 0.5,
+                  transition: "all 0.2s ease",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                }}
+                onMouseEnter={(e) => {
+                  if (literaturePath) {
+                    e.currentTarget.style.background = "var(--color-primary)";
+                    e.currentTarget.style.color = "white";
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = literaturePath ? "var(--bg-hover)" : "var(--bg-card)";
+                  e.currentTarget.style.color = literaturePath ? "var(--text-secondary)" : "var(--text-muted)";
+                }}
+              >
+                <ExternalLink style={{ width: "14px", height: "14px" }} />
+                在 Finder 中打开
+              </button>
+              <button
+                onClick={selectLiteraturePath}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "var(--radius-full)",
+                  background: "var(--color-primary)",
+                  border: "none",
+                  color: "white",
+                  fontSize: "0.8125rem",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  transition: "all 0.2s ease",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  boxShadow: "0 2px 8px rgba(188, 164, 227, 0.4)",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--color-primary-dark)";
+                  e.currentTarget.style.transform = "translateY(-1px)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "var(--color-primary)";
+                  e.currentTarget.style.transform = "translateY(0)";
+                }}
+              >
+                <FolderOpen style={{ width: "14px", height: "14px" }} />
+                {literaturePath ? "更改路径" : "设置路径"}
+              </button>
+            </div>
+          </SettingItem>
+
+          <div
+            style={{
+              padding: "16px 20px",
+              borderRadius: "var(--radius-lg)",
+              background: "var(--bg-hover)",
+              border: "1px solid var(--border-light)",
+              fontFamily: "monospace",
+              fontSize: "0.875rem",
+              color: literaturePath ? "var(--text-secondary)" : "var(--text-muted)",
+              wordBreak: "break-all",
+              lineHeight: 1.6,
+            }}
+          >
+            {literaturePath || "使用默认路径（情报库/Literature/）"}
+          </div>
+
+          <div
+            style={{
+              padding: "16px 20px",
+              borderRadius: "var(--radius-lg)",
+              background: "linear-gradient(135deg, rgba(188, 164, 227, 0.1), rgba(188, 164, 227, 0.05))",
+              border: "1px solid rgba(188, 164, 227, 0.3)",
+            }}
+          >
+            <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+              <strong style={{ color: "var(--color-primary)" }}>说明：</strong>
+              文献库可以独立于情报库存储，方便将大型 PDF 文件放在外部硬盘或云同步目录之外。
             </p>
           </div>
         </div>
