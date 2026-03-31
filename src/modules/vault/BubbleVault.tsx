@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { Folder, FileText, ArrowLeft, Clock } from "lucide-react";
+import { Folder, FileText, ArrowLeft, Clock, ExternalLink, FolderOpen } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
 import { api } from "../../core/api";
+import { open } from "@tauri-apps/plugin-dialog";
 
 // Obsidian Icon SVG Component
 function ObsidianIcon({ style }: { style?: React.CSSProperties }) {
@@ -122,6 +123,35 @@ export default function BubbleVault() {
     }
   }
 
+  async function openInFinder() {
+    try {
+      await api.post("/api/vault/open", { path: "" });
+    } catch (err) {
+      console.error("Failed to open:", err);
+      alert("打开失败，请检查情报库路径");
+    }
+  }
+
+  async function selectVaultPath() {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "选择情报库文件夹",
+      });
+      if (selected && typeof selected === "string") {
+        await api.post(
+          "/api/config",
+          { vault_path: selected }
+        );
+        alert("情报库路径已更新，请重启应用以生效");
+      }
+    } catch (err) {
+      console.error("Failed to select path:", err);
+      alert("选择文件夹失败，请重试");
+    }
+  }
+
   async function openInObsidian() {
     // Open vault in Obsidian via backend API
     try {
@@ -195,6 +225,69 @@ export default function BubbleVault() {
             >
               <ObsidianIcon style={{ width: "16px", height: "16px" }} />
               在 Obsidian 中打开
+            </button>
+
+            <div style={{ width: "1px", height: "24px", background: "var(--border-light)", margin: "0 4px" }} />
+
+            {/* Open in Finder */}
+            <button
+              onClick={openInFinder}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "8px 16px",
+                borderRadius: "var(--radius-full)",
+                background: "var(--bg-hover)",
+                border: "1px solid var(--border-light)",
+                color: "var(--text-secondary)",
+                fontSize: "0.875rem",
+                fontWeight: 600,
+                cursor: "pointer",
+                transition: "all 0.3s ease",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "var(--color-primary)";
+                e.currentTarget.style.color = "white";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "var(--bg-hover)";
+                e.currentTarget.style.color = "var(--text-secondary)";
+              }}
+            >
+              <ExternalLink style={{ width: "14px", height: "14px" }} />
+              在 Finder 中打开
+            </button>
+
+            {/* Change Path */}
+            <button
+              onClick={selectVaultPath}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "8px 16px",
+                borderRadius: "var(--radius-full)",
+                background: "var(--color-primary)",
+                border: "none",
+                color: "white",
+                fontSize: "0.875rem",
+                fontWeight: 600,
+                cursor: "pointer",
+                transition: "all 0.3s ease",
+                boxShadow: "0 2px 8px rgba(188, 164, 227, 0.4)",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = "translateY(-2px)";
+                e.currentTarget.style.boxShadow = "0 4px 16px rgba(188, 164, 227, 0.5)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = "translateY(0)";
+                e.currentTarget.style.boxShadow = "0 2px 8px rgba(188, 164, 227, 0.4)";
+              }}
+            >
+              <FolderOpen style={{ width: "14px", height: "14px" }} />
+              更改路径
             </button>
 
             <div style={{ width: "1px", height: "24px", background: "var(--border-light)", margin: "0 4px" }} />
