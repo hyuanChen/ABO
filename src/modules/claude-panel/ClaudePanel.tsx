@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  Bot, Send, Zap, BookOpen, Lightbulb, Target,
+  Bot, Send, Zap, BookOpen, Target,
   RotateCcw, Wifi, WifiOff, ChevronDown, Copy, Check,
-  Cpu, Sparkles, Brain, FlaskConical,
+  Cpu, Sparkles,
 } from "lucide-react";
 import { useStore } from "../../core/store";
 
@@ -15,7 +15,7 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   streaming?: boolean;
-  ts: number; // timestamp ms
+  ts: number;
 }
 
 interface StreamChunk {
@@ -29,44 +29,24 @@ interface StreamChunk {
 
 const QUICK_ACTIONS = [
   {
-    id: "summarize",
-    label: "总结文献",
-    desc: "核心贡献、方法、局限性",
-    prompt: "请总结当前文献的核心贡献、方法论和局限性。",
+    id: "summarize-diary",
+    label: "总结日记",
+    desc: "分析日记内容，提取关键思考",
+    prompt: "请帮我总结最近的日记内容，提取关键思考、情绪变化和成长轨迹。",
     Icon: BookOpen,
-    color: "text-indigo-500 dark:text-indigo-400",
-    bg: "bg-indigo-50 dark:bg-indigo-900/30",
-    border: "border-indigo-200 dark:border-indigo-700/50",
+    color: "var(--color-primary)",
+    bg: "rgba(188, 164, 227, 0.15)",
+    border: "rgba(188, 164, 227, 0.3)",
   },
   {
-    id: "hypothesis",
-    label: "生成假设",
-    desc: "3个可探索的研究假设",
-    prompt: "基于当前文献和研究背景，生成3个具体可探索的研究假设，并说明验证方法。",
-    Icon: Lightbulb,
-    color: "text-amber-500 dark:text-amber-400",
-    bg: "bg-amber-50 dark:bg-amber-900/30",
-    border: "border-amber-200 dark:border-amber-700/50",
-  },
-  {
-    id: "critique",
-    label: "批判分析",
-    desc: "方法漏洞与改进方向",
-    prompt: "请对当前文献进行批判性分析，指出方法论漏洞、样本局限性和可改进之处。",
+    id: "generate-todo",
+    label: "生成todo",
+    desc: "基于当前状态生成待办",
+    prompt: "根据我的研究进展和当前精力状态，帮我生成3个优先级最高的待办事项。",
     Icon: Target,
-    color: "text-rose-500 dark:text-rose-400",
-    bg: "bg-rose-50 dark:bg-rose-900/30",
-    border: "border-rose-200 dark:border-rose-700/50",
-  },
-  {
-    id: "plan",
-    label: "研究规划",
-    desc: "下一步可执行的科研计划",
-    prompt: "根据我当前的研究进展，帮我制定下周可执行的3个科研任务，每个任务需明确目标和成功标准。",
-    Icon: FlaskConical,
-    color: "text-emerald-500 dark:text-emerald-400",
-    bg: "bg-emerald-50 dark:bg-emerald-900/30",
-    border: "border-emerald-200 dark:border-emerald-700/50",
+    color: "#10B981",
+    bg: "rgba(168, 230, 207, 0.15)",
+    border: "rgba(168, 230, 207, 0.3)",
   },
   {
     id: "energy",
@@ -74,19 +54,9 @@ const QUICK_ACTIONS = [
     desc: "低能量状态的高效任务",
     prompt: "我现在精力较低，请给我一个高效率、短时间（30分钟内）可完成的科研任务建议。",
     Icon: Zap,
-    color: "text-violet-500 dark:text-violet-400",
-    bg: "bg-violet-50 dark:bg-violet-900/30",
-    border: "border-violet-200 dark:border-violet-700/50",
-  },
-  {
-    id: "insight",
-    label: "灵感激发",
-    desc: "跨学科创新思路",
-    prompt: "请从跨学科的视角，给我当前研究领域一个意想不到的创新思路，并说明其可行性。",
-    Icon: Brain,
-    color: "text-cyan-500 dark:text-cyan-400",
-    bg: "bg-cyan-50 dark:bg-cyan-900/30",
-    border: "border-cyan-200 dark:border-cyan-700/50",
+    color: "#8B5CF6",
+    bg: "rgba(139, 92, 246, 0.15)",
+    border: "rgba(139, 92, 246, 0.3)",
   },
 ];
 
@@ -131,11 +101,22 @@ function CopyButton({ text }: { text: string }) {
     <button
       onClick={handleCopy}
       aria-label="复制消息"
-      className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-md text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
+      style={{
+        opacity: 0, padding: "4px", borderRadius: "6px",
+        color: "var(--text-muted)", background: "transparent", border: "none", cursor: "pointer"
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.opacity = "1";
+        e.currentTarget.style.background = "var(--bg-hover)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.opacity = "0";
+        e.currentTarget.style.background = "transparent";
+      }}
     >
       {copied
-        ? <Check className="w-3.5 h-3.5 text-emerald-500" />
-        : <Copy className="w-3.5 h-3.5" />
+        ? <Check style={{ width: "14px", height: "14px", color: "#10B981" }} />
+        : <Copy style={{ width: "14px", height: "14px" }} />
       }
     </button>
   );
@@ -148,57 +129,69 @@ function MdContent({ content }: { content: string }) {
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
-        p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
-        h1: ({ children }) => <h1 className="text-lg font-heading font-bold mt-3 mb-1.5 text-slate-800 dark:text-slate-100">{children}</h1>,
-        h2: ({ children }) => <h2 className="text-base font-heading font-semibold mt-3 mb-1 text-slate-800 dark:text-slate-100">{children}</h2>,
-        h3: ({ children }) => <h3 className="text-sm font-semibold mt-2 mb-1 text-slate-700 dark:text-slate-200">{children}</h3>,
-        ul: ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
-        ol: ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
-        li: ({ children }) => <li className="text-sm leading-relaxed">{children}</li>,
+        p: ({ children }) => <p style={{ marginBottom: "8px", lineHeight: 1.6 }}>{children}</p>,
+        h1: ({ children }) => <h1 style={{ fontSize: "18px", fontWeight: 700, marginTop: "12px", marginBottom: "6px", color: "var(--text-main)" }}>{children}</h1>,
+        h2: ({ children }) => <h2 style={{ fontSize: "16px", fontWeight: 600, marginTop: "12px", marginBottom: "4px", color: "var(--text-main)" }}>{children}</h2>,
+        h3: ({ children }) => <h3 style={{ fontSize: "14px", fontWeight: 600, marginTop: "8px", marginBottom: "4px", color: "var(--text-secondary)" }}>{children}</h3>,
+        ul: ({ children }) => <ul style={{ listStyle: "disc", paddingLeft: "16px", marginBottom: "8px" }}>{children}</ul>,
+        ol: ({ children }) => <ol style={{ listStyle: "decimal", paddingLeft: "16px", marginBottom: "8px" }}>{children}</ol>,
+        li: ({ children }) => <li style={{ fontSize: "14px", lineHeight: 1.6 }}>{children}</li>,
         code: ({ className, children, ...props }) => {
           const isBlock = className?.startsWith("language-");
           if (isBlock) {
             const lang = className?.replace("language-", "") ?? "";
             return (
-              <div className="my-2 rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700">
+              <div style={{ margin: "8px 0", borderRadius: "12px", overflow: "hidden", border: "1px solid var(--border-light)" }}>
                 {lang && (
-                  <div className="px-3 py-1.5 bg-slate-100 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-                    <span className="text-xs text-slate-500 dark:text-slate-400 font-mono">{lang}</span>
+                  <div style={{
+                    padding: "6px 12px", background: "var(--bg-hover)",
+                    borderBottom: "1px solid var(--border-light)", display: "flex", alignItems: "center", justifyContent: "space-between"
+                  }}>
+                    <span style={{ fontSize: "12px", color: "var(--text-muted)", fontFamily: "monospace" }}>{lang}</span>
                     <CopyButton text={String(children).replace(/\n$/, "")} />
                   </div>
                 )}
-                <pre className="p-3 overflow-x-auto bg-slate-50 dark:bg-slate-900/80 text-xs font-mono text-slate-800 dark:text-slate-200 leading-relaxed">
+                <pre style={{
+                  padding: "12px", overflowX: "auto", background: "var(--bg-hover)",
+                  fontSize: "12px", fontFamily: "monospace", color: "var(--text-main)", lineHeight: 1.6, margin: 0
+                }}>
                   <code>{children}</code>
                 </pre>
               </div>
             );
           }
           return (
-            <code className="px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-xs font-mono text-indigo-600 dark:text-indigo-400 border border-slate-200 dark:border-slate-700" {...props}>
+            <code style={{
+              padding: "2px 6px", borderRadius: "6px", background: "var(--bg-hover)",
+              fontSize: "12px", fontFamily: "monospace", color: "var(--color-primary)"
+            }} {...props}>
               {children}
             </code>
           );
         },
         blockquote: ({ children }) => (
-          <blockquote className="border-l-2 border-indigo-400 pl-3 my-2 text-slate-600 dark:text-slate-400 italic">
+          <blockquote style={{
+            borderLeft: "2px solid var(--color-primary)", paddingLeft: "12px",
+            margin: "8px 0", color: "var(--text-secondary)", fontStyle: "italic"
+          }}>
             {children}
           </blockquote>
         ),
-        strong: ({ children }) => <strong className="font-semibold text-slate-800 dark:text-slate-100">{children}</strong>,
+        strong: ({ children }) => <strong style={{ fontWeight: 600, color: "var(--text-main)" }}>{children}</strong>,
         a: ({ href, children }) => (
           <a href={href} target="_blank" rel="noopener noreferrer"
-            className="text-indigo-500 dark:text-indigo-400 underline underline-offset-2 hover:text-indigo-600">
+            style={{ color: "var(--color-primary)", textDecoration: "underline" }}>
             {children}
           </a>
         ),
-        hr: () => <hr className="my-3 border-slate-200 dark:border-slate-700" />,
+        hr: () => <hr style={{ margin: "12px 0", border: "none", borderTop: "1px solid var(--border-light)" }} />,
         table: ({ children }) => (
-          <div className="my-2 overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">
-            <table className="w-full text-sm">{children}</table>
+          <div style={{ margin: "8px 0", overflowX: "auto", borderRadius: "12px", border: "1px solid var(--border-light)" }}>
+            <table style={{ width: "100%", fontSize: "14px", borderCollapse: "collapse" }}>{children}</table>
           </div>
         ),
-        th: ({ children }) => <th className="px-3 py-2 bg-slate-100 dark:bg-slate-800 text-left text-xs font-semibold text-slate-600 dark:text-slate-300 border-b border-slate-200 dark:border-slate-700">{children}</th>,
-        td: ({ children }) => <td className="px-3 py-2 text-xs text-slate-700 dark:text-slate-300 border-b border-slate-100 dark:border-slate-700/50 last:border-0">{children}</td>,
+        th: ({ children }) => <th style={{ padding: "10px 12px", background: "var(--bg-hover)", textAlign: "left", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", borderBottom: "1px solid var(--border-light)" }}>{children}</th>,
+        td: ({ children }) => <td style={{ padding: "10px 12px", fontSize: "12px", color: "var(--text-main)", borderBottom: "1px solid var(--border-light)" }}>{children}</td>,
       }}
     >
       {content}
@@ -210,45 +203,60 @@ function MdContent({ content }: { content: string }) {
 
 function MessageBubble({ msg }: { msg: Message }) {
   const isUser = msg.role === "user";
+
   return (
-    <div className={`group flex gap-3 ${isUser ? "flex-row-reverse" : "flex-row"} py-1`}>
+    <div style={{
+      display: "flex", gap: "12px", padding: "4px 0",
+      flexDirection: isUser ? "row-reverse" : "row"
+    }}>
       {/* Avatar */}
-      <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 mt-1 ${
-        isUser
-          ? "bg-indigo-100 dark:bg-indigo-900/40"
-          : "bg-violet-100 dark:bg-violet-900/40"
-      }`}>
+      <div style={{
+        width: "28px", height: "28px", borderRadius: "50%", flexShrink: 0, marginTop: "4px",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        background: isUser ? "rgba(99, 102, 241, 0.15)" : "rgba(139, 92, 246, 0.15)"
+      }}>
         {isUser
-          ? <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400">我</span>
-          : <Bot className="w-3.5 h-3.5 text-violet-600 dark:text-violet-400" aria-hidden />
+          ? <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--color-primary)" }}>我</span>
+          : <Bot style={{ width: "16px", height: "16px", color: "#8B5CF6" }} />
         }
       </div>
 
-      <div className={`flex flex-col gap-1 max-w-[82%] ${isUser ? "items-end" : "items-start"}`}>
+      <div style={{
+        display: "flex", flexDirection: "column", gap: "4px", maxWidth: "82%",
+        alignItems: isUser ? "flex-end" : "flex-start"
+      }}>
         {/* Role label + timestamp */}
-        <div className={`flex items-center gap-2 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
-          <span className={`text-xs font-medium ${isUser ? "text-indigo-500 dark:text-indigo-400" : "text-violet-500 dark:text-violet-400"}`}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexDirection: isUser ? "row-reverse" : "row" }}>
+          <span style={{
+            fontSize: "12px", fontWeight: 500,
+            color: isUser ? "var(--color-primary)" : "#8B5CF6"
+          }}>
             {isUser ? "我" : "Claude"}
           </span>
-          <span className="text-xs text-slate-400 dark:text-slate-500">{formatTime(msg.ts)}</span>
+          <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>{formatTime(msg.ts)}</span>
         </div>
 
         {/* Bubble */}
-        <div className={`relative px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
-          isUser
-            ? "bg-indigo-500 text-white rounded-tr-sm"
-            : "bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 rounded-tl-sm"
-        }`}>
+        <div style={{
+          padding: "10px 16px", borderRadius: "16px", fontSize: "14px", lineHeight: 1.6,
+          background: isUser ? "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))" : "var(--bg-card)",
+          color: isUser ? "white" : "var(--text-main)",
+          border: isUser ? "none" : "1px solid var(--border-light)",
+          borderTopRightRadius: isUser ? "4px" : "16px",
+          borderTopLeftRadius: isUser ? "16px" : "4px"
+        }}>
           {isUser ? (
-            <p className="whitespace-pre-wrap">{msg.content}</p>
+            <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>{msg.content}</p>
           ) : (
             <MdContent content={msg.content} />
           )}
           {msg.streaming && (
-            <span className="inline-flex ml-1 gap-0.5 translate-y-0.5">
+            <span style={{ display: "inline-flex", marginLeft: "4px", gap: "2px" }}>
               {[0, 1, 2].map((i) => (
-                <span key={i} className="w-1 h-1 rounded-full bg-current opacity-60 animate-bounce"
-                  style={{ animationDelay: `${i * 150}ms` }} />
+                <span key={i} style={{
+                  width: "4px", height: "4px", borderRadius: "50%", background: "currentColor", opacity: 0.6,
+                  animation: "bounce 1s infinite", animationDelay: `${i * 150}ms`
+                }} />
               ))}
             </span>
           )}
@@ -256,7 +264,7 @@ function MessageBubble({ msg }: { msg: Message }) {
 
         {/* Copy button (assistant only) */}
         {!isUser && !msg.streaming && (
-          <div className="flex">
+          <div style={{ display: "flex" }}>
             <CopyButton text={msg.content} />
           </div>
         )}
@@ -276,15 +284,23 @@ function WelcomeHero({
   const config = useStore((s) => s.config);
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-6 px-6 py-8 text-center">
+    <div style={{
+      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+      height: "100%", gap: "24px", padding: "32px 24px", textAlign: "center"
+    }}>
       {/* Logo */}
-      <div className="flex flex-col items-center gap-3">
-        <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
-          <Sparkles className="w-8 h-8 text-white" aria-hidden />
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "12px" }}>
+        <div style={{
+          width: "64px", height: "64px", borderRadius: "16px",
+          background: "linear-gradient(135deg, #8B5CF6, var(--color-primary))",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          boxShadow: "0 4px 20px rgba(139, 92, 246, 0.3)"
+        }}>
+          <Sparkles style={{ width: "32px", height: "32px", color: "white" }} />
         </div>
         <div>
-          <h2 className="font-heading text-2xl font-bold text-slate-800 dark:text-slate-100">Claude 科研助手</h2>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+          <h2 style={{ fontSize: "24px", fontWeight: 700, color: "var(--text-main)" }}>Claude 科研助手</h2>
+          <p style={{ fontSize: "14px", color: "var(--text-muted)", marginTop: "4px" }}>
             {connected
               ? `${config?.vault_path ? "Vault 已连接" : ""} · 本地 Claude CLI 已连接`
               : "正在连接本地 Claude CLI…"}
@@ -294,32 +310,44 @@ function WelcomeHero({
 
       {/* Connection badge */}
       {!connected && (
-        <div className="flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700/50 text-sm text-amber-600 dark:text-amber-400">
-          <WifiOff className="w-4 h-4" aria-hidden />
+        <div style={{
+          display: "flex", alignItems: "center", gap: "8px", padding: "10px 16px", borderRadius: "12px",
+          background: "rgba(251, 191, 36, 0.1)", border: "1px solid rgba(251, 191, 36, 0.3)",
+          fontSize: "14px", color: "#D97706"
+        }}>
+          <WifiOff style={{ width: "16px", height: "16px" }} />
           <span>等待 Claude CLI 连接，请确保后端已启动</span>
         </div>
       )}
 
       {/* Quick action grid */}
-      <div className="w-full max-w-xl">
-        <p className="text-xs font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-3">快捷指令</p>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+      <div style={{ width: "100%", maxWidth: "500px" }}>
+        <p style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "12px" }}>快捷指令</p>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "10px" }}>
           {QUICK_ACTIONS.map(({ id, label, desc, prompt, Icon, color, bg, border }) => (
             <button key={id} onClick={() => onSend(prompt)} disabled={!connected}
-              className={`flex flex-col items-start gap-2 p-3.5 rounded-2xl border ${bg} ${border} hover:opacity-90 transition-all cursor-pointer disabled:opacity-40 text-left group`}>
-              <div className={`w-7 h-7 rounded-xl ${bg} flex items-center justify-center border ${border}`}>
-                <Icon className={`w-3.5 h-3.5 ${color}`} aria-hidden />
+              style={{
+                display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "8px",
+                padding: "14px", borderRadius: "16px", background: bg, border: `1px solid ${border}`,
+                cursor: connected ? "pointer" : "not-allowed", opacity: connected ? 1 : 0.4,
+                transition: "all 0.2s ease", textAlign: "left"
+              }}>
+              <div style={{
+                width: "28px", height: "28px", borderRadius: "10px", background: bg,
+                display: "flex", alignItems: "center", justifyContent: "center", border: `1px solid ${border}`
+              }}>
+                <Icon style={{ width: "14px", height: "14px", color }} />
               </div>
               <div>
-                <p className={`text-xs font-semibold ${color}`}>{label}</p>
-                <p className="text-xs text-slate-500 dark:text-slate-400 leading-tight mt-0.5">{desc}</p>
+                <p style={{ fontSize: "12px", fontWeight: 600, color }}>{label}</p>
+                <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px", lineHeight: 1.4 }}>{desc}</p>
               </div>
             </button>
           ))}
         </div>
       </div>
 
-      <p className="text-xs text-slate-400 dark:text-slate-500">
+      <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
         直接在下方输入问题，或选择快捷指令开始
       </p>
     </div>
@@ -393,7 +421,6 @@ export default function ClaudePanel() {
   useEffect(() => {
     const el = scrollAreaRef.current;
     if (!el) return;
-    // Auto-scroll only if near bottom
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
     if (atBottom || streaming) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -420,7 +447,6 @@ export default function ClaudePanel() {
     wsRef.current.send(trimmed);
     setInput("");
     setStreaming(true);
-    // Reset textarea height
     if (inputRef.current) {
       inputRef.current.style.height = "auto";
     }
@@ -435,44 +461,56 @@ export default function ClaudePanel() {
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div className="h-full flex flex-col">
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-app)" }}>
       {/* Header */}
-      <div className="px-6 py-3.5 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center gap-3 shrink-0">
-        <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center shadow-sm">
-          <Bot className="w-4 h-4 text-white" aria-hidden />
+      <div style={{
+        padding: "14px 24px", borderBottom: "1px solid var(--border-light)", background: "var(--bg-card)",
+        display: "flex", alignItems: "center", gap: "12px", flexShrink: 0
+      }}>
+        <div style={{
+          width: "36px", height: "36px", borderRadius: "10px",
+          background: "linear-gradient(135deg, #8B5CF6, var(--color-primary))",
+          display: "flex", alignItems: "center", justifyContent: "center"
+        }}>
+          <Bot style={{ width: "18px", height: "18px", color: "white" }} />
         </div>
-        <div className="flex-1">
-          <h2 className="font-heading text-base font-semibold text-slate-800 dark:text-slate-100 leading-tight">Claude 面板</h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400">本地 Claude CLI · 上下文自动注入</p>
+        <div style={{ flex: 1 }}>
+          <h2 style={{ fontSize: "16px", fontWeight: 600, color: "var(--text-main)", lineHeight: 1.3 }}>Claude 面板</h2>
+          <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>本地 Claude CLI · 上下文自动注入</p>
         </div>
 
         {/* Status */}
-        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium ${
-          connected
-            ? "bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400"
-            : connecting
-            ? "bg-amber-50 dark:bg-amber-900/20 text-amber-500"
-            : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400"
-        }`}>
+        <div style={{
+          display: "flex", alignItems: "center", gap: "6px", padding: "6px 12px", borderRadius: "8px",
+          fontSize: "12px", fontWeight: 500,
+          background: connected ? "rgba(168, 230, 207, 0.15)" : connecting ? "rgba(251, 191, 36, 0.15)" : "var(--bg-hover)",
+          color: connected ? "#059669" : connecting ? "#D97706" : "var(--text-muted)"
+        }}>
           {connected
-            ? <><span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /><Wifi className="w-3 h-3" aria-hidden />已连接</>
+            ? <><span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#10B981", animation: "pulse 2s infinite" }} /><Wifi style={{ width: "14px", height: "14px" }} />已连接</>
             : connecting
-            ? <><span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />连接中…</>
-            : <><WifiOff className="w-3 h-3" aria-hidden />未连接</>
+            ? <><span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#FBBF24", animation: "pulse 2s infinite" }} />连接中…</>
+            : <><WifiOff style={{ width: "14px", height: "14px" }} />未连接</>
           }
         </div>
 
         {!connected && !connecting && (
           <button onClick={connect} aria-label="重连"
-            className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-500 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors cursor-pointer">
-            <Cpu className="w-4 h-4" aria-hidden />
+            style={{
+              padding: "6px", borderRadius: "8px", color: "var(--text-muted)",
+              background: "transparent", border: "none", cursor: "pointer"
+            }}>
+            <Cpu style={{ width: "16px", height: "16px" }} />
           </button>
         )}
 
         {messages.length > 0 && (
           <button onClick={() => setMessages([])} aria-label="清空对话"
-            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer">
-            <RotateCcw className="w-4 h-4" aria-hidden />
+            style={{
+              padding: "6px", borderRadius: "8px", color: "var(--text-muted)",
+              background: "transparent", border: "none", cursor: "pointer"
+            }}>
+            <RotateCcw style={{ width: "16px", height: "16px" }} />
           </button>
         )}
       </div>
@@ -481,12 +519,12 @@ export default function ClaudePanel() {
       <div
         ref={scrollAreaRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto relative"
+        style={{ flex: 1, overflowY: "auto", position: "relative" }}
       >
         {messages.length === 0 ? (
           <WelcomeHero connected={connected} onSend={send} />
         ) : (
-          <div className="max-w-3xl mx-auto px-6 pt-4 pb-4 flex flex-col gap-2">
+          <div style={{ maxWidth: "720px", margin: "0 auto", padding: "16px 24px 16px", display: "flex", flexDirection: "column", gap: "8px" }}>
             {messages.map((msg) => <MessageBubble key={msg.id} msg={msg} />)}
             <div ref={bottomRef} />
           </div>
@@ -497,21 +535,36 @@ export default function ClaudePanel() {
           <button
             onClick={scrollToBottom}
             aria-label="滚动到底部"
-            className="absolute bottom-4 right-6 w-8 h-8 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-md flex items-center justify-center text-slate-500 hover:text-indigo-500 hover:border-indigo-300 transition-colors cursor-pointer z-10"
+            style={{
+              position: "absolute", bottom: "16px", right: "24px",
+              width: "32px", height: "32px", borderRadius: "50%",
+              background: "var(--bg-card)", border: "1px solid var(--border-light)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              color: "var(--text-muted)", cursor: "pointer", boxShadow: "var(--shadow-soft)", zIndex: 10
+            }}
           >
-            <ChevronDown className="w-4 h-4" />
+            <ChevronDown style={{ width: "16px", height: "16px" }} />
           </button>
         )}
       </div>
 
       {/* Quick actions compact bar (when conversation active) */}
       {messages.length > 0 && (
-        <div className="px-4 py-2 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center gap-1.5 overflow-x-auto shrink-0">
-          <span className="text-xs text-slate-400 shrink-0 mr-1">快捷：</span>
+        <div style={{
+          padding: "8px 16px", borderTop: "1px solid var(--border-light)", background: "var(--bg-card)",
+          display: "flex", alignItems: "center", gap: "6px", overflowX: "auto", flexShrink: 0
+        }}>
+          <span style={{ fontSize: "12px", color: "var(--text-muted)", flexShrink: 0, marginRight: "4px" }}>快捷：</span>
           {QUICK_ACTIONS.map(({ id, label, prompt, Icon, color }) => (
             <button key={id} onClick={() => send(prompt)} disabled={!connected || streaming}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer disabled:opacity-40 shrink-0">
-              <Icon className={`w-3 h-3 ${color}`} aria-hidden />
+              style={{
+                display: "flex", alignItems: "center", gap: "6px",
+                padding: "6px 12px", borderRadius: "8px", fontSize: "12px", fontWeight: 500,
+                color: "var(--text-secondary)", background: "var(--bg-hover)", border: "1px solid var(--border-light)",
+                cursor: connected && !streaming ? "pointer" : "not-allowed", opacity: connected && !streaming ? 1 : 0.4,
+                flexShrink: 0
+              }}>
+              <Icon style={{ width: "14px", height: "14px", color }} />
               {label}
             </button>
           ))}
@@ -519,8 +572,14 @@ export default function ClaudePanel() {
       )}
 
       {/* Input bar */}
-      <div className="px-4 py-3 border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shrink-0">
-        <div className="flex items-end gap-2 p-2.5 rounded-2xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 focus-within:border-indigo-400 dark:focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all">
+      <div style={{
+        padding: "12px 16px", borderTop: "1px solid var(--border-light)", background: "var(--bg-card)", flexShrink: 0
+      }}>
+        <div style={{
+          display: "flex", alignItems: "flex-end", gap: "8px",
+          padding: "10px 14px", borderRadius: "16px",
+          border: "1px solid var(--border-light)", background: "var(--bg-hover)"
+        }}>
           <textarea
             ref={inputRef}
             value={input}
@@ -529,7 +588,11 @@ export default function ClaudePanel() {
             placeholder={connected ? "输入问题… (Enter 发送，Shift+Enter 换行)" : "等待 Claude CLI 连接…"}
             disabled={!connected}
             rows={1}
-            className="flex-1 bg-transparent text-sm text-slate-800 dark:text-slate-100 placeholder:text-slate-400 resize-none focus:outline-none min-h-[22px] max-h-40 disabled:cursor-not-allowed py-0.5"
+            style={{
+              flex: 1, background: "transparent", fontSize: "14px",
+              color: "var(--text-main)", border: "none", outline: "none", resize: "none",
+              minHeight: "22px", maxHeight: "160px", padding: "2px 0"
+            }}
             onInput={(e) => {
               const el = e.currentTarget;
               el.style.height = "auto";
@@ -540,13 +603,19 @@ export default function ClaudePanel() {
             onClick={() => send(input)}
             disabled={!connected || !input.trim() || streaming}
             aria-label="发送"
-            className="w-8 h-8 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white flex items-center justify-center transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+            style={{
+              width: "32px", height: "32px", borderRadius: "10px",
+              background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+              color: "white", display: "flex", alignItems: "center", justifyContent: "center",
+              border: "none", cursor: connected && input.trim() && !streaming ? "pointer" : "not-allowed",
+              opacity: connected && input.trim() && !streaming ? 1 : 0.4, flexShrink: 0
+            }}
           >
-            <Send className="w-3.5 h-3.5" aria-hidden />
+            <Send style={{ width: "14px", height: "14px" }} />
           </button>
         </div>
-        <p className="text-xs text-slate-400 dark:text-slate-500 mt-1.5 px-1">
-          <kbd className="text-xs">Enter</kbd> 发送 · <kbd className="text-xs">Shift+Enter</kbd> 换行 · 上下文自动注入
+        <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "6px", paddingLeft: "4px" }}>
+          Enter 发送 · Shift+Enter 换行 · 上下文自动注入
         </p>
       </div>
     </div>

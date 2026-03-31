@@ -9,65 +9,243 @@ interface Props {
 }
 
 const ACTIONS = [
-  { key: "save",      label: "S 保存", Icon: Bookmark,    color: "text-emerald-500 hover:border-emerald-300" },
-  { key: "skip",      label: "X 跳过", Icon: X,           color: "text-slate-400 hover:border-slate-300" },
-  { key: "star",      label: "F 精华", Icon: Star,        color: "text-amber-500 hover:border-amber-300" },
-  { key: "deep_dive", label: "D 深度", Icon: ChevronDown, color: "text-indigo-500 hover:border-indigo-300" },
+  {
+    key: "save",
+    label: "保存",
+    shortcut: "S",
+    Icon: Bookmark,
+    gradient: "linear-gradient(135deg, #A8E6CF, #7DD3C0)",
+    shadow: "rgba(168, 230, 207, 0.4)",
+  },
+  {
+    key: "skip",
+    label: "跳过",
+    shortcut: "X",
+    Icon: X,
+    gradient: "linear-gradient(135deg, #E8E8E8, #D0D0D0)",
+    shadow: "rgba(200, 200, 200, 0.3)",
+  },
+  {
+    key: "star",
+    label: "精华",
+    shortcut: "F",
+    Icon: Star,
+    gradient: "linear-gradient(135deg, #FFE4B5, #F5C88C)",
+    shadow: "rgba(255, 228, 181, 0.4)",
+  },
+  {
+    key: "deep_dive",
+    label: "深度",
+    shortcut: "D",
+    Icon: ChevronDown,
+    gradient: "linear-gradient(135deg, #BCA4E3, #9D7BDB)",
+    shadow: "rgba(188, 164, 227, 0.4)",
+  },
 ];
 
 export default function CardView({ card, focused, onClick, onFeedback }: Props) {
+  const scorePercent = Math.round(card.score * 100);
+
   return (
     <article
       onClick={onClick}
-      className={`p-4 rounded-2xl bg-white dark:bg-slate-800/60 border transition-all duration-150 cursor-pointer
-        ${focused
-          ? "border-indigo-400 dark:border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900/50"
-          : "border-slate-200 dark:border-slate-700/60 hover:border-slate-300 dark:hover:border-slate-600"
-        }`}
+      style={{
+        position: "relative",
+        padding: "24px",
+        borderRadius: "var(--radius-md)",
+        background: focused ? "var(--bg-panel)" : "var(--bg-card)",
+        backdropFilter: "blur(16px) saturate(160%)",
+        WebkitBackdropFilter: "blur(16px) saturate(160%)",
+        border: focused
+          ? "2px solid var(--color-primary)"
+          : "1px solid var(--border-light)",
+        boxShadow: focused
+          ? "0 8px 32px rgba(188, 164, 227, 0.25), 0 0 0 4px rgba(188, 164, 227, 0.1)"
+          : "var(--shadow-soft)",
+        cursor: "pointer",
+        transition: "all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)",
+        transform: focused ? "scale(1.01)" : "scale(1)",
+      }}
+      onMouseEnter={(e) => {
+        if (!focused) {
+          e.currentTarget.style.transform = "translateY(-4px)";
+          e.currentTarget.style.boxShadow = "var(--shadow-medium)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!focused) {
+          e.currentTarget.style.transform = "translateY(0)";
+          e.currentTarget.style.boxShadow = "var(--shadow-soft)";
+        }
+      }}
     >
-      {/* 头部：评分条 + 来源 */}
-      <div className="flex items-center gap-3 mb-2">
-        <div className="flex-1 h-1.5 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
+      {/* Focused indicator - left gradient bar */}
+      {focused && (
+        <div
+          style={{
+            position: "absolute",
+            left: "-2px",
+            top: "50%",
+            transform: "translateY(-50%)",
+            width: "4px",
+            height: "48px",
+            background: "linear-gradient(180deg, var(--color-primary), var(--color-secondary))",
+            borderRadius: "0 4px 4px 0",
+          }}
+        />
+      )}
+
+      {/* Header: Score bar + Source */}
+      <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px" }}>
+        {/* Score bar */}
+        <div
+          style={{
+            flex: 1,
+            height: "8px",
+            background: "var(--bg-hover)",
+            borderRadius: "var(--radius-full)",
+            overflow: "hidden",
+            boxShadow: "var(--shadow-inner)",
+          }}
+        >
           <div
-            className="h-full rounded-full bg-gradient-to-r from-indigo-400 to-indigo-600 transition-all"
-            style={{ width: `${Math.round(card.score * 100)}%` }}
+            style={{
+              height: "100%",
+              width: `${scorePercent}%`,
+              background:
+                scorePercent >= 80
+                  ? "linear-gradient(90deg, #A8E6CF, #7DD3C0)"
+                  : scorePercent >= 60
+                  ? "linear-gradient(90deg, #BCA4E3, #9D7BDB)"
+                  : "linear-gradient(90deg, #FFE4B5, #F5C88C)",
+              borderRadius: "var(--radius-full)",
+              transition: "width 0.5s ease",
+              boxShadow: "0 0 12px rgba(188, 164, 227, 0.3)",
+            }}
           />
         </div>
-        <span className="text-xs text-slate-400 dark:text-slate-500 shrink-0">
-          {Math.round(card.score * 100)}% · {card.module_id}
+
+        {/* Score percentage */}
+        <span
+          style={{
+            fontSize: "0.875rem",
+            fontWeight: 700,
+            color:
+              scorePercent >= 80
+                ? "#5BA88C"
+                : scorePercent >= 60
+                ? "var(--color-primary-dark)"
+                : "#D4A574",
+            fontFamily: "'Nunito', sans-serif",
+          }}
+        >
+          {scorePercent}%
         </span>
+
+        {/* Module tag */}
+        <span
+          style={{
+            fontSize: "0.75rem",
+            fontWeight: 600,
+            padding: "4px 12px",
+            borderRadius: "var(--radius-full)",
+            background: "rgba(188, 164, 227, 0.12)",
+            color: "var(--color-primary-dark)",
+            border: "1px solid var(--border-light)",
+          }}
+        >
+          {card.module_id}
+        </span>
+
+        {/* External link */}
         {card.source_url && (
           <a
             href={card.source_url}
             target="_blank"
             rel="noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="text-slate-400 hover:text-indigo-500 transition-colors"
             aria-label="在浏览器打开"
+            style={{
+              padding: "8px",
+              borderRadius: "50%",
+              color: "var(--text-muted)",
+              transition: "all 0.2s ease",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.color = "var(--color-primary)";
+              e.currentTarget.style.background = "rgba(188, 164, 227, 0.1)";
+              e.currentTarget.style.transform = "scale(1.1)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = "var(--text-muted)";
+              e.currentTarget.style.background = "transparent";
+              e.currentTarget.style.transform = "scale(1)";
+            }}
           >
-            <ExternalLink className="w-3.5 h-3.5" aria-hidden />
+            <ExternalLink style={{ width: "16px", height: "16px" }} aria-hidden />
           </a>
         )}
       </div>
 
-      {/* 标题 */}
-      <h3 className="text-sm font-medium text-slate-800 dark:text-slate-100 leading-snug mb-1.5">
+      {/* Title */}
+      <h3
+        style={{
+          fontFamily: "'M PLUS Rounded 1c', sans-serif",
+          fontSize: "1rem",
+          fontWeight: 700,
+          color: focused ? "var(--text-main)" : "var(--text-secondary)",
+          lineHeight: 1.5,
+          marginBottom: "12px",
+          transition: "color 0.2s ease",
+        }}
+      >
         {card.title}
       </h3>
 
-      {/* 摘要 */}
-      <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed mb-3">
+      {/* Summary */}
+      <p
+        style={{
+          fontSize: "0.9375rem",
+          color: "var(--text-muted)",
+          lineHeight: 1.7,
+          marginBottom: "16px",
+          display: "-webkit-box",
+          WebkitLineClamp: 3,
+          WebkitBoxOrient: "vertical",
+          overflow: "hidden",
+        }}
+      >
         {card.summary}
       </p>
 
-      {/* 标签 */}
+      {/* Tags */}
       {card.tags.length > 0 && (
-        <div className="flex flex-wrap gap-1 mb-3">
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginBottom: "16px" }}>
           {card.tags.slice(0, 5).map((tag) => (
             <span
               key={tag}
-              className="text-xs px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-700
-                         text-slate-500 dark:text-slate-400"
+              style={{
+                fontSize: "0.8125rem",
+                fontWeight: 600,
+                padding: "6px 14px",
+                borderRadius: "var(--radius-full)",
+                background: "linear-gradient(135deg, rgba(188, 164, 227, 0.12), rgba(255, 183, 178, 0.08))",
+                color: "var(--color-primary-dark)",
+                border: "1px solid var(--border-light)",
+                transition: "all 0.2s ease",
+                cursor: "default",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = "scale(1.05)";
+                e.currentTarget.style.boxShadow = "0 2px 8px rgba(188, 164, 227, 0.2)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = "scale(1)";
+                e.currentTarget.style.boxShadow = "none";
+              }}
             >
               #{tag}
             </span>
@@ -75,17 +253,57 @@ export default function CardView({ card, focused, onClick, onFeedback }: Props) 
         </div>
       )}
 
-      {/* 操作按钮 */}
-      <div className="flex gap-1.5">
-        {ACTIONS.map(({ key, label, Icon, color }) => (
+      {/* Action buttons */}
+      <div style={{ display: "flex", gap: "10px" }}>
+        {ACTIONS.map(({ key, label, shortcut, Icon, gradient, shadow }) => (
           <button
             key={key}
-            onClick={(e) => { e.stopPropagation(); onFeedback(key); }}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs border
-              border-slate-200 dark:border-slate-700 transition-colors cursor-pointer ${color}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onFeedback(key);
+            }}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              padding: "10px 16px",
+              borderRadius: "var(--radius-full)",
+              background: "var(--bg-card)",
+              border: "1px solid var(--border-light)",
+              color: "var(--text-secondary)",
+              fontSize: "0.8125rem",
+              fontWeight: 600,
+              cursor: "pointer",
+              transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
+              flex: 1,
+              justifyContent: "center",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = gradient;
+              e.currentTarget.style.color = "white";
+              e.currentTarget.style.borderColor = "transparent";
+              e.currentTarget.style.boxShadow = `0 4px 16px ${shadow}`;
+              e.currentTarget.style.transform = "translateY(-2px)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "var(--bg-card)";
+              e.currentTarget.style.color = "var(--text-secondary)";
+              e.currentTarget.style.borderColor = "var(--border-light)";
+              e.currentTarget.style.boxShadow = "none";
+              e.currentTarget.style.transform = "translateY(0)";
+            }}
           >
-            <Icon className="w-3 h-3" aria-hidden />
-            {label}
+            <Icon style={{ width: "14px", height: "14px" }} aria-hidden />
+            <span>{label}</span>
+            <span
+              style={{
+                fontSize: "0.6875rem",
+                opacity: 0.7,
+                marginLeft: "2px",
+              }}
+            >
+              {shortcut}
+            </span>
           </button>
         ))}
       </div>

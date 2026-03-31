@@ -79,35 +79,44 @@ export default function ArxivTracker() {
   const filtered = papers.filter((p) => p.score >= filterScore);
 
   return (
-    <div className="h-full flex flex-col bg-slate-50 dark:bg-slate-950">
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-app)" }}>
       {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-indigo-100 dark:bg-indigo-900/40 flex items-center justify-center">
-            <BookOpen className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 24px", background: "var(--bg-card)", borderBottom: "1px solid var(--border-light)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <div style={{ width: "40px", height: "40px", borderRadius: "var(--radius-md)", background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <BookOpen style={{ width: "20px", height: "20px", color: "white" }} />
           </div>
           <div>
-            <h1 className="text-lg font-semibold text-slate-800 dark:text-slate-100">
+            <h1 style={{ fontSize: "1.125rem", fontWeight: 600, color: "var(--text-main)" }}>
               arXiv 论文追踪
             </h1>
-            <p className="text-sm text-slate-500 dark:text-slate-400">
+            <p style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>
               自动爬取 · Claude 评分 · 相关度排序
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
           <button
             onClick={() => setShowConfig(!showConfig)}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            style={{
+              display: "flex", alignItems: "center", gap: "6px", padding: "8px 14px", borderRadius: "var(--radius-lg)",
+              background: "var(--bg-hover)", border: "1px solid var(--border-light)", color: "var(--text-secondary)",
+              fontSize: "0.875rem", fontWeight: 500, cursor: "pointer", transition: "all 0.2s ease"
+            }}
           >
-            <Settings className="w-4 h-4" />配置
+            <Settings style={{ width: "16px", height: "16px" }} />配置
           </button>
           <button
             onClick={runCrawl}
             disabled={loading}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white text-sm font-medium transition-colors"
+            style={{
+              display: "flex", alignItems: "center", gap: "6px", padding: "8px 16px", borderRadius: "var(--radius-lg)",
+              background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))", color: "white",
+              fontSize: "0.875rem", fontWeight: 600, cursor: loading ? "not-allowed" : "pointer",
+              opacity: loading ? 0.6 : 1, transition: "all 0.2s ease", border: "none"
+            }}
           >
-            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+            <RefreshCw style={{ width: "16px", height: "16px", animation: loading ? "spin 1s linear infinite" : "none" }} />
             {loading ? "爬取中..." : "立即爬取"}
           </button>
         </div>
@@ -115,10 +124,10 @@ export default function ArxivTracker() {
 
       {/* Config panel */}
       {showConfig && (
-        <div className="px-6 py-4 bg-slate-100 dark:bg-slate-800/50 border-b border-slate-200 dark:border-slate-700">
-          <div className="max-w-xl space-y-3">
-            <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+        <div style={{ padding: "16px 24px", background: "var(--bg-hover)", borderBottom: "1px solid var(--border-light)" }}>
+          <div style={{ maxWidth: "500px" }}>
+            <div style={{ marginBottom: "12px" }}>
+              <label style={{ display: "block", fontSize: "0.875rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "6px" }}>
                 追踪关键词（逗号分隔）
               </label>
               <input
@@ -127,31 +136,34 @@ export default function ArxivTracker() {
                 onChange={(e) =>
                   setConfig({
                     ...config,
-                    keywords: e.target.value
-                      .split(",")
-                      .map((k) => k.trim())
-                      .filter(Boolean),
+                    keywords: e.target.value.split(",").map((k) => k.trim()).filter(Boolean),
                   })
                 }
-                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-sm"
+                style={{
+                  width: "100%", padding: "10px 14px", borderRadius: "var(--radius-lg)",
+                  border: "1px solid var(--border-light)", background: "var(--bg-card)",
+                  color: "var(--text-main)", fontSize: "0.875rem"
+                }}
               />
             </div>
-            <div className="flex items-center gap-4">
-              <label className="text-sm text-slate-700 dark:text-slate-300 whitespace-nowrap">
+            <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+              <label style={{ fontSize: "0.875rem", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
                 最低评分: {config.min_score}
               </label>
               <input
                 type="range" min="0" max="1" step="0.1"
                 value={config.min_score}
-                onChange={(e) =>
-                  setConfig({ ...config, min_score: parseFloat(e.target.value) })
-                }
-                className="flex-1"
+                onChange={(e) => setConfig({ ...config, min_score: parseFloat(e.target.value) })}
+                style={{ flex: 1 }}
               />
             </div>
             <button
               onClick={saveConfig}
-              className="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-sm"
+              style={{
+                padding: "8px 16px", borderRadius: "var(--radius-lg)",
+                background: "linear-gradient(135deg, #10B981, #059669)", color: "white",
+                fontSize: "0.875rem", fontWeight: 600, border: "none", cursor: "pointer"
+              }}
             >
               保存
             </button>
@@ -160,29 +172,29 @@ export default function ArxivTracker() {
       )}
 
       {/* Filter bar */}
-      <div className="flex items-center gap-3 px-6 py-2 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700">
-        <Filter className="w-4 h-4 text-slate-400" />
-        <span className="text-sm text-slate-500">评分 ≥</span>
+      <div style={{ display: "flex", alignItems: "center", gap: "12px", padding: "10px 24px", background: "var(--bg-card)", borderBottom: "1px solid var(--border-light)" }}>
+        <Filter style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
+        <span style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>评分 ≥</span>
         <input
           type="range" min="0" max="1" step="0.1"
           value={filterScore}
           onChange={(e) => setFilterScore(parseFloat(e.target.value))}
-          className="w-28"
+          style={{ width: "120px" }}
         />
-        <span className="text-sm font-medium text-slate-700 dark:text-slate-300 w-6">
+        <span style={{ fontSize: "0.875rem", fontWeight: 600, color: "var(--text-main)", width: "32px" }}>
           {filterScore.toFixed(1)}
         </span>
-        <span className="ml-auto text-sm text-slate-400">{filtered.length} 篇</span>
+        <span style={{ marginLeft: "auto", fontSize: "0.875rem", color: "var(--text-muted)" }}>{filtered.length} 篇</span>
       </div>
 
       {/* Paper list */}
-      <div className="flex-1 overflow-auto p-6">
-        <div className="max-w-4xl mx-auto space-y-3">
+      <div style={{ flex: 1, overflow: "auto", padding: "24px" }}>
+        <div style={{ maxWidth: "900px", margin: "0 auto", display: "flex", flexDirection: "column", gap: "12px" }}>
           {filtered.length === 0 ? (
-            <div className="text-center py-16 text-slate-400">
-              <BookOpen className="w-12 h-12 mx-auto mb-3 opacity-40" />
+            <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }}>
+              <BookOpen style={{ width: "48px", height: "48px", margin: "0 auto 16px", opacity: 0.4 }} />
               <p>暂无论文数据</p>
-              <p className="text-sm mt-1">点击"立即爬取"开始追踪</p>
+              <p style={{ fontSize: "0.875rem", marginTop: "8px" }}>点击"立即爬取"开始追踪</p>
             </div>
           ) : (
             filtered.map((paper) => <PaperCard key={paper.id} paper={paper} />)
@@ -196,64 +208,81 @@ export default function ArxivTracker() {
 function PaperCard({ paper }: { paper: ArxivPaper }) {
   const [expanded, setExpanded] = useState(false);
   const scoreColor =
-    paper.score >= 0.8 ? "bg-emerald-500"
-    : paper.score >= 0.6 ? "bg-amber-500"
-    : "bg-slate-400";
+    paper.score >= 0.8 ? "#10B981"
+    : paper.score >= 0.6 ? "#F59E0B"
+    : "var(--text-muted)";
   const meta = paper.metadata || {};
   const authors = meta.authors || [];
 
   return (
-    <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 p-4 hover:shadow-md transition-shadow">
-      <div className="flex gap-3">
-        <div
-          className={`w-10 h-10 rounded-full ${scoreColor} flex-shrink-0 flex items-center justify-center text-white font-bold text-sm`}
-        >
+    <div style={{
+      background: "var(--bg-card)", borderRadius: "var(--radius-xl)",
+      border: "1px solid var(--border-light)", padding: "16px",
+      transition: "all 0.2s ease"
+    }}>
+      <div style={{ display: "flex", gap: "12px" }}>
+        <div style={{
+          width: "44px", height: "44px", borderRadius: "50%",
+          background: scoreColor, flexShrink: 0,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: "white", fontWeight: 700, fontSize: "0.875rem"
+        }}>
           {(paper.score * 10).toFixed(0)}
         </div>
-        <div className="flex-1 min-w-0">
+        <div style={{ flex: 1, minWidth: 0 }}>
           <a
             href={paper.source_url}
             target="_blank"
             rel="noopener noreferrer"
-            className="font-semibold text-slate-800 dark:text-slate-100 hover:text-indigo-600 dark:hover:text-indigo-400 flex items-start gap-1.5 mb-1"
+            style={{
+              fontWeight: 600, color: "var(--text-main)",
+              display: "flex", alignItems: "flex-start", gap: "6px", marginBottom: "6px",
+              textDecoration: "none"
+            }}
           >
             <span>{paper.title}</span>
-            <ExternalLink className="w-3.5 h-3.5 mt-0.5 shrink-0 opacity-50" />
+            <ExternalLink style={{ width: "14px", height: "14px", marginTop: "4px", flexShrink: 0, opacity: 0.5 }} />
           </a>
-          <div className="text-xs text-slate-500 mb-2">
+          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "8px" }}>
             {authors.slice(0, 3).join(", ")}
             {authors.length > 3 ? " et al." : ""}
             {meta.published ? ` · ${meta.published}` : ""}
           </div>
-          <div className="flex flex-wrap gap-1 mb-2">
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "10px" }}>
             {paper.tags?.map((t) => (
               <span
                 key={t}
-                className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 text-xs text-slate-500 dark:text-slate-400 rounded-full"
+                style={{
+                  padding: "3px 10px", borderRadius: "var(--radius-full)",
+                  background: "var(--bg-hover)", fontSize: "0.75rem", color: "var(--text-muted)"
+                }}
               >
                 {t}
               </span>
             ))}
           </div>
           {meta.contribution && (
-            <div className="flex gap-1.5 mb-2 p-2 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg">
-              <Star className="w-3.5 h-3.5 text-indigo-500 mt-0.5 shrink-0" />
-              <p className="text-xs text-slate-700 dark:text-slate-300">
+            <div style={{
+              display: "flex", gap: "8px", marginBottom: "10px", padding: "10px 14px",
+              background: "rgba(99, 102, 241, 0.08)", borderRadius: "var(--radius-lg)"
+            }}>
+              <Star style={{ width: "16px", height: "16px", color: "var(--color-primary)", marginTop: "2px", flexShrink: 0 }} />
+              <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.5 }}>
                 {meta.contribution}
               </p>
             </div>
           )}
-          <p
-            className={`text-sm text-slate-600 dark:text-slate-400 ${
-              expanded ? "" : "line-clamp-2"
-            }`}
-          >
+          <p style={{
+            fontSize: "0.875rem", color: "var(--text-secondary)", lineHeight: 1.6,
+            display: expanded ? "block" : "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+            overflow: "hidden"
+          }}>
             {paper.summary}
           </p>
-          <div className="flex gap-3 mt-2">
+          <div style={{ display: "flex", gap: "16px", marginTop: "10px" }}>
             <button
               onClick={() => setExpanded(!expanded)}
-              className="text-xs text-indigo-500 hover:underline"
+              style={{ fontSize: "0.8125rem", color: "var(--color-primary)", background: "none", border: "none", cursor: "pointer" }}
             >
               {expanded ? "收起" : "展开"}
             </button>
@@ -262,7 +291,7 @@ function PaperCard({ paper }: { paper: ArxivPaper }) {
                 href={meta["pdf-url"]}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                style={{ fontSize: "0.8125rem", color: "var(--text-muted)", textDecoration: "none" }}
               >
                 PDF
               </a>

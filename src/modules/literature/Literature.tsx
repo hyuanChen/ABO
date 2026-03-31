@@ -8,6 +8,7 @@ import {
 import { api } from "../../core/api";
 import { useToast } from "../../components/Toast";
 import { useStore } from "../../core/store";
+import { open } from "@tauri-apps/plugin-dialog";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -35,17 +36,24 @@ interface PaperNote {
 // ── Digest level config ───────────────────────────────────────────────────────
 
 const DIGEST_LEVELS = [
-  { level: 0, label: "收录",  color: "bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400" },
-  { level: 1, label: "扫读",  color: "bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400" },
-  { level: 2, label: "精读",  color: "bg-indigo-100 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400" },
-  { level: 3, label: "内化",  color: "bg-violet-100 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400" },
-  { level: 4, label: "融会",  color: "bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400" },
+  { level: 0, label: "收录", color: "#94A3B8", bg: "rgba(148, 163, 184, 0.15)" },
+  { level: 1, label: "扫读", color: "#3B82F6", bg: "rgba(59, 130, 246, 0.15)" },
+  { level: 2, label: "精读", color: "#6366F1", bg: "rgba(99, 102, 241, 0.15)" },
+  { level: 3, label: "内化", color: "#8B5CF6", bg: "rgba(139, 92, 246, 0.15)" },
+  { level: 4, label: "融会", color: "#F59E0B", bg: "rgba(245, 158, 11, 0.15)" },
 ];
 
 function DigestBadge({ level }: { level: number }) {
   const cfg = DIGEST_LEVELS[level] ?? DIGEST_LEVELS[0];
   return (
-    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${cfg.color}`}>
+    <span style={{
+      fontSize: "11px",
+      padding: "3px 10px",
+      borderRadius: "9999px",
+      fontWeight: 600,
+      background: cfg.bg,
+      color: cfg.color,
+    }}>
       Lv.{level} {cfg.label}
     </span>
   );
@@ -63,12 +71,16 @@ function ImportModal({ onClose, onImported }: { onClose: () => void; onImported:
   async function handleBrowse() {
     setPicking(true);
     try {
-      const result = await api.get<{ path: string | null; cancelled: boolean }>("/api/fs/pick-pdf");
-      if (!result.cancelled && result.path) {
-        setValue(result.path);
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+      });
+      if (selected) {
+        setValue(selected as string);
       }
-    } catch {
-      // silently ignore
+    } catch (err) {
+      console.error("Failed to pick file:", err);
     } finally {
       setPicking(false);
     }
@@ -92,70 +104,135 @@ function ImportModal({ onClose, onImported }: { onClose: () => void; onImported:
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+    <div
+      style={{
+        position: "fixed", inset: 0, zIndex: 50,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        background: "rgba(0,0,0,0.4)", backdropFilter: "blur(4px)"
+      }}
+      onClick={onClose}
+    >
       <div
-        className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-xl w-full max-w-md mx-4 p-6"
+        style={{
+          background: "var(--bg-card)",
+          borderRadius: "20px",
+          border: "1px solid var(--border-light)",
+          boxShadow: "var(--shadow-medium)",
+          width: "100%", maxWidth: "420px", margin: "16px",
+          padding: "24px",
+        }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between mb-5">
-          <h3 className="font-heading text-lg text-slate-800 dark:text-slate-100">导入文献</h3>
-          <button onClick={onClose} aria-label="关闭" className="p-1 rounded-lg text-slate-400 hover:text-slate-600 cursor-pointer">
-            <X className="w-5 h-5" aria-hidden />
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "20px" }}>
+          <h3 style={{ fontSize: "18px", fontWeight: 700, color: "var(--text-main)" }}>导入文献</h3>
+          <button onClick={onClose} aria-label="关闭" style={{ padding: "6px", borderRadius: "8px", color: "var(--text-muted)", background: "transparent", border: "none", cursor: "pointer" }}>
+            <X style={{ width: "20px", height: "20px" }} />
           </button>
         </div>
 
         {/* Mode tabs */}
-        <div className="flex gap-2 mb-4 p-1 bg-slate-100 dark:bg-slate-700/50 rounded-xl">
+        <div style={{ display: "flex", gap: "8px", marginBottom: "20px", padding: "4px", background: "var(--bg-hover)", borderRadius: "12px" }}>
           {(["doi", "pdf"] as const).map((m) => (
             <button
               key={m}
               onClick={() => { setMode(m); setValue(""); setError(""); }}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg text-sm font-medium transition-colors cursor-pointer ${
-                mode === m
-                  ? "bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 shadow-sm"
-                  : "text-slate-500 dark:text-slate-400 hover:text-slate-700"
-              }`}
+              style={{
+                flex: 1,
+                display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
+                padding: "10px 16px",
+                borderRadius: "10px",
+                fontSize: "14px", fontWeight: 600,
+                background: mode === m ? "var(--bg-card)" : "transparent",
+                color: mode === m ? "var(--text-main)" : "var(--text-muted)",
+                border: mode === m ? "1px solid var(--border-light)" : "1px solid transparent",
+                boxShadow: mode === m ? "var(--shadow-soft)" : "none",
+                cursor: "pointer",
+                transition: "all 0.2s ease",
+              }}
             >
-              {m === "doi" ? <Link2 className="w-3.5 h-3.5" /> : <Upload className="w-3.5 h-3.5" />}
+              {m === "doi" ? <Link2 style={{ width: "16px", height: "16px" }} /> : <Upload style={{ width: "16px", height: "16px" }} />}
               {m === "doi" ? "DOI" : "PDF 文件"}
             </button>
           ))}
         </div>
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+        <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
           {mode === "pdf" ? (
-            <div className="flex gap-2">
+            <div style={{ display: "flex", gap: "8px" }}>
               <input
-                autoFocus value={value} onChange={(e) => setValue(e.target.value)}
-                placeholder="/path/to/paper.pdf"
-                className="flex-1 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 text-sm"
+                autoFocus
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                placeholder="选择 PDF 文件..."
+                readOnly
+                style={{
+                  flex: 1,
+                  padding: "12px 16px",
+                  borderRadius: "12px",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-hover)",
+                  color: "var(--text-main)",
+                  fontSize: "14px",
+                  outline: "none",
+                }}
               />
               <button
                 type="button"
                 onClick={handleBrowse}
                 disabled={picking}
-                aria-label="浏览文件"
-                className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-600 transition-colors cursor-pointer disabled:opacity-50 shrink-0 text-sm"
+                style={{
+                  display: "flex", alignItems: "center", gap: "6px",
+                  padding: "12px 16px",
+                  borderRadius: "12px",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-hover)",
+                  color: "var(--text-secondary)",
+                  fontSize: "14px", fontWeight: 500,
+                  cursor: picking ? "not-allowed" : "pointer",
+                  opacity: picking ? 0.6 : 1,
+                  transition: "all 0.2s ease",
+                }}
               >
                 {picking
-                  ? <span className="w-4 h-4 rounded-full border border-current border-t-transparent animate-spin" />
-                  : <FolderOpen className="w-4 h-4" aria-hidden />
+                  ? <span style={{ width: "16px", height: "16px", borderRadius: "50%", border: "2px solid currentColor", borderTopColor: "transparent", animation: "spin 1s linear infinite" }} />
+                  : <FolderOpen style={{ width: "16px", height: "16px" }} />
                 }
                 浏览
               </button>
             </div>
           ) : (
             <input
-              autoFocus value={value} onChange={(e) => setValue(e.target.value)}
+              autoFocus
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
               placeholder="10.48550/arXiv.1706.03762"
-              className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 text-sm"
+              style={{
+                padding: "12px 16px",
+                borderRadius: "12px",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-hover)",
+                color: "var(--text-main)",
+                fontSize: "14px",
+                outline: "none",
+              }}
             />
           )}
-          {error && <p className="text-sm text-red-500">{error}</p>}
+          {error && <p style={{ fontSize: "13px", color: "#EF4444", margin: 0 }}>{error}</p>}
           <button
             type="submit"
             disabled={loading || !value.trim()}
-            className="py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white font-medium text-sm transition-colors cursor-pointer disabled:opacity-50"
+            style={{
+              padding: "14px",
+              borderRadius: "12px",
+              background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+              color: "white",
+              fontSize: "15px", fontWeight: 600,
+              border: "none",
+              cursor: loading || !value.trim() ? "not-allowed" : "pointer",
+              opacity: loading || !value.trim() ? 0.6 : 1,
+              transition: "all 0.2s ease",
+              marginTop: "4px",
+            }}
           >
             {loading ? "导入中…" : "导入文献 +5 XP"}
           </button>
@@ -226,12 +303,12 @@ function PaperDetail({
   }
 
   return (
-    <div className="w-96 shrink-0 border-l border-slate-200 dark:border-slate-700 flex flex-col bg-white dark:bg-slate-900">
+    <div style={{ width: "384px", flexShrink: 0, borderLeft: "1px solid var(--border-light)", display: "flex", flexDirection: "column", background: "var(--bg-card)" }}>
       {/* Header */}
-      <div className="shrink-0 flex items-center gap-2 px-4 py-3 border-b border-slate-200 dark:border-slate-700">
-        <div className="flex-1 min-w-0">
+      <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: "8px", padding: "12px 16px", borderBottom: "1px solid var(--border-light)" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
           {note && (
-            <p className="text-xs font-medium text-slate-600 dark:text-slate-400 truncate">
+            <p style={{ fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {note.title}
             </p>
           )}
@@ -240,7 +317,17 @@ function PaperDetail({
           <button
             onClick={handleUpgrade}
             disabled={upgrading}
-            className="shrink-0 px-2 py-1 rounded-lg text-xs font-medium bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 transition-colors cursor-pointer disabled:opacity-50"
+            style={{
+              flexShrink: 0,
+              padding: "6px 12px",
+              borderRadius: "8px",
+              fontSize: "12px", fontWeight: 500,
+              background: "rgba(99, 102, 241, 0.1)",
+              color: "var(--color-primary)",
+              border: "none",
+              cursor: upgrading ? "not-allowed" : "pointer",
+              opacity: upgrading ? 0.5 : 1,
+            }}
           >
             {upgrading ? "…" : "升级 Digest"}
           </button>
@@ -249,99 +336,99 @@ function PaperDetail({
           <button
             onClick={openInObsidian}
             aria-label="在 Obsidian 中打开"
-            className="shrink-0 p-1.5 rounded-lg text-slate-400 hover:text-emerald-500 transition-colors cursor-pointer"
+            style={{ flexShrink: 0, padding: "6px", borderRadius: "8px", color: "var(--text-muted)", background: "transparent", border: "none", cursor: "pointer" }}
           >
-            <ExternalLink className="w-4 h-4" aria-hidden />
+            <ExternalLink style={{ width: "16px", height: "16px" }} />
           </button>
         )}
         <button
           onClick={onClose}
           aria-label="关闭详情"
-          className="shrink-0 p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors cursor-pointer"
+          style={{ flexShrink: 0, padding: "6px", borderRadius: "8px", color: "var(--text-muted)", background: "transparent", border: "none", cursor: "pointer" }}
         >
-          <X className="w-4 h-4" aria-hidden />
+          <X style={{ width: "16px", height: "16px" }} />
         </button>
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-y-auto">
+      <div style={{ flex: 1, overflowY: "auto" }}>
         {loading && (
-          <div className="flex items-center justify-center h-32">
-            <div className="w-5 h-5 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "128px" }}>
+            <div style={{ width: "20px", height: "20px", borderRadius: "50%", border: "2px solid var(--color-primary)", borderTopColor: "transparent", animation: "spin 1s linear infinite" }} />
           </div>
         )}
         {!loading && !note && (
-          <div className="p-4 text-sm text-slate-400 dark:text-slate-500">未找到笔记</div>
+          <div style={{ padding: "16px", fontSize: "14px", color: "var(--text-muted)" }}>未找到笔记</div>
         )}
         {note && (
-          <div className="p-4">
+          <div style={{ padding: "16px" }}>
             {/* Meta */}
-            <h2 className="font-heading text-base font-semibold text-slate-800 dark:text-slate-100 leading-snug mb-1">
+            <h2 style={{ fontSize: "16px", fontWeight: 700, color: "var(--text-main)", lineHeight: 1.4, marginBottom: "4px" }}>
               {note.title}
             </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
+            <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
               {note.authors || "Unknown"}
               {note.year ? ` · ${note.year}` : ""}
             </p>
-            <div className="flex items-center gap-2 mt-2 mb-4 flex-wrap">
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "8px", marginBottom: "16px", flexWrap: "wrap" }}>
               <DigestBadge level={note.digest_level} />
               {note.doi && (
                 <a
                   href={`https://doi.org/${note.doi}`}
                   target="_blank"
                   rel="noreferrer"
-                  className="text-xs text-indigo-400 hover:text-indigo-600 flex items-center gap-0.5"
+                  style={{ fontSize: "12px", color: "var(--color-primary)", display: "flex", alignItems: "center", gap: "2px", textDecoration: "none" }}
                 >
-                  <ExternalLink className="w-3 h-3" aria-hidden /> DOI
+                  <ExternalLink style={{ width: "12px", height: "12px" }} /> DOI
                 </a>
               )}
             </div>
 
             {/* Note content */}
-            <div className="border-t border-slate-100 dark:border-slate-800 pt-4">
+            <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "16px" }}>
               {note.content ? (
-                <div className="text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                <div style={{ fontSize: "14px", lineHeight: 1.7, color: "var(--text-secondary)" }}>
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
                     components={{
                       h1: ({ children }) => (
-                        <h1 className="text-lg font-bold text-slate-800 dark:text-slate-100 mt-4 mb-2 first:mt-0">{children}</h1>
+                        <h1 style={{ fontSize: "18px", fontWeight: 700, color: "var(--text-main)", marginTop: "16px", marginBottom: "8px" }}>{children}</h1>
                       ),
                       h2: ({ children }) => (
-                        <h2 className="text-base font-semibold text-slate-800 dark:text-slate-100 mt-4 mb-2 first:mt-0">{children}</h2>
+                        <h2 style={{ fontSize: "16px", fontWeight: 600, color: "var(--text-main)", marginTop: "16px", marginBottom: "8px" }}>{children}</h2>
                       ),
                       h3: ({ children }) => (
-                        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 mt-3 mb-1 first:mt-0">{children}</h3>
+                        <h3 style={{ fontSize: "14px", fontWeight: 600, color: "var(--text-secondary)", marginTop: "12px", marginBottom: "4px" }}>{children}</h3>
                       ),
-                      p: ({ children }) => <p className="mb-3 last:mb-0">{children}</p>,
+                      p: ({ children }) => <p style={{ marginBottom: "12px" }}>{children}</p>,
                       ul: ({ children }) => (
-                        <ul className="mb-3 pl-4 space-y-1 list-disc list-outside">{children}</ul>
+                        <ul style={{ marginBottom: "12px", paddingLeft: "20px" }}>{children}</ul>
                       ),
                       ol: ({ children }) => (
-                        <ol className="mb-3 pl-4 space-y-1 list-decimal list-outside">{children}</ol>
+                        <ol style={{ marginBottom: "12px", paddingLeft: "20px" }}>{children}</ol>
                       ),
                       li: ({ children }) => (
-                        <li className="text-slate-700 dark:text-slate-300">{children}</li>
+                        <li style={{ color: "var(--text-secondary)" }}>{children}</li>
                       ),
                       code: ({ children, className }) => {
                         const isBlock = className?.startsWith("language-");
                         return isBlock ? (
-                          <code className="block bg-slate-100 dark:bg-slate-800 rounded-lg p-3 text-xs font-mono text-slate-700 dark:text-slate-300 overflow-x-auto">
+                          <code style={{ display: "block", background: "var(--bg-hover)", borderRadius: "8px", padding: "12px", fontSize: "12px", fontFamily: "monospace", color: "var(--text-secondary)", overflowX: "auto" }}>
                             {children}
                           </code>
                         ) : (
-                          <code className="px-1 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-xs font-mono text-indigo-600 dark:text-indigo-300">
+                          <code style={{ padding: "2px 6px", borderRadius: "4px", background: "var(--bg-hover)", fontSize: "12px", fontFamily: "monospace", color: "var(--color-primary)" }}>
                             {children}
                           </code>
                         );
                       },
                       blockquote: ({ children }) => (
-                        <blockquote className="border-l-2 border-indigo-300 dark:border-indigo-600 pl-3 my-3 text-slate-600 dark:text-slate-400 italic">
+                        <blockquote style={{ borderLeft: "2px solid var(--color-primary)", paddingLeft: "12px", margin: "12px 0", color: "var(--text-muted)", fontStyle: "italic" }}>
                           {children}
                         </blockquote>
                       ),
                       strong: ({ children }) => (
-                        <strong className="font-semibold text-slate-800 dark:text-slate-100">{children}</strong>
+                        <strong style={{ fontWeight: 600, color: "var(--text-main)" }}>{children}</strong>
                       ),
                     }}
                   >
@@ -349,7 +436,7 @@ function PaperDetail({
                   </ReactMarkdown>
                 </div>
               ) : (
-                <p className="text-sm text-slate-400 dark:text-slate-500">
+                <p style={{ fontSize: "14px", color: "var(--text-muted)" }}>
                   暂无笔记内容，升级 Digest 等级后 Claude 将自动生成结构化笔记
                 </p>
               )}
@@ -398,7 +485,7 @@ function PaperRow({
   async function openInObsidian(e: React.MouseEvent) {
     e.stopPropagation();
     if (!config?.vault_path) {
-      toast.error("未设置 Vault 路径");
+      toast.error("未设置情报库路径");
       return;
     }
     const vaultName = config.vault_path.split("/").pop() ?? "";
@@ -414,44 +501,54 @@ function PaperRow({
 
   return (
     <div
-      className={`flex items-start gap-3 p-4 transition-colors group cursor-pointer ${
-        selected
-          ? "bg-indigo-50 dark:bg-indigo-900/20"
-          : "hover:bg-slate-50 dark:hover:bg-slate-700/30"
-      }`}
+      style={{
+        display: "flex", alignItems: "flex-start", gap: "12px", padding: "16px",
+        cursor: "pointer",
+        background: selected ? "rgba(99, 102, 241, 0.08)" : "transparent",
+        transition: "background 0.2s ease",
+      }}
       onClick={() => onSelect(paper.paper_id)}
+      onMouseEnter={(e) => {
+        if (!selected) e.currentTarget.style.background = "var(--bg-hover)";
+      }}
+      onMouseLeave={(e) => {
+        if (!selected) e.currentTarget.style.background = "transparent";
+      }}
     >
-      <div className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-900/30 flex items-center justify-center shrink-0 mt-0.5">
-        <FileText className="w-4 h-4 text-indigo-500 dark:text-indigo-400" aria-hidden />
+      <div style={{ width: "36px", height: "36px", borderRadius: "10px", background: "rgba(99, 102, 241, 0.1)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: "2px" }}>
+        <FileText style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />
       </div>
 
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-slate-800 dark:text-slate-100 truncate">{paper.title}</p>
-        <p className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <p style={{ fontSize: "14px", fontWeight: 600, color: "var(--text-main)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{paper.title}</p>
+        <p style={{ fontSize: "12px", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: "2px" }}>
           {paper.authors || "Unknown"}{paper.year ? ` · ${paper.year}` : ""}
           {paper.doi && (
-            <span className="ml-1.5 inline-flex items-center gap-0.5 text-indigo-400">
-              <ExternalLink className="w-3 h-3" aria-hidden /> DOI
+            <span style={{ marginLeft: "6px", display: "inline-flex", alignItems: "center", gap: "2px", color: "var(--color-primary)" }}>
+              <ExternalLink style={{ width: "12px", height: "12px" }} /> DOI
             </span>
           )}
         </p>
         {paper.snippet && (
           <p
-            className="text-xs text-slate-400 dark:text-slate-500 mt-1 line-clamp-2 leading-relaxed"
+            style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "4px", lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
             dangerouslySetInnerHTML={{ __html: paper.snippet }}
           />
         )}
-        <div className="flex items-center gap-2 mt-2">
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "8px" }}>
           <DigestBadge level={paper.digest_level} />
           {paper.digest_level < 4 && (
             <button
               onClick={handleUpgrade}
               disabled={upgrading}
-              className="flex items-center gap-1 text-xs text-slate-400 hover:text-indigo-500 transition-colors cursor-pointer disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
+              style={{
+                display: "flex", alignItems: "center", gap: "4px",
+                fontSize: "12px", color: "var(--text-muted)", background: "transparent", border: "none", cursor: upgrading ? "not-allowed" : "pointer", opacity: upgrading ? 0.5 : 1
+              }}
             >
               {upgrading
-                ? <span className="w-3 h-3 rounded-full border border-current border-t-transparent animate-spin" />
-                : <ChevronUp className="w-3 h-3" aria-hidden />
+                ? <span style={{ width: "12px", height: "12px", borderRadius: "50%", border: "1px solid currentColor", borderTopColor: "transparent", animation: "spin 1s linear infinite" }} />
+                : <ChevronUp style={{ width: "12px", height: "12px" }} />
               }
               升级
             </button>
@@ -459,10 +556,9 @@ function PaperRow({
           {config?.vault_path && (
             <button
               onClick={openInObsidian}
-              aria-label="在 Obsidian 中打开"
-              className="flex items-center gap-1 text-xs text-slate-400 hover:text-emerald-500 transition-colors cursor-pointer ml-auto focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
+              style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "12px", color: "var(--text-muted)", background: "transparent", border: "none", cursor: "pointer", marginLeft: "auto" }}
             >
-              <ExternalLink className="w-3 h-3" aria-hidden />
+              <ExternalLink style={{ width: "12px", height: "12px" }} />
               Obsidian
             </button>
           )}
@@ -516,59 +612,149 @@ export default function Literature() {
   }, {});
 
   return (
-    <div className="h-full flex flex-col">
-      {/* Header bar */}
-      <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 flex items-center gap-3 shrink-0">
-        <h2 className="font-heading text-xl text-slate-800 dark:text-slate-100 shrink-0">文献库</h2>
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-app)" }}>
+      {/* Header bar - Centered Search */}
+      <div
+        style={{
+          padding: "clamp(16px, 2.5vw, 24px) clamp(20px, 3vw, 32px)",
+          background: "var(--bg-panel)",
+          backdropFilter: "blur(20px)",
+          borderBottom: "1px solid var(--border-light)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "16px",
+          position: "relative",
+        }}
+      >
+        {/* Left: Title */}
+        <div style={{ position: "absolute", left: "clamp(20px, 3vw, 32px)", display: "flex", alignItems: "center", gap: "12px" }}>
+          <div
+            style={{
+              width: "clamp(40px, 5vw, 48px)",
+              height: "clamp(40px, 5vw, 48px)",
+              borderRadius: "var(--radius-md)",
+              background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              boxShadow: "0 4px 16px rgba(188, 164, 227, 0.35)",
+            }}
+          >
+            <BookOpen style={{ width: "24px", height: "24px", color: "white" }} />
+          </div>
+          <div>
+            <h2 style={{ fontFamily: "'M PLUS Rounded 1c', sans-serif", fontSize: "clamp(1.125rem, 2vw, 1.375rem)", fontWeight: 700, color: "var(--text-main)" }}>文献库</h2>
+            <p style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{papers.length} 篇文献</p>
+          </div>
+        </div>
 
-        {/* Search */}
-        <div className="flex-1 relative max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" aria-hidden />
+        {/* Center: Search */}
+        <div style={{ flex: 1, maxWidth: "500px", position: "relative" }}>
+          <Search style={{ position: "absolute", left: "16px", top: "50%", transform: "translateY(-50%)", width: "18px", height: "18px", color: "var(--text-muted)", pointerEvents: "none" }} />
           <input
             value={query} onChange={(e) => handleSearch(e.target.value)}
-            placeholder="全文搜索…"
+            placeholder="搜索文献标题、作者、内容..."
             aria-label="搜索文献"
-            className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-800 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+            style={{
+              width: "100%",
+              padding: "12px 16px 12px 44px",
+              borderRadius: "var(--radius-full)",
+              border: "1px solid var(--border-color)",
+              background: "var(--bg-card)",
+              fontSize: "0.9375rem",
+              color: "var(--text-main)",
+              outline: "none",
+              transition: "all 0.3s ease",
+            }}
+            onFocus={(e) => {
+              e.currentTarget.style.borderColor = "var(--color-primary)";
+              e.currentTarget.style.boxShadow = "0 0 0 3px rgba(188, 164, 227, 0.2)";
+            }}
+            onBlur={(e) => {
+              e.currentTarget.style.borderColor = "var(--border-color)";
+              e.currentTarget.style.boxShadow = "none";
+            }}
           />
         </div>
 
-        <button
-          onClick={() => setShowImport(true)}
-          className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 text-white text-sm font-medium transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-indigo-500 shrink-0"
-        >
-          <Plus className="w-4 h-4" aria-hidden />
-          导入文献
-        </button>
+        {/* Right: Import Button */}
+        <div style={{ position: "absolute", right: "clamp(20px, 3vw, 32px)" }}>
+          <button
+            onClick={() => setShowImport(true)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "10px 20px",
+              borderRadius: "var(--radius-full)",
+              background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+              color: "white",
+              fontSize: "0.9375rem",
+              fontWeight: 600,
+              border: "none",
+              cursor: "pointer",
+              boxShadow: "0 4px 16px rgba(188, 164, 227, 0.35)",
+              transition: "all 0.3s ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = "translateY(-2px)";
+              e.currentTarget.style.boxShadow = "0 6px 24px rgba(188, 164, 227, 0.45)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = "translateY(0)";
+              e.currentTarget.style.boxShadow = "0 4px 16px rgba(188, 164, 227, 0.35)";
+            }}
+          >
+            <Plus style={{ width: "18px", height: "18px" }} />
+            导入文献
+          </button>
+        </div>
       </div>
 
       {/* Filter tabs */}
       {!query && papers.length > 0 && (
-        <div className="px-6 py-2 border-b border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center gap-1 overflow-x-auto shrink-0">
+        <div style={{ padding: "8px 24px", borderBottom: "1px solid var(--border-light)", background: "var(--bg-card)", display: "flex", alignItems: "center", gap: "6px", overflowX: "auto", flexShrink: 0 }}>
           <button
             onClick={() => setFilterLevel(null)}
-            className={`shrink-0 px-3 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-              filterLevel === null
-                ? "bg-indigo-500 text-white"
-                : "text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
-            }`}
+            style={{
+              flexShrink: 0,
+              padding: "6px 14px",
+              borderRadius: "8px",
+              fontSize: "12px", fontWeight: 600,
+              background: filterLevel === null ? "var(--color-primary)" : "transparent",
+              color: filterLevel === null ? "white" : "var(--text-muted)",
+              border: "none",
+              cursor: "pointer",
+              transition: "all 0.2s ease",
+            }}
           >
-            全部 <span className="ml-1 opacity-70">{papers.length}</span>
+            全部 <span style={{ marginLeft: "4px", opacity: 0.7 }}>{papers.length}</span>
           </button>
-          {DIGEST_LEVELS.map(({ level, label, color }) => {
+          {DIGEST_LEVELS.map(({ level, label, color, bg }) => {
             const count = levelCounts[level] ?? 0;
             if (count === 0 && filterLevel !== level) return null;
+            const isActive = filterLevel === level;
             return (
               <button
                 key={level}
                 onClick={() => setFilterLevel(filterLevel === level ? null : level)}
-                className={`shrink-0 flex items-center gap-1 px-3 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
-                  filterLevel === level
-                    ? "bg-indigo-500 text-white"
-                    : `${color} hover:opacity-80`
-                }`}
+                style={{
+                  flexShrink: 0,
+                  display: "flex", alignItems: "center", gap: "4px",
+                  padding: "6px 14px",
+                  borderRadius: "8px",
+                  fontSize: "12px", fontWeight: 600,
+                  background: isActive ? "var(--color-primary)" : bg,
+                  color: isActive ? "white" : color,
+                  border: "none",
+                  cursor: "pointer",
+                  transition: "all 0.2s ease",
+                  opacity: isActive ? 1 : 0.8,
+                }}
               >
                 Lv.{level} {label}
-                <span className="opacity-70">{count}</span>
+                <span style={{ opacity: 0.7 }}>{count}</span>
               </button>
             );
           })}
@@ -576,23 +762,23 @@ export default function Literature() {
       )}
 
       {/* Body: list + optional detail panel */}
-      <div className="flex-1 min-h-0 flex">
+      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
         {/* Paper list */}
-        <div className="flex-1 overflow-y-auto px-6 py-4">
+        <div style={{ flex: 1, overflowY: "auto", padding: "16px 24px" }}>
           {loading && (
-            <p className="text-sm text-slate-400 dark:text-slate-500">加载中…</p>
+            <p style={{ fontSize: "14px", color: "var(--text-muted)" }}>加载中…</p>
           )}
 
           {!loading && filtered.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-full gap-4 text-center">
-              <div className="w-16 h-16 rounded-2xl bg-indigo-50 dark:bg-indigo-900/30 flex items-center justify-center">
-                <BookOpen className="w-8 h-8 text-indigo-400" aria-hidden />
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "16px", textAlign: "center" }}>
+              <div style={{ width: "64px", height: "64px", borderRadius: "16px", background: "rgba(99, 102, 241, 0.1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <BookOpen style={{ width: "32px", height: "32px", color: "var(--color-primary)", opacity: 0.5 }} />
               </div>
               <div>
-                <p className="font-heading text-lg text-slate-700 dark:text-slate-200">
+                <p style={{ fontSize: "18px", fontWeight: 700, color: "var(--text-main)" }}>
                   {query ? "没有找到相关文献" : filterLevel !== null ? "该等级暂无文献" : "文献库为空"}
                 </p>
-                <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                <p style={{ fontSize: "14px", color: "var(--text-muted)", marginTop: "4px" }}>
                   {query
                     ? "换个关键词试试"
                     : filterLevel !== null
@@ -604,15 +790,16 @@ export default function Literature() {
           )}
 
           {filtered.length > 0 && (
-            <div className="bg-white dark:bg-slate-800/70 rounded-2xl border border-slate-200 dark:border-slate-700/60 shadow-sm divide-y divide-slate-100 dark:divide-slate-700/50">
-              {filtered.map((p) => (
-                <PaperRow
-                  key={p.paper_id}
-                  paper={p}
-                  selected={selectedPaperId === p.paper_id}
-                  onDigestUp={handleDigestUp}
-                  onSelect={setSelectedPaperId}
-                />
+            <div style={{ background: "var(--bg-card)", borderRadius: "16px", border: "1px solid var(--border-light)", boxShadow: "var(--shadow-soft)", overflow: "hidden" }}>
+              {filtered.map((p, idx) => (
+                <div key={p.paper_id} style={{ borderTop: idx > 0 ? "1px solid var(--border-light)" : "none" }}>
+                  <PaperRow
+                    paper={p}
+                    selected={selectedPaperId === p.paper_id}
+                    onDigestUp={handleDigestUp}
+                    onSelect={setSelectedPaperId}
+                  />
+                </div>
               ))}
             </div>
           )}

@@ -7,12 +7,10 @@ export type ActiveTab =
   | "overview"
   | "literature"
   | "arxiv"
-  | "meeting"
-  | "ideas"
+  | "journal"
   | "health"
-  | "podcast"
-  | "trends"
   | "claude"
+  | "vault"
   | "settings";
 
 export type ToastKind = "info" | "error" | "success";
@@ -40,6 +38,7 @@ export interface FeedCard {
   module_id: string;
   created_at: number;
   read: boolean;
+  category?: string;
   metadata: Record<string, unknown>;
 }
 

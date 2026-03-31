@@ -46,69 +46,120 @@ export default function DailyTodo({ todos, onChange }: Props) {
   const pct = todos.length > 0 ? Math.round((done / todos.length) * 100) : 0;
 
   return (
-    <div className="bg-slate-800/50 rounded-xl p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-slate-300">今日待办</h3>
-        <span className="text-xs text-slate-500">
+    <div style={{ background: "var(--bg-card)", borderRadius: "var(--radius-lg)", padding: "16px", border: "1px solid var(--border-light)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
+        <h3 style={{ fontSize: "0.875rem", fontWeight: 500, color: "var(--text-main)" }}>今日待办</h3>
+        <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
           {done}/{todos.length} · 完成率 {pct}%
         </span>
       </div>
 
       {todos.length > 0 && (
-        <div className="h-1 bg-slate-700 rounded-full overflow-hidden mb-3">
+        <div style={{ height: "4px", background: "var(--bg-hover)", borderRadius: "var(--radius-full)", overflow: "hidden", marginBottom: "12px" }}>
           <div
-            className="h-full rounded-full transition-all duration-500 bg-emerald-500"
-            style={{ width: `${pct}%` }}
+            style={{
+              height: "100%",
+              width: `${pct}%`,
+              background: "linear-gradient(135deg, #10B981, #34D399)",
+              borderRadius: "var(--radius-full)",
+              transition: "width 0.5s ease",
+            }}
           />
         </div>
       )}
 
-      <div className="space-y-1.5 mb-3">
+      <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "12px" }}>
         {todos.map((todo) => (
-          <div key={todo.id} className="flex items-center gap-2 group">
+          <div key={todo.id} style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <button
               onClick={() => toggle(todo.id)}
-              className={`w-4 h-4 rounded border flex items-center justify-center shrink-0
-                ${todo.done
-                  ? "bg-emerald-500 border-emerald-500"
-                  : "border-slate-600 hover:border-slate-400"
-                }`}
+              style={{
+                width: "18px",
+                height: "18px",
+                borderRadius: "var(--radius-sm)",
+                border: todo.done ? "none" : "1px solid var(--border-color)",
+                background: todo.done ? "linear-gradient(135deg, #10B981, #34D399)" : "var(--bg-hover)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+                cursor: "pointer",
+              }}
               aria-label={todo.done ? "标记未完成" : "标记完成"}
             >
-              {todo.done && <Check className="w-2.5 h-2.5 text-white" />}
+              {todo.done && <Check style={{ width: "12px", height: "12px", color: "white" }} />}
             </button>
             <span
-              className={`flex-1 text-sm ${
-                todo.done ? "line-through text-slate-500" : "text-slate-300"
-              }`}
+              style={{
+                flex: 1,
+                fontSize: "0.875rem",
+                color: todo.done ? "var(--text-muted)" : "var(--text-main)",
+                textDecoration: todo.done ? "line-through" : "none",
+              }}
             >
               {todo.text}
             </span>
             <button
               onClick={() => remove(todo.id)}
-              className="opacity-0 group-hover:opacity-100 text-slate-600 hover:text-slate-400"
+              style={{
+                padding: "4px",
+                borderRadius: "var(--radius-sm)",
+                color: "var(--text-muted)",
+                opacity: 0,
+                transition: "opacity 0.2s ease",
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.opacity = "0"; }}
               aria-label="删除"
             >
-              <X className="w-3.5 h-3.5" />
+              <X style={{ width: "14px", height: "14px" }} />
             </button>
           </div>
         ))}
       </div>
 
-      <div className="flex gap-2">
+      <div style={{ display: "flex", gap: "8px" }}>
         <input
           value={newText}
           onChange={(e) => setNewText(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && addTodo()}
           placeholder="添加今日任务..."
-          className="flex-1 bg-slate-700 text-slate-200 text-sm rounded-lg px-3 py-1.5 border border-slate-600 placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500"
+          style={{
+            flex: 1,
+            background: "var(--bg-hover)",
+            color: "var(--text-main)",
+            fontSize: "0.875rem",
+            borderRadius: "var(--radius-md)",
+            padding: "8px 12px",
+            border: "1px solid var(--border-light)",
+            outline: "none",
+          }}
         />
         <button
           onClick={addTodo}
           aria-label="添加"
-          className="p-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-400 hover:text-slate-200"
+          style={{
+            padding: "8px",
+            borderRadius: "var(--radius-md)",
+            background: "var(--bg-hover)",
+            border: "1px solid var(--border-light)",
+            color: "var(--text-secondary)",
+            cursor: "pointer",
+            transition: "all 0.2s ease",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "var(--color-primary)";
+            e.currentTarget.style.color = "white";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "var(--bg-hover)";
+            e.currentTarget.style.color = "var(--text-secondary)";
+          }}
         >
-          <Plus className="w-4 h-4" />
+          <Plus style={{ width: "16px", height: "16px" }} />
         </button>
       </div>
     </div>

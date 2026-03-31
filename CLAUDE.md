@@ -1,6 +1,7 @@
 # ABO — Agent Boost OS · CLAUDE.md
 
 > 本地个人情报引擎 + 研究者角色成长系统。设计文档见 `DESIGN.md`。
+> 开发参考指南见 `ref/` 目录（模块化、渐进式披露）。每次进行大的修改任务完成后记得git commit。
 
 ---
 
@@ -37,6 +38,18 @@ git push origin main        # 推送
 ABO/
 ├── DESIGN.md
 ├── CLAUDE.md
+├── ref/                         # 开发参考指南（模块化，subagent 友好）
+│   ├── README.md               # 指南索引 + 使用方法
+│   ├── 00-architecture.md      # 技术栈 + 项目结构 + 设计系统
+│   ├── 01-module-sdk.md        # Module ABC + Runtime + 新模块编写
+│   ├── 02-frontend-patterns.md # React 组件 + Zustand + api.ts 模式
+│   ├── 03-profile-gamification.md # 角色主页 + 六维 + 像素小人 + 精力系统
+│   ├── 04-feed-system.md       # Intelligence Feed + Card + 反馈
+│   ├── 05-literature.md        # 文献库 + Digest + FTS5
+│   ├── 06-ideas-mindmap.md     # React Flow + A+B 撞击
+│   ├── 07-claude-panel.md      # Claude 面板 + WebSocket 流式
+│   ├── 08-pending-features.md  # 待实现功能 spec (health)
+│   └── 09-new-feature-checklist.md # 新功能端到端 checklist
 ├── src/                         # React 前端
 │   ├── App.tsx
 │   ├── core/
@@ -51,10 +64,7 @@ ABO/
 │   │   ├── literature/          # 文献库
 │   │   ├── ideas/               # Idea 工坊 (React Flow)
 │   │   ├── claude-panel/        # Claude 对话面板
-│   │   ├── meeting/             # 组会生成器 (placeholder)
 │   │   ├── health/              # 健康管理 (placeholder)
-│   │   ├── podcast/             # 播客代听 (placeholder)
-│   │   ├── trends/              # Trend 追踪 (placeholder)
 │   │   └── settings/
 │   └── components/              # Toast, SetupWizard
 ├── abo/                         # Python 后端
@@ -121,31 +131,7 @@ os.replace(tmp, path)
 | 5 | 模块运行时 + Intelligence Feed | done |
 | 6 | ArXiv 追踪器（后端 + 前端） | done |
 | 11 | 角色主页 + 游戏化（六边形、像素小人、技能节点、SAN值） | done |
-| 7 | 组会生成器（Claude 大纲 + HTML/PPTX） | pending |
 | 8 | 健康管理（打卡 + Journal + D3 图表） | pending |
-| 9 | 播客代听（yt-dlp + whisper + Claude 摘要） | pending |
-| 10 | Trend 追踪（RSS + GitHub Trending） | pending |
-
----
-
-## UI Design System
-
-**Fonts:** Crimson Pro (heading) + Atkinson Hyperlegible (body)
-
-**Colors:**
-```css
-:root { --bg:#F8FAFC; --surface:#FFF; --text:#1E293B; --primary:#6366F1; --cta:#10B981; --danger:#EF4444; }
-.dark { --bg:#020617; --surface:#0F172A; --text:#F8FAFC; --primary:#818CF8; --cta:#22C55E; }
-```
-
-**Dark Mode:** `darkMode: 'class'` → `document.documentElement.classList.toggle('dark')`
-
-**Conventions:**
-- Sidebar: always `bg-slate-900`
-- Card: `bg-white border-slate-200` / `bg-slate-900 border-slate-700`
-- Icons: Lucide React SVG only, no emoji
-- Hover: `transition-colors duration-150`
-- Focus: `focus-visible:ring-2 focus-visible:ring-indigo-400`
 
 ---
 
@@ -158,3 +144,4 @@ os.replace(tmp, path)
 **Preferences:** `GET /api/preferences` · `POST /api/preferences`
 **Health:** `GET /api/health`
 **WebSocket:** `ws://127.0.0.1:8765/ws/feed`
+

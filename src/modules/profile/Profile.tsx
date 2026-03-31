@@ -1,7 +1,9 @@
 // src/modules/profile/Profile.tsx
 import { useEffect, useState } from "react";
+import { User, Sparkles } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, ProfileStats } from "../../core/store";
+import { PageContainer, PageHeader, PageContent, Card, Grid } from "../../components/Layout";
 import RoleCard from "./RoleCard";
 import DailyTodo from "./DailyTodo";
 import HexagonRadar from "./HexagonRadar";
@@ -67,19 +69,28 @@ export default function Profile() {
 
   if (!data) {
     return (
-      <div className="h-full flex items-center justify-center text-slate-400">
-        加载中...
-      </div>
+      <PageContainer>
+        <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "16px", color: "var(--text-muted)" }}>
+            <div style={{ width: "48px", height: "48px", borderRadius: "var(--radius-md)", background: "var(--bg-hover)", animation: "pulse 2s infinite" }} />
+            <p style={{ fontSize: "0.9375rem" }}>加载角色数据中...</p>
+          </div>
+        </div>
+      </PageContainer>
     );
   }
 
-  // Convert san score (0-100) back to 0-10 scale for PixelAvatar
   const sanForAvatar = Math.round((data.stats?.san?.score ?? 0) / 10);
 
   return (
-    <div className="h-full overflow-auto bg-slate-950 p-6">
-      <div className="max-w-3xl mx-auto space-y-6">
-        {/* A. Role Card */}
+    <PageContainer>
+      <PageHeader
+        title="角色主页"
+        subtitle="追踪你的研究成长与能力进化"
+        icon={User}
+      />
+      <PageContent maxWidth="1000px">
+        {/* Role Card - Full Width */}
         <RoleCard
           codename={data.identity.codename}
           longTermGoal={data.identity.long_term_goal}
@@ -90,23 +101,41 @@ export default function Profile() {
           onUpdated={load}
         />
 
-        {/* B. Daily Todo */}
-        <DailyTodo todos={todos} onChange={setTodos} />
-
-        {/* C. Hexagon Radar */}
-        <div className="bg-slate-800/50 rounded-xl p-5 flex flex-col items-center">
-          <h3 className="text-sm font-medium text-slate-400 mb-4 self-start">六维能力</h3>
-          <HexagonRadar stats={data.stats} size={300} />
+        {/* Daily Todo */}
+        <div style={{ marginTop: "clamp(20px, 3vw, 28px)" }}>
+          <DailyTodo todos={todos} onChange={setTodos} />
         </div>
 
-        {/* D. Skills + Achievements */}
-        <div className="bg-slate-800/50 rounded-xl p-5 space-y-6">
-          <SkillGrid unlockedSkills={data.skills} />
-          <AchievementGallery achievements={data.achievements} />
-        </div>
-      </div>
+        {/* Hexagon Radar */}
+        <Card
+          title="六维能力评估"
+          icon={<Sparkles style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
+          style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
+        >
+          <div style={{ display: "flex", justifyContent: "center", padding: "clamp(16px, 3vw, 32px) 0" }}>
+            <HexagonRadar stats={data.stats} size={280} />
+          </div>
+        </Card>
+
+        {/* Skills + Achievements Grid */}
+        <Grid columns={1} gap="lg" style={{ marginTop: "clamp(20px, 3vw, 28px)" }}>
+          <Card
+            title="技能树"
+            icon={<span style={{ fontSize: "1rem" }}>🌳</span>}
+          >
+            <SkillGrid unlockedSkills={data.skills} />
+          </Card>
+
+          <Card
+            title="成就徽章"
+            icon={<span style={{ fontSize: "1rem" }}>🏆</span>}
+          >
+            <AchievementGallery achievements={data.achievements} />
+          </Card>
+        </Grid>
+      </PageContent>
 
       {showCheckin && <DailyCheckInModal onClose={handleCheckinClose} />}
-    </div>
+    </PageContainer>
   );
 }

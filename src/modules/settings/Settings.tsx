@@ -1,86 +1,515 @@
 import { useState, useEffect } from "react";
-import { Settings as SettingsIcon, HardDrive, Info } from "lucide-react";
+import {
+  Settings as SettingsIcon,
+  HardDrive,
+  Info,
+  Moon,
+  Sun,
+  Keyboard,
+  Palette,
+  FolderOpen,
+  Zap,
+  ChevronRight,
+  ExternalLink,
+} from "lucide-react";
 import { useStore } from "../../core/store";
+import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { open } from "@tauri-apps/plugin-dialog";
+import { api } from "../../core/api";
 
-// ── Tab config ────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-const TABS = [
-  { id: "general",  label: "通用",  Icon: SettingsIcon },
-  { id: "vault",    label: "Vault", Icon: HardDrive },
-  { id: "about",    label: "关于",  Icon: Info },
-] as const;
+type SettingsTab = "general" | "vault" | "about";
 
-type SettingsTab = (typeof TABS)[number]["id"];
+interface SettingItemProps {
+  icon: React.ReactNode;
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+  onClick?: () => void;
+}
 
-// ── Toggle ────────────────────────────────────────────────────────────────────
+// ── Components ────────────────────────────────────────────────────────────────
 
-function Toggle({
-  enabled,
-  onToggle,
-  label,
-}: {
-  enabled: boolean;
-  onToggle: () => void;
-  label: string;
-}) {
+function SettingItem({ icon, title, description, children, onClick }: SettingItemProps) {
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "16px",
+        padding: "16px 20px",
+        borderRadius: "var(--radius-lg)",
+        background: "var(--bg-card)",
+        border: "1px solid var(--border-light)",
+        transition: "all 0.3s ease",
+        cursor: onClick ? "pointer" : "default",
+      }}
+      onMouseEnter={(e) => {
+        if (onClick) {
+          e.currentTarget.style.transform = "translateX(4px)";
+          e.currentTarget.style.borderColor = "var(--color-primary-light)";
+          e.currentTarget.style.boxShadow = "var(--shadow-soft)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.transform = "translateX(0)";
+        e.currentTarget.style.borderColor = "var(--border-light)";
+        e.currentTarget.style.boxShadow = "none";
+      }}
+    >
+      <div
+        style={{
+          width: "40px",
+          height: "40px",
+          borderRadius: "var(--radius-md)",
+          background: "linear-gradient(135deg, rgba(188, 164, 227, 0.15), rgba(255, 183, 178, 0.1))",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--color-primary)",
+          flexShrink: 0,
+        }}
+      >
+        {icon}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <h4 style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)", marginBottom: description ? "4px" : 0 }}>
+          {title}
+        </h4>
+        {description && (
+          <p style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.5 }}>{description}</p>
+        )}
+      </div>
+      <div style={{ flexShrink: 0 }}>{children}</div>
+    </div>
+  );
+}
+
+function Toggle({ enabled, onToggle }: { enabled: boolean; onToggle: () => void }) {
   return (
     <button
-      role="switch"
-      aria-checked={enabled}
-      aria-label={label}
       onClick={onToggle}
-      className={`relative h-5 w-9 rounded-full transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-indigo-500 ${
-        enabled ? "bg-indigo-500" : "bg-slate-300 dark:bg-slate-600"
-      }`}
+      style={{
+        position: "relative",
+        width: "48px",
+        height: "26px",
+        borderRadius: "var(--radius-full)",
+        background: enabled
+          ? "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))"
+          : "var(--bg-hover)",
+        border: "none",
+        cursor: "pointer",
+        transition: "all 0.3s ease",
+        boxShadow: enabled ? "0 2px 8px rgba(188, 164, 227, 0.4)" : "inset 0 2px 4px rgba(0,0,0,0.1)",
+      }}
     >
       <span
-        className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${
-          enabled ? "translate-x-4" : "translate-x-0.5"
-        }`}
+        style={{
+          position: "absolute",
+          top: "3px",
+          left: enabled ? "25px" : "3px",
+          width: "20px",
+          height: "20px",
+          borderRadius: "50%",
+          background: "white",
+          boxShadow: "0 2px 4px rgba(0,0,0,0.2)",
+          transition: "left 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
+        }}
       />
     </button>
   );
 }
 
-// ── Setting row ───────────────────────────────────────────────────────────────
-
-function SettingRow({
+function TabButton({
+  active,
+  onClick,
+  icon,
   label,
-  description,
-  children,
 }: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
   label: string;
-  description?: string;
-  children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 py-4">
-      <div className="flex-1 min-w-0">
-        <p className="text-sm text-slate-800 dark:text-slate-200">{label}</p>
-        {description && (
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{description}</p>
-        )}
-      </div>
-      <div className="shrink-0">{children}</div>
+    <button
+      onClick={onClick}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "12px",
+        width: "100%",
+        padding: "14px 18px",
+        borderRadius: "var(--radius-lg)",
+        background: active ? "var(--bg-card)" : "transparent",
+        border: active ? "1px solid var(--border-light)" : "1px solid transparent",
+        color: active ? "var(--color-primary)" : "var(--text-secondary)",
+        fontSize: "0.9375rem",
+        fontWeight: 600,
+        cursor: "pointer",
+        transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
+        boxShadow: active ? "var(--shadow-soft)" : "none",
+        transform: active ? "scale(1.02)" : "scale(1)",
+      }}
+    >
+      {icon}
+      {label}
+      {active && (
+        <ChevronRight
+          style={{ width: "16px", height: "16px", marginLeft: "auto", opacity: 0.6 }}
+        />
+      )}
+    </button>
+  );
+}
+
+// ── Sections ──────────────────────────────────────────────────────────────────
+
+function GeneralSection() {
+  const [darkMode, setDarkMode] = useState(() =>
+    document.documentElement.classList.contains("dark")
+  );
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", darkMode);
+    localStorage.setItem("abo-theme", darkMode ? "dark" : "light");
+  }, [darkMode]);
+
+  const shortcuts = [
+    { label: "角色主页", shortcut: "⌘1" },
+    { label: "今日情报", shortcut: "⌘2" },
+    { label: "Vault", shortcut: "⌘3" },
+    { label: "文献库", shortcut: "⌘4" },
+    { label: "手记", shortcut: "⌘5" },
+    { label: "Claude", shortcut: "⌘6" },
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      {/* Appearance */}
+      <Card title="外观设置" icon={<Palette style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <SettingItem
+            icon={darkMode ? <Moon style={{ width: "20px", height: "20px" }} /> : <Sun style={{ width: "20px", height: "20px" }} />}
+            title="深色模式"
+            description={darkMode ? "当前使用深色主题" : "当前使用浅色主题"}
+          >
+            <Toggle enabled={darkMode} onToggle={() => setDarkMode(!darkMode)} />
+          </SettingItem>
+        </div>
+      </Card>
+
+      {/* Keyboard Shortcuts */}
+      <Card title="键盘快捷键" icon={<Keyboard style={{ width: "18px", height: "18px" }} />}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
+            gap: "12px",
+          }}
+        >
+          {shortcuts.map(({ label, shortcut }) => (
+            <div
+              key={label}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "12px 16px",
+                borderRadius: "var(--radius-md)",
+                background: "var(--bg-hover)",
+                border: "1px solid var(--border-light)",
+              }}
+            >
+              <span style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>{label}</span>
+              <kbd
+                style={{
+                  padding: "4px 10px",
+                  borderRadius: "var(--radius-sm)",
+                  background: "var(--bg-card)",
+                  border: "1px solid var(--border-light)",
+                  fontSize: "0.75rem",
+                  fontFamily: "monospace",
+                  color: "var(--text-muted)",
+                  boxShadow: "0 2px 0 var(--border-light)",
+                }}
+              >
+                {shortcut}
+              </kbd>
+            </div>
+          ))}
+        </div>
+      </Card>
     </div>
   );
 }
 
-// ── Section ───────────────────────────────────────────────────────────────────
+function VaultSection() {
+  const { config, setConfig } = useStore();
+  const vaultPath = config?.vault_path ?? "未配置";
 
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
+  async function openInFinder() {
+    if (!vaultPath || vaultPath === "未配置") return;
+    try {
+      // Use openUrl with file:// protocol to open folder in Finder
+      await openUrl(`file://${vaultPath}`);
+    } catch (err) {
+      console.error("Failed to open vault:", err);
+    }
+  }
+
+  async function selectNewVault() {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "选择情报库文件夹",
+      });
+      if (selected && typeof selected === "string") {
+        // Save new vault path to backend
+        const newConfig = await api.post<{ vault_path: string; version: string }>("/api/config", {
+          vault_path: selected,
+        });
+        setConfig(newConfig);
+        alert("情报库路径已更新，请重启应用以生效");
+      }
+    } catch (err) {
+      console.error("Failed to select vault:", err);
+      alert("选择文件夹失败，请重试");
+    }
+  }
+
   return (
-    <div className="border-b border-slate-100 dark:border-slate-800 last:border-0">
-      <h3 className="text-xs font-medium text-slate-400 dark:text-slate-500 uppercase tracking-wider pt-6 pb-1">
-        {title}
-      </h3>
-      <div className="divide-y divide-slate-100 dark:divide-slate-800/60">{children}</div>
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      <Card title="情报库配置" icon={<HardDrive style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          <SettingItem
+            icon={<FolderOpen style={{ width: "20px", height: "20px" }} />}
+            title="当前情报库路径"
+            description="所有文献笔记、日记、Idea 画布以及 ABO 元数据存储位置"
+          >
+            <div style={{ display: "flex", gap: "8px" }}>
+              <button
+                onClick={openInFinder}
+                disabled={!config?.vault_path}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "var(--radius-full)",
+                  background: config?.vault_path ? "var(--bg-hover)" : "var(--bg-card)",
+                  border: "1px solid var(--border-light)",
+                  color: config?.vault_path ? "var(--text-secondary)" : "var(--text-muted)",
+                  fontSize: "0.8125rem",
+                  fontWeight: 600,
+                  cursor: config?.vault_path ? "pointer" : "not-allowed",
+                  opacity: config?.vault_path ? 1 : 0.5,
+                  transition: "all 0.2s ease",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                }}
+                onMouseEnter={(e) => {
+                  if (config?.vault_path) {
+                    e.currentTarget.style.background = "var(--color-primary)";
+                    e.currentTarget.style.color = "white";
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = config?.vault_path ? "var(--bg-hover)" : "var(--bg-card)";
+                  e.currentTarget.style.color = config?.vault_path ? "var(--text-secondary)" : "var(--text-muted)";
+                }}
+              >
+                <ExternalLink style={{ width: "14px", height: "14px" }} />
+                在 Finder 中打开
+              </button>
+              <button
+                onClick={selectNewVault}
+                style={{
+                  padding: "8px 16px",
+                  borderRadius: "var(--radius-full)",
+                  background: "var(--color-primary)",
+                  border: "none",
+                  color: "white",
+                  fontSize: "0.8125rem",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  transition: "all 0.2s ease",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  boxShadow: "0 2px 8px rgba(188, 164, 227, 0.4)",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--color-primary-dark)";
+                  e.currentTarget.style.transform = "translateY(-1px)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "var(--color-primary)";
+                  e.currentTarget.style.transform = "translateY(0)";
+                }}
+              >
+                <FolderOpen style={{ width: "14px", height: "14px" }} />
+                更改路径
+              </button>
+            </div>
+          </SettingItem>
+
+          <div
+            style={{
+              padding: "16px 20px",
+              borderRadius: "var(--radius-lg)",
+              background: "var(--bg-hover)",
+              border: "1px solid var(--border-light)",
+              fontFamily: "monospace",
+              fontSize: "0.875rem",
+              color: "var(--text-secondary)",
+              wordBreak: "break-all",
+              lineHeight: 1.6,
+            }}
+          >
+            {vaultPath}
+          </div>
+
+          <div
+            style={{
+              padding: "16px 20px",
+              borderRadius: "var(--radius-lg)",
+              background: "linear-gradient(135deg, rgba(255, 183, 178, 0.1), rgba(255, 183, 178, 0.05))",
+              border: "1px solid rgba(255, 183, 178, 0.3)",
+            }}
+          >
+            <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+              <strong style={{ color: "#D48984" }}>提示：</strong>
+              修改情报库路径需要重启应用。请确保新路径包含完整的 {" "}
+              <code
+                style={{
+                  padding: "2px 6px",
+                  borderRadius: "4px",
+                  background: "rgba(255, 183, 178, 0.2)",
+                  fontFamily: "monospace",
+                  fontSize: "0.75rem",
+                }}
+              >
+                .abo/
+              </code>{" "}
+              目录以保留您的数据。
+            </p>
+          </div>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function AboutSection() {
+  const techStack = [
+    { name: "Tauri", version: "2.x" },
+    { name: "React", version: "19" },
+    { name: "FastAPI", version: "latest" },
+    { name: "Tailwind", version: "v4" },
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      <div style={{ textAlign: "center", padding: "40px 20px" }}>
+        {/* Logo */}
+        <div
+          style={{
+            width: "80px",
+            height: "80px",
+            margin: "0 auto 24px",
+            borderRadius: "var(--radius-xl)",
+            background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            boxShadow: "0 8px 32px rgba(188, 164, 227, 0.4)",
+          }}
+        >
+          <Zap style={{ width: "40px", height: "40px", color: "white" }} />
+        </div>
+
+        <h2
+          style={{
+            fontFamily: "'M PLUS Rounded 1c', sans-serif",
+            fontSize: "1.75rem",
+            fontWeight: 700,
+            color: "var(--text-main)",
+            marginBottom: "8px",
+          }}
+        >
+          ABO
+        </h2>
+        <p style={{ fontSize: "1rem", color: "var(--text-secondary)", marginBottom: "4px" }}>
+          Academic Buddy OS
+        </p>
+        <p style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>Version 0.5.0 · Phase 5</p>
+      </div>
+
+      <Card title="关于" icon={<Info style={{ width: "18px", height: "18px" }} />}>
+        <p
+          style={{
+            fontSize: "0.9375rem",
+            color: "var(--text-secondary)",
+            lineHeight: 1.8,
+            textAlign: "center",
+            padding: "8px 16px",
+          }}
+        >
+          Obsidian 驱动的研究自动化伴侣。
+          <br />
+          本地优先，隐私保护，AI 赋能。
+        </p>
+      </Card>
+
+      <Card title="技术栈" icon={<Zap style={{ width: "18px", height: "18px" }} />}>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "10px",
+            justifyContent: "center",
+          }}
+        >
+          {techStack.map(({ name, version }) => (
+            <div
+              key={name}
+              style={{
+                padding: "10px 18px",
+                borderRadius: "var(--radius-full)",
+                background: "var(--bg-hover)",
+                border: "1px solid var(--border-light)",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+            >
+              <span style={{ fontSize: "0.875rem", fontWeight: 600, color: "var(--text-secondary)" }}>
+                {name}
+              </span>
+              <span
+                style={{
+                  fontSize: "0.75rem",
+                  color: "var(--text-muted)",
+                  padding: "2px 8px",
+                  borderRadius: "var(--radius-full)",
+                  background: "var(--bg-card)",
+                }}
+              >
+                {version}
+              </span>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <div style={{ textAlign: "center", padding: "20px" }}>
+        <p style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+          Built with ❤️ for researchers
+        </p>
+      </div>
     </div>
   );
 }
@@ -89,111 +518,57 @@ function Section({
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
-  const [darkMode, setDarkMode] = useState(() =>
-    document.documentElement.classList.contains("dark")
-  );
-  const { config } = useStore();
 
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", darkMode);
-  }, [darkMode]);
-
-  function toggleDarkMode() {
-    setDarkMode((prev) => !prev);
-  }
+  const tabs = [
+    { id: "general" as const, label: "通用", icon: <SettingsIcon style={{ width: "20px", height: "20px" }} /> },
+    { id: "vault" as const, label: "情报库", icon: <HardDrive style={{ width: "20px", height: "20px" }} /> },
+    { id: "about" as const, label: "关于", icon: <Info style={{ width: "20px", height: "20px" }} /> },
+  ];
 
   return (
-    <div className="h-full flex flex-col bg-white dark:bg-slate-900">
-      {/* Page header */}
-      <div className="shrink-0 flex items-center gap-3 px-6 h-14 border-b border-slate-200 dark:border-slate-800">
-        <h1 className="text-base font-semibold text-slate-800 dark:text-slate-100">设置</h1>
-      </div>
-
-      {/* Tab bar */}
-      <div className="shrink-0 flex border-b border-slate-200 dark:border-slate-800 px-6 overflow-x-auto">
-        {TABS.map(({ id, label, Icon }) => (
-          <button
-            key={id}
-            onClick={() => setActiveTab(id)}
-            className={`flex items-center gap-2 px-4 py-3 text-sm border-b-2 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-none ${
-              activeTab === id
-                ? "border-indigo-500 text-indigo-600 dark:text-indigo-400"
-                : "border-transparent text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
-            }`}
+    <PageContainer>
+      <PageHeader
+        title="设置"
+        subtitle="自定义你的 ABO 体验"
+        icon={SettingsIcon}
+      />
+      <PageContent maxWidth="1200px">
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "180px 1fr",
+            gap: "48px",
+            height: "100%",
+          }}
+        >
+          {/* Sidebar Tabs */}
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px",
+              height: "fit-content",
+            }}
           >
-            <Icon className="w-4 h-4" aria-hidden />
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto px-6 max-w-2xl">
-        {activeTab === "general" && (
-          <>
-            <Section title="外观">
-              <SettingRow label="深色模式" description="切换深色 / 浅色界面主题">
-                <Toggle enabled={darkMode} onToggle={toggleDarkMode} label="切换深色模式" />
-              </SettingRow>
-            </Section>
-
-            <Section title="键盘快捷键">
-              <div className="py-4 grid grid-cols-1 gap-2.5">
-                {[
-                  { label: "今日",     shortcut: "⌘1" },
-                  { label: "文献库",   shortcut: "⌘2" },
-                  { label: "Idea工坊", shortcut: "⌘3" },
-                  { label: "Claude",   shortcut: "⌘4" },
-                ].map(({ label, shortcut }) => (
-                  <div key={label} className="flex items-center justify-between text-sm">
-                    <span className="text-slate-600 dark:text-slate-400">{label}</span>
-                    <kbd className="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 text-xs font-mono border border-slate-200 dark:border-slate-700">
-                      {shortcut}
-                    </kbd>
-                  </div>
-                ))}
-              </div>
-            </Section>
-          </>
-        )}
-
-        {activeTab === "vault" && (
-          <Section title="Vault 路径">
-            <div className="py-4">
-              <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">当前 Vault</p>
-              <code className="block w-full px-3 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 break-all font-mono">
-                {config?.vault_path ?? "未配置"}
-              </code>
-              <p className="text-xs text-slate-400 dark:text-slate-500 mt-3 leading-relaxed">
-                Vault 包含所有文献笔记、日记、Idea 画布以及 ABO 元数据（<code className="font-mono text-xs">.abo/</code> 目录）。
-                重置 Vault 路径需重启应用。
-              </p>
-            </div>
-          </Section>
-        )}
-
-        {activeTab === "about" && (
-          <div className="py-12 flex flex-col items-center gap-5 text-center">
-            <div className="w-16 h-16 rounded-2xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center">
-              <span className="font-heading text-2xl font-bold text-indigo-400">A</span>
-            </div>
-            <div>
-              <h2 className="font-heading text-xl font-bold text-slate-800 dark:text-slate-100">ABO</h2>
-              <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Academic Buddy OS</p>
-              <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
-                Version 0.5.0 · Phase 5
-              </p>
-            </div>
-            <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed">
-              Obsidian 驱动的研究自动化伴侣。本地 Mac 程序，基于 Tauri + React + FastAPI 构建。
-            </p>
-            <div className="flex flex-col gap-2 text-xs text-slate-400 dark:text-slate-500">
-              <p>Tauri 2.x · React 19 · FastAPI · APScheduler · Tailwind CSS v4</p>
-              <p>LLM: Claude Code CLI (subprocess)</p>
-            </div>
+            {tabs.map(({ id, label, icon }) => (
+              <TabButton
+                key={id}
+                active={activeTab === id}
+                onClick={() => setActiveTab(id)}
+                icon={icon}
+                label={label}
+              />
+            ))}
           </div>
-        )}
-      </div>
-    </div>
+
+          {/* Content Area */}
+          <div style={{ minWidth: 0 }}>
+            {activeTab === "general" && <GeneralSection />}
+            {activeTab === "vault" && <VaultSection />}
+            {activeTab === "about" && <AboutSection />}
+          </div>
+        </div>
+      </PageContent>
+    </PageContainer>
   );
 }

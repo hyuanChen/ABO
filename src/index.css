@@ -1,31 +1,92 @@
-@import url('https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Crimson+Pro:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;500;700&family=Nunito:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
+@import "./styles/responsive.css";
+
+/* ============================================
+   ABO - Anime Style Glassmorphism Design System
+   ============================================ */
 
 :root {
-  --bg: #F8FAFC;
-  --surface: #FFFFFF;
-  --surface-2: #F1F5F9;
-  --border: #E2E8F0;
-  --text: #1E293B;
-  --text-muted: #475569;
-  --primary: #6366F1;
-  --primary-dim: #818CF8;
-  --cta: #10B981;
-  --xp: #F59E0B;
-  --danger: #EF4444;
+  /* Base Backgrounds - Warm Creamy Tones */
+  --bg-app: #FFFDF8;
+  --bg-sidebar: rgba(255, 253, 248, 0.85);
+  --bg-panel: rgba(255, 255, 255, 0.82);
+  --bg-card: rgba(255, 255, 255, 0.75);
+  --bg-hover: rgba(255, 255, 255, 0.95);
+
+  /* Primary Colors - Soft Pastel Palette */
+  --color-primary: #BCA4E3;
+  --color-primary-light: #D4C4F0;
+  --color-primary-dark: #9D7BDB;
+  --color-secondary: #FFB7B2;
+  --color-secondary-light: #FFD4D1;
+  --color-accent: #A8D8FF;
+  --color-accent-light: #C8E8FF;
+
+  /* Functional Colors */
+  --color-success: #A8E6CF;
+  --color-warning: #FFE4B5;
+  --color-danger: #FFB7B2;
+  --color-info: #A8D8FF;
+
+  /* Text Colors - Soft Dark */
+  --text-main: #4A4A5A;
+  --text-secondary: #6B6B7B;
+  --text-muted: #9E9EAE;
+  --text-light: #B8B8C8;
+
+  /* Borders & Shadows */
+  --border-color: rgba(188, 164, 227, 0.25);
+  --border-light: rgba(188, 164, 227, 0.15);
+  --shadow-soft: 0 8px 32px rgba(133, 114, 166, 0.12);
+  --shadow-medium: 0 12px 40px rgba(133, 114, 166, 0.16);
+  --shadow-float: 0 16px 56px rgba(133, 114, 166, 0.20);
+  --shadow-inner: inset 0 2px 8px rgba(133, 114, 166, 0.08);
+
+  /* Energy Colors */
+  --energy-high: #A8E6CF;
+  --energy-medium: #FFE4B5;
+  --energy-low: #FFB7B2;
+
+  /* Layout */
+  --sidebar-width: 260px;
+  --radius-sm: 12px;
+  --radius-md: 20px;
+  --radius-lg: 28px;
+  --radius-xl: 36px;
+  --radius-full: 9999px;
 }
 
+/* Dark Theme - Soft Cyberpunk */
 .dark {
-  --bg: #020617;
-  --surface: #0F172A;
-  --surface-2: #1E293B;
-  --border: #334155;
-  --text: #F8FAFC;
-  --text-muted: #94A3B8;
-  --primary: #818CF8;
-  --cta: #22C55E;
-  --xp: #FBBF24;
+  --bg-app: #1A1A24;
+  --bg-sidebar: rgba(26, 26, 36, 0.88);
+  --bg-panel: rgba(40, 40, 55, 0.85);
+  --bg-card: rgba(40, 40, 55, 0.75);
+  --bg-hover: rgba(50, 50, 70, 0.9);
+
+  --color-primary: #9D7BDB;
+  --color-primary-light: #B8A0E8;
+  --color-primary-dark: #8B6BC8;
+  --color-secondary: #E89B96;
+  --color-accent: #7BC8F0;
+
+  --text-main: #EAEAEA;
+  --text-secondary: #C8C8D8;
+  --text-muted: #9090A0;
+  --text-light: #707080;
+
+  --border-color: rgba(157, 123, 219, 0.25);
+  --border-light: rgba(157, 123, 219, 0.12);
+  --shadow-soft: 0 8px 32px rgba(0, 0, 0, 0.25);
+  --shadow-medium: 0 12px 40px rgba(0, 0, 0, 0.30);
+  --shadow-float: 0 16px 56px rgba(0, 0, 0, 0.35);
+  --shadow-inner: inset 0 2px 8px rgba(0, 0, 0, 0.20);
 }
+
+/* ============================================
+   Base Styles
+   ============================================ */
 
 * {
   margin: 0;
@@ -33,12 +94,372 @@
   box-sizing: border-box;
 }
 
-body {
-  background-color: var(--bg);
-  color: var(--text);
-  font-family: 'Atkinson Hyperlegible', sans-serif;
+html {
+  scroll-behavior: smooth;
 }
 
-h1, h2, h3, h4, h5, h6 {
-  font-family: 'Crimson Pro', Georgia, serif;
+body {
+  background-color: var(--bg-app);
+  color: var(--text-main);
+  font-family: 'Nunito', 'M PLUS Rounded 1c', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+/* ============================================
+   Custom Scrollbar - Minimal & Soft
+   ============================================ */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-primary-light);
+  border-radius: var(--radius-full);
+  opacity: 0.5;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-primary);
+  opacity: 0.8;
+}
+
+/* ============================================
+   Glassmorphism Utilities
+   ============================================ */
+
+.glass {
+  background: var(--bg-panel);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--border-color);
+}
+
+.glass-card {
+  background: var(--bg-card);
+  backdrop-filter: blur(16px) saturate(160%);
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+}
+
+.glass-strong {
+  background: var(--bg-panel);
+  backdrop-filter: blur(30px) saturate(200%);
+  -webkit-backdrop-filter: blur(30px) saturate(200%);
+  border: 1px solid var(--border-color);
+}
+
+/* ============================================
+   Spring Animation System
+   ============================================ */
+
+.spring-transition {
+  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.spring-bounce {
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.spring-hover {
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.spring-hover:hover {
+  transform: translateY(-3px);
+}
+
+.spring-hover:active {
+  transform: translateY(-1px) scale(0.98);
+}
+
+/* ============================================
+   Animation Keyframes
+   ============================================ */
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeInScale {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes breathe {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.03);
+    opacity: 0.9;
+  }
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(188, 164, 227, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 20px 8px rgba(188, 164, 227, 0.2);
+  }
+}
+
+@keyframes gradient-shift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+/* Animation Classes */
+.animate-fade-in {
+  animation: fadeInUp 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.animate-fade-scale {
+  animation: fadeInScale 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.animate-breathe {
+  animation: breathe 4s ease-in-out infinite;
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+.animate-shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.2) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.animate-gradient {
+  background-size: 200% 200%;
+  animation: gradient-shift 8s ease infinite;
+}
+
+/* ============================================
+   Component Utilities
+   ============================================ */
+
+/* Pill Button Base */
+.pill {
+  border-radius: var(--radius-full);
+  padding: 10px 20px;
+  font-weight: 600;
+  font-size: 0.875rem;
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  border: 1px solid transparent;
+}
+
+.pill-primary {
+  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-dark));
+  color: white;
+  box-shadow: 0 4px 16px rgba(188, 164, 227, 0.35);
+}
+
+.pill-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 24px rgba(188, 164, 227, 0.45);
+}
+
+.pill-secondary {
+  background: rgba(188, 164, 227, 0.12);
+  color: var(--color-primary-dark);
+  border-color: var(--border-color);
+}
+
+.pill-secondary:hover {
+  background: rgba(188, 164, 227, 0.2);
+  transform: translateY(-2px);
+}
+
+/* Card Lift Effect */
+.card-lift {
+  transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.card-lift:hover {
+  transform: translateY(-6px);
+  box-shadow: var(--shadow-float);
+}
+
+/* Focus Ring */
+.focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(188, 164, 227, 0.4);
+  border-radius: var(--radius-md);
+}
+
+/* Gradient Text */
+.gradient-text {
+  background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Energy Bar Gradient */
+.energy-bar-high {
+  background: linear-gradient(90deg, var(--energy-high), #7DD3C0);
+}
+
+.energy-bar-medium {
+  background: linear-gradient(90deg, var(--energy-medium), #F5C88C);
+}
+
+.energy-bar-low {
+  background: linear-gradient(90deg, var(--energy-low), #E89B96);
+}
+
+/* Tag/Pill Style */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border-radius: var(--radius-full);
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: rgba(188, 164, 227, 0.12);
+  color: var(--color-primary-dark);
+  border: 1px solid var(--border-light);
+  transition: all 0.2s ease;
+}
+
+.tag:hover {
+  background: rgba(188, 164, 227, 0.2);
+  transform: scale(1.05);
+}
+
+/* Status Indicators */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  position: relative;
+}
+
+.status-dot::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: inherit;
+  opacity: 0.4;
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Divider */
+.divider {
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--border-color),
+    transparent
+  );
+  margin: 1rem 0;
+}
+
+/* Section Title */
+.section-title {
+  font-family: 'M PLUS Rounded 1c', sans-serif;
+  font-weight: 700;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* Empty State */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* Loading Shimmer */
+.loading-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--bg-panel) 0%,
+    rgba(188, 164, 227, 0.1) 50%,
+    var(--bg-panel) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: var(--radius-md);
 }

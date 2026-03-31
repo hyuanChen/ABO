@@ -85,42 +85,50 @@ export default function SkillGrid({ unlockedSkills }: Props) {
                 return (
                   <div
                     key={skill.id}
-                    className={`
-                      relative w-24 rounded-xl border-2 p-2 text-center text-xs
-                      transition-all duration-300
-                      ${unlocked
-                        ? "bg-slate-800 text-white"
-                        : "bg-slate-900 border-slate-700 text-slate-400"
-                      }
-                      ${isNew ? "ring-2 ring-offset-1 ring-amber-400" : ""}
-                    `}
-                    style={{ borderColor: unlocked ? color : undefined }}
+                    style={{
+                      position: "relative",
+                      width: "96px",
+                      borderRadius: "var(--radius-lg)",
+                      border: "2px solid",
+                      borderColor: unlocked ? color : "var(--border-color)",
+                      padding: "8px",
+                      textAlign: "center",
+                      fontSize: "0.75rem",
+                      transition: "all 0.3s ease",
+                      background: unlocked ? "var(--bg-card)" : "var(--bg-hover)",
+                      color: unlocked ? "var(--text-main)" : "var(--text-muted)",
+                      boxShadow: isNew ? `0 0 0 2px ${color}` : undefined,
+                    }}
                     title={
                       unlocked && unlockDate
                         ? `解锁于 ${unlockDate}`
                         : `${skill.current}/${skill.target} ${skill.unit}`
                     }
                   >
-                    <div className={`font-medium mb-1 ${unlocked ? "text-white" : ""}`}>
+                    <div style={{ fontWeight: 500, marginBottom: "4px", color: unlocked ? "var(--text-main)" : "var(--text-secondary)" }}>
                       {skill.label}
                     </div>
                     {unlocked ? (
-                      <div className="text-xs" style={{ color }}>✓ 已解锁</div>
+                      <div style={{ color, fontSize: "0.75rem" }}>✓ 已解锁</div>
                     ) : (
                       <>
-                        <div className="text-slate-500 mb-1">{pct}%</div>
-                        <div className="h-1 bg-slate-700 rounded-full overflow-hidden">
+                        <div style={{ color: "var(--text-muted)", marginBottom: "4px", fontSize: "0.75rem" }}>{pct}%</div>
+                        <div style={{ height: "4px", background: "var(--bg-hover)", borderRadius: "var(--radius-full)", overflow: "hidden" }}>
                           <div
-                            className="h-full rounded-full transition-all duration-500"
-                            style={{ width: `${pct}%`, backgroundColor: color }}
+                            style={{ width: `${pct}%`, backgroundColor: color, height: "100%", borderRadius: "var(--radius-full)", transition: "width 0.5s ease" }}
                           />
                         </div>
                       </>
                     )}
                     {unlocked && (
                       <div
-                        className="absolute inset-0 rounded-xl pointer-events-none"
-                        style={{ boxShadow: `0 0 8px 2px ${color}40` }}
+                        style={{
+                          position: "absolute",
+                          inset: 0,
+                          borderRadius: "var(--radius-lg)",
+                          pointerEvents: "none",
+                          boxShadow: `0 0 8px 2px ${color}40`,
+                        }}
                       />
                     )}
                   </div>

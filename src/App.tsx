@@ -15,11 +15,48 @@ export default function App() {
   }, [setConfig]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-slate-950">
+    <div
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: "100vw",
+        height: "100vh",
+        display: "flex",
+        overflow: "hidden",
+        background: "var(--bg-app)",
+        fontFamily: "'Nunito', 'M PLUS Rounded 1c', sans-serif",
+      }}
+    >
       <NavSidebar />
-      <div className="flex-1 min-w-0 overflow-hidden">
-        <MainContent />
-      </div>
+      <main
+        style={{
+          flex: 1,
+          minWidth: 0,
+          height: "100%",
+          overflow: "hidden",
+          position: "relative",
+          background: "linear-gradient(135deg, var(--bg-app) 0%, rgba(188, 164, 227, 0.03) 100%)",
+        }}
+      >
+        {/* Subtle background decoration */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            background: `
+              radial-gradient(ellipse 80% 50% at 20% 40%, rgba(188, 164, 227, 0.06) 0%, transparent 50%),
+              radial-gradient(ellipse 60% 40% at 80% 60%, rgba(255, 183, 178, 0.04) 0%, transparent 50%)
+            `,
+          }}
+        />
+        <div style={{ position: "relative", width: "100%", height: "100%" }}>
+          <MainContent />
+        </div>
+      </main>
       <ToastContainer />
     </div>
   );

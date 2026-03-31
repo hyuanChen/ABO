@@ -209,6 +209,117 @@ async def update_prefs(data: dict):
     return {"ok": True}
 
 
+# ── Vault Browser ────────────────────────────────────────────────
+
+class VaultItem(BaseModel):
+    name: str
+    path: str
+    type: str  # "folder" or "file"
+    size: int | None = None
+    modified: float  # timestamp
+
+
+@app.get("/api/vault/browse")
+async def browse_vault(path: str = ""):
+    """Browse vault folder structure."""
+    vault_path = get_vault_path()
+    if not vault_path:
+        raise HTTPException(400, "Vault not configured")
+
+    target = Path(vault_path) / path if path else Path(vault_path)
+
+    if not str(target.resolve()).startswith(str(Path(vault_path).resolve())):
+        raise HTTPException(403, "Access denied")
+
+    if not target.exists():
+        raise HTTPException(404, "Path not found")
+
+    items = []
+    try:
+        for item in sorted(target.iterdir()):
+            # Skip hidden files/folders (starting with .)
+            if item.name.startswith("."):
+                continue
+            stat = item.stat()
+            items.append(VaultItem(
+                name=item.name,
+                path=str(item.relative_to(vault_path)),
+                type="folder" if item.is_dir() else "file",
+                size=stat.st_size if item.is_file() else None,
+                modified=stat.st_mtime,
+            ))
+    except PermissionError:
+        raise HTTPException(403, "Permission denied")
+
+    return {"items": items, "current_path": path}
+
+
+@app.post("/api/vault/open")
+async def open_vault_item(data: dict):
+    """Open file or folder with system default application."""
+    import subprocess
+    vault_path = get_vault_path()
+    if not vault_path:
+        raise HTTPException(400, "Vault not configured")
+
+    item_path = data.get("path", "")
+    if not item_path:
+        raise HTTPException(400, "Path required")
+
+    target = Path(vault_path) / item_path
+
+    # Security check - must be within vault
+    if not str(target.resolve()).startswith(str(Path(vault_path).resolve())):
+        raise HTTPException(403, "Access denied")
+
+    if not target.exists():
+        raise HTTPException(404, "Path not found")
+
+    try:
+        # Use macOS 'open' command to open with default application
+        subprocess.run(["open", str(target.resolve())], check=True)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to open: {e}")
+
+
+@app.post("/api/vault/open-obsidian")
+async def open_in_obsidian(data: dict = None):
+    """Open vault or specific file in Obsidian app."""
+    import subprocess
+    vault_path = get_vault_path()
+    if not vault_path:
+        raise HTTPException(400, "Vault not configured")
+
+    item_path = data.get("path", "") if data else ""
+    target = Path(vault_path) / item_path if item_path else Path(vault_path)
+
+    # Security check
+    if not str(target.resolve()).startswith(str(Path(vault_path).resolve())):
+        raise HTTPException(403, "Access denied")
+
+    try:
+        # Use 'open' with Obsidian app bundle ID
+        # Try to open the specific file/folder with Obsidian
+        if target.is_file():
+            # For files, use obsidian:// url scheme via 'open'
+            vault_name = Path(vault_path).name
+            relative_path = str(target.relative_to(vault_path))
+            url = f"obsidian://open?vault={vault_name}&file={relative_path}"
+            subprocess.run(["open", url], check=True)
+        else:
+            # For folders, just open the vault
+            subprocess.run(["open", "-a", "Obsidian", str(target.resolve())], check=True)
+        return {"ok": True}
+    except Exception as e:
+        # Fallback: try to just open Obsidian app
+        try:
+            subprocess.run(["open", "-a", "Obsidian"], check=True)
+            return {"ok": True}
+        except:
+            raise HTTPException(500, f"Failed to open Obsidian: {e}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("abo.main:app", host="127.0.0.1", port=8765, log_level="info")

@@ -24,39 +24,53 @@ export default function AchievementGallery({ achievements }: Props) {
 
   return (
     <div>
-      <h3 className="text-sm font-medium text-slate-400 mb-3">成就徽章</h3>
-      <div className="flex gap-3 overflow-x-auto pb-2">
+      <h3 style={{ fontSize: "0.875rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "12px" }}>成就徽章</h3>
+      <div style={{ display: "flex", gap: "12px", overflowX: "auto", paddingBottom: "8px" }}>
         {ALL_ACHIEVEMENTS.map(({ id, label, desc, icon }) => {
           const unlocked = unlockedMap.get(id);
           return (
             <div
               key={id}
-              className={`
-                relative flex-shrink-0 w-20 rounded-xl border-2 p-2 text-center
-                transition-all duration-200
-                ${unlocked
-                  ? "bg-slate-800 border-amber-500"
-                  : "bg-slate-900/50 border-slate-700 opacity-40 grayscale"
-                }
-              `}
+              style={{
+                position: "relative",
+                flexShrink: 0,
+                width: "80px",
+                borderRadius: "var(--radius-lg)",
+                border: "2px solid",
+                borderColor: unlocked ? "#F59E0B" : "var(--border-color)",
+                padding: "8px",
+                textAlign: "center",
+                transition: "all 0.2s ease",
+                background: unlocked ? "var(--bg-card)" : "var(--bg-hover)",
+                opacity: unlocked ? 1 : 0.4,
+                filter: unlocked ? "none" : "grayscale(100%)",
+              }}
               title={
                 unlocked
                   ? `解锁于 ${unlocked.unlocked_at.slice(0, 10)}\n${desc}`
                   : desc
               }
             >
-              <div className="text-2xl mb-1">{icon}</div>
+              <div style={{ fontSize: "1.5rem", marginBottom: "4px" }}>{icon}</div>
               <div
-                className={`text-xs font-medium leading-tight ${
-                  unlocked ? "text-amber-400" : "text-slate-500"
-                }`}
+                style={{
+                  fontSize: "0.75rem",
+                  fontWeight: 500,
+                  lineHeight: 1.25,
+                  color: unlocked ? "#F59E0B" : "var(--text-muted)",
+                }}
               >
                 {label}
               </div>
               {unlocked && (
                 <div
-                  className="absolute inset-0 rounded-xl pointer-events-none"
-                  style={{ boxShadow: "0 0 10px 2px rgba(245,158,11,0.3)" }}
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    borderRadius: "var(--radius-lg)",
+                    pointerEvents: "none",
+                    boxShadow: "0 0 10px 2px rgba(245,158,11,0.3)",
+                  }}
                 />
               )}
             </div>
