@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import { useStore } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../core/api";
 
@@ -254,10 +253,11 @@ function VaultSection() {
   async function openInFinder() {
     if (!vaultPath || vaultPath === "未配置") return;
     try {
-      // Use openUrl with file:// protocol to open folder in Finder
-      await openUrl(`file://${vaultPath}`);
+      // Use backend API to open folder in Finder
+      await api.post("/api/vault/open", { path: "" });
     } catch (err) {
       console.error("Failed to open vault:", err);
+      alert("打开失败，请检查情报库路径是否正确");
     }
   }
 
