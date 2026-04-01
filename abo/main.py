@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .config import get_vault_path, load as load_config, save as save_config
+from .config import get_vault_path, get_literature_path, load as load_config, save as save_config
 from .preferences.engine import PreferenceEngine
 from .profile.routes import router as profile_router, init_routes as init_profile_routes
 from .runtime.broadcaster import broadcaster
@@ -174,6 +174,180 @@ async def run_module(module_id: str):
     return {"ok": True}
 
 
+@app.post("/api/modules/arxiv-tracker/crawl")
+async def crawl_arxiv_live(data: dict = None):
+    """Real-time arXiv crawl with keyword support, deduplication, and progress via WebSocket."""
+    from .default_modules.arxiv import ArxivTracker
+    import re
+    import asyncio
+
+    prefs = _prefs.get_prefs_for_module("arxiv-tracker")
+    keywords = data.get("keywords", []) if data else []
+    max_results = data.get("max_results", 20) if data else 20
+    search_mode = data.get("mode", "AND") if data else "AND"  # "AND" or "OR"
+    cs_only = data.get("cs_only", True) if data else True  # Default to CS only
+
+    # Get existing arXiv IDs from literature library to avoid duplicates
+    existing_ids = set()
+    try:
+        lit_path = get_literature_path()
+        if not lit_path:
+            lit_path = get_vault_path()
+        if lit_path:
+            arxiv_dir = lit_path / "arxiv"
+            if arxiv_dir.exists():
+                for f in arxiv_dir.glob("*.md"):
+                    match = re.match(r'([\d.]+)-', f.name)
+                    if match:
+                        existing_ids.add(match.group(1))
+    except Exception:
+        pass
+
+    tracker = ArxivTracker()
+    results = []
+
+    try:
+        # Fetch with deduplication
+        await broadcaster.send_event({
+            "type": "crawl_progress",
+            "phase": "fetching",
+            "current": 0,
+            "total": max_results,
+            "message": "正在从 arXiv 获取论文列表..."
+        })
+
+        items = await tracker.fetch(
+            custom_keywords=keywords if keywords else None,
+            max_results=max_results,
+            existing_ids=existing_ids,
+            mode=search_mode,  # AND or OR mode
+            cs_only=cs_only
+        )
+
+        # Process each paper with progress update
+        for i, item in enumerate(items):
+            # Send progress before processing
+            await broadcaster.send_event({
+                "type": "crawl_progress",
+                "phase": "processing",
+                "current": i + 1,
+                "total": len(items),
+                "message": f"正在处理第 {i+1}/{len(items)} 篇论文: {item.raw.get('title', '')[:40]}..."
+            })
+
+            card_list = await tracker.process([item], prefs)
+            if card_list:
+                card = card_list[0]
+                paper_data = {
+                    "id": card.id,
+                    "title": card.title,
+                    "summary": card.summary,
+                    "score": card.score,
+                    "tags": card.tags,
+                    "source_url": card.source_url,
+                    "metadata": card.metadata,
+                }
+                results.append(paper_data)
+
+                # Send partial result
+                await broadcaster.send_event({
+                    "type": "crawl_paper",
+                    "paper": paper_data,
+                    "current": i + 1,
+                    "total": len(items)
+                })
+
+        # Sort by published date (descending)
+        results.sort(key=lambda x: x.get("metadata", {}).get("published", ""), reverse=True)
+
+        # Send completion
+        await broadcaster.send_event({
+            "type": "crawl_complete",
+            "papers": results,
+            "count": len(results),
+            "requested": max_results,
+            "skipped_duplicates": len(existing_ids)
+        })
+
+        return {
+            "papers": results,
+            "count": len(results),
+            "requested": max_results,
+            "skipped_duplicates": len(existing_ids)
+        }
+    except Exception as e:
+        await broadcaster.send_event({
+            "type": "crawl_error",
+            "error": str(e)
+        })
+        raise HTTPException(500, f"Crawl failed: {e}")
+
+
+@app.post("/api/modules/arxiv-tracker/save-to-literature")
+async def save_arxiv_to_literature(data: dict):
+    """Save an arXiv paper to the literature library."""
+    import frontmatter
+    import os
+
+    paper = data.get("paper", {})
+    folder = data.get("folder", "arxiv")
+
+    # Get literature path
+    lit_path = get_literature_path()
+    if not lit_path:
+        lit_path = get_vault_path()
+    if not lit_path:
+        raise HTTPException(400, "Literature path not configured")
+
+    # Build target path
+    target_dir = lit_path / folder
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build filename from title
+    title = paper.get("title", "untitled")
+    arxiv_id = paper.get("id", "unknown")
+    safe_title = "".join(c for c in title[:50] if c.isalnum() or c in " -_").strip()
+    filename = f"{arxiv_id}-{safe_title}.md"
+    target_path = target_dir / filename
+
+    # Build content
+    meta = paper.get("metadata", {})
+    content_parts = [f"# {title}\n"]
+
+    if meta.get("contribution"):
+        content_parts.append(f"**核心创新**: {meta['contribution']}\n")
+
+    content_parts.append(f"{paper.get('summary', '')}\n")
+
+    if meta.get("abstract"):
+        content_parts.append("## 摘要\n")
+        content_parts.append(f"{meta['abstract']}\n")
+
+    content_parts.append(f"[原文链接]({paper.get('source_url', '')})")
+
+    content = "\n".join(content_parts)
+
+    # Write with frontmatter
+    post = frontmatter.Post(content)
+    post.metadata.update({
+        "abo-type": "arxiv-paper",
+        "relevance-score": round(paper.get("score", 0.5), 3),
+        "tags": paper.get("tags", []),
+        "authors": meta.get("authors", []),
+        "arxiv-id": arxiv_id,
+        "pdf-url": meta.get("pdf-url", ""),
+        "published": meta.get("published", ""),
+        "keywords": meta.get("keywords", []),
+    })
+
+    # Atomic write
+    tmp = target_path.with_suffix(".tmp")
+    tmp.write_text(frontmatter.dumps(post), encoding="utf-8")
+    os.replace(tmp, target_path)
+
+    return {"ok": True, "path": str(target_path.relative_to(lit_path))}
+
+
 @app.patch("/api/modules/{module_id}/toggle")
 async def toggle_module(module_id: str):
     module = _registry.get(module_id)
@@ -230,9 +404,12 @@ async def browse_vault(path: str = ""):
 
 @app.get("/api/literature/browse")
 async def browse_literature(path: str = ""):
-    """Browse literature folder structure."""
-    from .config import get_literature_path
+    """Browse literature folder structure. Falls back to vault path if literature_path not set."""
+    from .config import get_literature_path, get_vault_path
     lit_path = get_literature_path()
+    if not lit_path:
+        # Fall back to vault path
+        lit_path = get_vault_path()
     if not lit_path:
         raise HTTPException(400, "Literature path not configured")
     if not lit_path.exists():
@@ -281,9 +458,12 @@ async def open_vault_item(data: dict):
 
 @app.post("/api/literature/open")
 async def open_literature_item(data: dict):
-    """Open file or folder in literature folder with system default."""
-    from .config import get_literature_path
+    """Open file or folder in literature folder with system default. Falls back to vault path."""
+    from .config import get_literature_path, get_vault_path
     lit_path = get_literature_path()
+    if not lit_path:
+        # Fall back to vault path
+        lit_path = get_vault_path()
     if not lit_path:
         raise HTTPException(400, "Literature path not configured")
     return _open_in_finder(lit_path, data.get("path", ""))
@@ -334,6 +514,39 @@ async def open_in_obsidian(data: dict = None):
         else:
             # For folders, just open the vault
             subprocess.run(["open", "-a", "Obsidian", str(target.resolve())], check=True)
+        return {"ok": True}
+    except Exception as e:
+        # Fallback: try to just open Obsidian app
+        try:
+            subprocess.run(["open", "-a", "Obsidian"], check=True)
+            return {"ok": True}
+        except:
+            raise HTTPException(500, f"Failed to open Obsidian: {e}")
+
+
+@app.post("/api/literature/open-obsidian")
+async def open_literature_in_obsidian(data: dict = None):
+    """Open literature folder in Obsidian app."""
+    import subprocess
+    from .config import get_literature_path, get_vault_path
+
+    lit_path = get_literature_path()
+    if not lit_path:
+        # Fall back to vault path
+        lit_path = get_vault_path()
+    if not lit_path:
+        raise HTTPException(400, "Literature path not configured")
+
+    item_path = data.get("path", "") if data else ""
+    target = lit_path / item_path if item_path else lit_path
+
+    # Security check
+    if not str(target.resolve()).startswith(str(lit_path.resolve())):
+        raise HTTPException(403, "Access denied")
+
+    try:
+        # Open the literature folder with Obsidian
+        subprocess.run(["open", "-a", "Obsidian", str(target.resolve())], check=True)
         return {"ok": True}
     except Exception as e:
         # Fallback: try to just open Obsidian app

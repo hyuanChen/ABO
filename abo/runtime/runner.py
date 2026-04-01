@@ -52,13 +52,31 @@ class ModuleRunner:
         path = self._vault / card.obsidian_path
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        content = f"# {card.title}\n\n{card.summary}\n\n[原文链接]({card.source_url})\n"
+        # Build content with abstract if available
+        abstract = card.metadata.get("abstract", "")
+        contribution = card.metadata.get("contribution", "")
+
+        content_parts = [f"# {card.title}\n"]
+
+        if contribution:
+            content_parts.append(f"**核心创新**: {contribution}\n")
+
+        content_parts.append(f"{card.summary}\n")
+
+        if abstract:
+            content_parts.append("## 摘要\n")
+            content_parts.append(f"{abstract}\n")
+
+        content_parts.append(f"[原文链接]({card.source_url})")
+
+        content = "\n".join(content_parts)
+
         post = fm.Post(content=content)
         post.metadata.update({
             "abo-type": card.module_id,
             "relevance-score": round(card.score, 3),
             "tags": card.tags,
-            **card.metadata,
+            **{k: v for k, v in card.metadata.items() if k != "abstract"},  # exclude abstract from frontmatter (already in content)
         })
 
         tmp = path.with_suffix(".tmp")

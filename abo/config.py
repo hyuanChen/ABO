@@ -8,39 +8,42 @@ from pathlib import Path
 _CONFIG_PATH = Path.home() / ".abo-config.json"
 _ABO_DIR = Path.home() / ".abo"
 
-_DEFAULTS = {
-    "vault_path": str(Path.home() / "Documents" / "MyVault"),
-    "literature_path": "",  # Second folder for literature/papers
-    "version": "1.0.0",
-}
-
-
-def get_literature_path() -> Path | None:
-    """Get literature folder path, returns None if not configured."""
-    path = load().get("literature_path", "")
-    if path:
-        return Path(path)
-    return None
-
 
 def load() -> dict:
+    """Load config from disk. Missing keys get empty-string defaults (not fake paths)."""
+    defaults = {"vault_path": "", "literature_path": "", "version": "1.0.0"}
     if _CONFIG_PATH.exists():
-        saved = json.loads(_CONFIG_PATH.read_text())
-        # Filter out empty strings to use defaults instead
-        saved = {k: v for k, v in saved.items() if v != ""}
-        return {**_DEFAULTS, **saved}
-    return _DEFAULTS.copy()
+        try:
+            saved = json.loads(_CONFIG_PATH.read_text())
+            return {**defaults, **saved}
+        except Exception:
+            pass
+    return defaults.copy()
 
 
 def save(data: dict) -> None:
-    """Save config, merging with existing config to preserve other fields."""
+    """Save config, merging with existing on-disk config.
+    Empty strings do NOT overwrite existing non-empty values (prevents accidental erasure).
+    """
     existing = load()
-    merged = {**existing, **data}
+    merged = {**existing}
+    for k, v in data.items():
+        # Only overwrite if new value is non-empty, or existing was already empty
+        if v or not existing.get(k):
+            merged[k] = v
     _CONFIG_PATH.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
 
 
-def get_vault_path() -> Path:
-    return Path(load()["vault_path"])
+def get_vault_path() -> Path | None:
+    """Return vault path, or None if not configured."""
+    path = load().get("vault_path", "").strip()
+    return Path(path) if path else None
+
+
+def get_literature_path() -> Path | None:
+    """Return literature path, or None if not configured."""
+    path = load().get("literature_path", "").strip()
+    return Path(path) if path else None
 
 
 def get_abo_dir() -> Path:

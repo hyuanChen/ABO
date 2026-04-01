@@ -80,16 +80,16 @@ export default function Literature() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"bubbles" | "list">("bubbles");
-  const [needsConfig, setNeedsConfig] = useState(!config?.literature_path);
+  const [needsConfig, setNeedsConfig] = useState(!config?.literature_path && !config?.vault_path);
 
-  const literaturePath = config?.literature_path;
+  // Update needsConfig when config changes - only show config UI if both paths are empty
+  useEffect(() => {
+    setNeedsConfig(!config?.literature_path && !config?.vault_path);
+  }, [config?.literature_path, config?.vault_path]);
 
   // Load folder contents
   const loadFolder = useCallback(async (path: string = "") => {
-    if (!literaturePath) {
-      setNeedsConfig(true);
-      return;
-    }
+    // Allow empty literaturePath - backend will handle fallback to vault_path
     setLoading(true);
     setError(null);
     try {
@@ -105,7 +105,7 @@ export default function Literature() {
     } finally {
       setLoading(false);
     }
-  }, [literaturePath]);
+  }, []);
 
   // Initial load
   useEffect(() => {
@@ -117,17 +117,16 @@ export default function Literature() {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: "选择文献库文件夹",
+        title:"选择文献库文件夹",
       });
       if (selected && typeof selected === "string") {
-        const newConfig = await api.post<{ vault_path: string; literature_path?: string; version: string }>(
-          "/api/config",
-          { literature_path: selected }
-        );
-        setConfig(newConfig);
+        // Only send literature_path — don't touch vault_path
+        await api.post("/api/config", { literature_path: selected });
+        // Re-fetch full config to update store
+        const refreshed = await api.get<{ vault_path: string; literature_path?: string; version: string }>("/api/config");
+        setConfig(refreshed);
         setNeedsConfig(false);
-        // Reload after setting path
-        window.location.reload();
+        loadFolder("");
       }
     } catch (err) {
       console.error("Failed to select path:", err);
@@ -136,7 +135,7 @@ export default function Literature() {
   }
 
   async function openInFinder() {
-    if (!literaturePath) return;
+    // Backend will handle fallback to vault_path if literature_path is not set
     try {
       await api.post("/api/literature/open", { path: "" });
     } catch (err) {
@@ -146,9 +145,9 @@ export default function Literature() {
   }
 
   async function openInObsidian() {
-    // Open literature folder in Obsidian via vault API (Obsidian can open any folder)
+    // Open literature folder in Obsidian via dedicated API
     try {
-      await api.post("/api/vault/open-obsidian", { path: "" });
+      await api.post("/api/literature/open-obsidian", { path: "" });
     } catch (err) {
       console.error("Failed to open Obsidian:", err);
       // Fallback: try URL scheme directly
@@ -204,7 +203,7 @@ export default function Literature() {
           icon={BookOpen}
         />
         <PageContent maxWidth="800px">
-          <Card title="配置文献库路径" icon={<HardDrive style={{ width: "18px", height: "18px" }} />}>
+          <Card title="配置路径" icon={<HardDrive style={{ width: "18px", height: "18px" }} />}>
             <div style={{ padding: "40px 20px", textAlign: "center" }}>
               <div
                 style={{
@@ -221,10 +220,10 @@ export default function Literature() {
                 <FolderOpen style={{ width: "40px", height: "40px", color: "var(--color-primary)" }} />
               </div>
               <h3 style={{ fontSize: "1.25rem", fontWeight: 700, color: "var(--text-main)", marginBottom: "12px" }}>
-                尚未配置文献库路径
+                尚未配置路径
               </h3>
               <p style={{ fontSize: "0.9375rem", color: "var(--text-muted)", marginBottom: "24px", lineHeight: 1.6 }}>
-                请选择一个文件夹作为文献库，用于存储论文、文献和相关资料。
+                请在主页配置情报库路径，或在下方配置独立的文献库路径。
               </p>
               <button
                 onClick={selectLiteraturePath}

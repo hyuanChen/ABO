@@ -140,11 +140,9 @@ export default function BubbleVault() {
         title: "选择情报库文件夹",
       });
       if (selected && typeof selected === "string") {
-        await api.post(
-          "/api/config",
-          { vault_path: selected }
-        );
-        alert("情报库路径已更新，请重启应用以生效");
+        await api.post("/api/config", { vault_path: selected });
+        // Reload folder contents with new path (like Literature does)
+        loadFolder("");
       }
     } catch (err) {
       console.error("Failed to select path:", err);
