@@ -15,6 +15,7 @@ import {
   Check,
   Layers,
   Cpu,
+  GitBranch,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
 import { api } from "../../core/api";
@@ -43,6 +44,28 @@ interface ArxivPaper {
   };
 }
 
+interface SemanticScholarPaper {
+  id: string;
+  title: string;
+  summary: string;
+  score: number;
+  tags: string[];
+  source_url: string;
+  metadata: {
+    authors?: string[];
+    year?: number;
+    citation_count?: number;
+    contribution?: string;
+    abstract?: string;
+    keywords?: string[];
+    paper_id?: string;
+    s2_url?: string;
+    relationship?: string;
+    relationship_label?: string;
+    source_arxiv_id?: string;
+  };
+}
+
 interface CrawlProgress {
   current: number;
   total: number;
@@ -65,11 +88,20 @@ export default function ArxivTracker() {
   const [orCrawling, setOrCrawling] = useState(false);
   const [orProgress, setOrProgress] = useState<CrawlProgress | null>(null);
 
+  // Semantic Scholar 状态
+  const [arxivIdInput, setArxivIdInput] = useState("");
+  const [s2Papers, setS2Papers] = useState<SemanticScholarPaper[]>([]);
+  const [s2Crawling, setS2Crawling] = useState(false);
+  const [s2Progress, setS2Progress] = useState<CrawlProgress | null>(null);
+  const [fetchCitations, setFetchCitations] = useState(true);
+  const [fetchReferences, setFetchReferences] = useState(false);
+
   // 通用状态
-  const [activeTab, setActiveTab] = useState<"and" | "or">("and");
+  const [activeTab, setActiveTab] = useState<"and" | "or" | "followups">("and");
   const [filterScore, setFilterScore] = useState(0);
   const [loading, setLoading] = useState(false);
   const [savedPapers, setSavedPapers] = useState<Set<string>>(new Set());
+  const [savedS2Papers, setSavedS2Papers] = useState<Set<string>>(new Set());
   const [autoSave, setAutoSave] = useState(true);
   const [csOnly, setCsOnly] = useState(true);
 
@@ -127,6 +159,28 @@ export default function ArxivTracker() {
         } else {
           setOrCrawling(false);
         }
+      } else if (data.type === "s2_progress") {
+        // Semantic Scholar progress
+        setS2Progress({
+          current: data.current || 0,
+          total: data.total || 20,
+          phase: data.phase,
+          message: data.message,
+        });
+      } else if (data.type === "s2_paper") {
+        // Real-time add S2 paper
+        setS2Papers((prev) => {
+          if (prev.find((p) => p.id === data.paper.id)) return prev;
+          return [...prev, data.paper];
+        });
+      } else if (data.type === "s2_complete") {
+        setS2Crawling(false);
+        setS2Progress(null);
+        toast.success("Semantic Scholar 爬取完成", `共获取 ${data.count} 篇相关论文`);
+      } else if (data.type === "s2_error") {
+        setS2Crawling(false);
+        setS2Progress(null);
+        toast.error("Semantic Scholar 爬取失败", data.error);
       }
     };
 
@@ -222,10 +276,46 @@ export default function ArxivTracker() {
     }
   }
 
-  const currentPapers = activeTab === "and" ? andPapers : orPapers;
-  const filteredPapers = currentPapers.filter(p => p.score >= filterScore);
-  const isCrawling = activeTab === "and" ? andCrawling : orCrawling;
-  const currentProgress = activeTab === "and" ? andProgress : orProgress;
+  async function fetchS2FollowUps() {
+    if (!arxivIdInput.trim()) {
+      toast.error("请输入 arXiv ID", "例如：2501.12345");
+      return;
+    }
+
+    setS2Crawling(true);
+    setS2Papers([]);
+    setS2Progress({ current: 0, total: 20, phase: "fetching", message: "正在查询 Semantic Scholar..." });
+
+    try {
+      await api.post("/api/modules/semantic-scholar/follow-ups", {
+        arxiv_id: arxivIdInput.trim(),
+        fetch_citations: fetchCitations,
+        fetch_references: fetchReferences,
+        limit: 20,
+      });
+    } catch (err) {
+      toast.error("获取失败", err instanceof Error ? err.message : "请稍后重试");
+      setS2Crawling(false);
+    }
+  }
+
+  async function saveS2ToLiterature(paper: SemanticScholarPaper) {
+    try {
+      await api.post("/api/modules/semantic-scholar/save-to-literature", {
+        paper,
+      });
+      setSavedS2Papers(prev => new Set(prev).add(paper.id));
+      const subfolder = paper.metadata?.source_arxiv_id?.slice(0, 6) || "unknown";
+      toast.success("保存成功", `已保存到文献库/FollowUps/${subfolder}/`);
+    } catch (err) {
+      toast.error("保存失败", err instanceof Error ? err.message : "请检查文献库路径");
+    }
+  }
+
+  const currentPapers = activeTab === "and" ? andPapers : activeTab === "or" ? orPapers : s2Papers;
+  const filteredPapers = activeTab === "followups" ? currentPapers : currentPapers.filter(p => p.score >= filterScore);
+  const isCrawling = activeTab === "and" ? andCrawling : activeTab === "or" ? orCrawling : s2Crawling;
+  const currentProgress = activeTab === "and" ? andProgress : activeTab === "or" ? orProgress : s2Progress;
   const currentKeywords = activeTab === "and" ? andKeywords : orKeywords;
   const setCurrentKeywords = activeTab === "and" ? setAndKeywords : setOrKeywords;
 
@@ -311,6 +401,29 @@ export default function ArxivTracker() {
             <Search style={{ width: "18px", height: "18px" }} />
             OR 模式
             <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>(摘要包含任一关键词)</span>
+          </button>
+          <button
+            onClick={() => setActiveTab("followups")}
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "8px",
+              padding: "16px 24px",
+              borderRadius: "var(--radius-lg)",
+              background: activeTab === "followups" ? "var(--color-primary)" : "var(--bg-card)",
+              border: `1px solid ${activeTab === "followups" ? "transparent" : "var(--border-light)"}`,
+              color: activeTab === "followups" ? "white" : "var(--text-secondary)",
+              fontSize: "0.9375rem",
+              fontWeight: 600,
+              cursor: "pointer",
+              transition: "all 0.3s ease",
+            }}
+          >
+            <GitBranch style={{ width: "18px", height: "18px" }} />
+            后续论文
+            <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>(Semantic Scholar)</span>
           </button>
         </div>
 

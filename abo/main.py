@@ -348,6 +348,184 @@ async def save_arxiv_to_literature(data: dict):
     return {"ok": True, "path": str(target_path.relative_to(lit_path))}
 
 
+@app.post("/api/modules/semantic-scholar/follow-ups")
+async def fetch_semantic_scholar_follow_ups(data: dict):
+    """Fetch follow-up papers from Semantic Scholar for a given arXiv ID."""
+    from .default_modules.semantic_scholar import SemanticScholarTracker
+    import os
+
+    arxiv_id = data.get("arxiv_id", "")
+    fetch_citations = data.get("fetch_citations", True)
+    fetch_references = data.get("fetch_references", False)
+    limit = data.get("limit", 20)
+
+    if not arxiv_id:
+        raise HTTPException(400, "arxiv_id is required")
+
+    tracker = SemanticScholarTracker()
+    results = []
+
+    try:
+        # Send initial progress
+        await broadcaster.send_event({
+            "type": "s2_progress",
+            "phase": "fetching",
+            "current": 0,
+            "total": 1,
+            "message": f"正在从 Semantic Scholar 查询论文 {arxiv_id}..."
+        })
+
+        # Fetch follow-up papers
+        items = await tracker.fetch(
+            arxiv_id=arxiv_id,
+            fetch_citations=fetch_citations,
+            fetch_references=fetch_references,
+            limit=limit
+        )
+
+        if not items:
+            await broadcaster.send_event({
+                "type": "s2_complete",
+                "papers": [],
+                "count": 0,
+                "arxiv_id": arxiv_id
+            })
+            return {"papers": [], "count": 0, "arxiv_id": arxiv_id}
+
+        prefs = _prefs.get_prefs_for_module("semantic-scholar-tracker")
+
+        # Process each paper with progress updates
+        for i, item in enumerate(items):
+            await broadcaster.send_event({
+                "type": "s2_progress",
+                "phase": "processing",
+                "current": i + 1,
+                "total": len(items),
+                "message": f"正在处理第 {i+1}/{len(items)} 篇相关论文: {item.raw.get('title', '')[:40]}..."
+            })
+
+            card_list = await tracker.process([item], prefs)
+            if card_list:
+                card = card_list[0]
+                paper_data = {
+                    "id": card.id,
+                    "title": card.title,
+                    "summary": card.summary,
+                    "score": card.score,
+                    "tags": card.tags,
+                    "source_url": card.source_url,
+                    "metadata": card.metadata,
+                }
+                results.append(paper_data)
+
+                # Send partial result
+                await broadcaster.send_event({
+                    "type": "s2_paper",
+                    "paper": paper_data,
+                    "current": i + 1,
+                    "total": len(items)
+                })
+
+        # Sort by citation count (descending)
+        results.sort(key=lambda x: x.get("metadata", {}).get("citation_count", 0), reverse=True)
+
+        # Send completion
+        await broadcaster.send_event({
+            "type": "s2_complete",
+            "papers": results,
+            "count": len(results),
+            "arxiv_id": arxiv_id
+        })
+
+        return {
+            "papers": results,
+            "count": len(results),
+            "arxiv_id": arxiv_id
+        }
+
+    except Exception as e:
+        await broadcaster.send_event({
+            "type": "s2_error",
+            "error": str(e),
+            "arxiv_id": arxiv_id
+        })
+        raise HTTPException(500, f"Semantic Scholar fetch failed: {e}")
+
+
+@app.post("/api/modules/semantic-scholar/save-to-literature")
+async def save_s2_to_literature(data: dict):
+    """Save a Semantic Scholar paper to the literature library in a subfolder."""
+    import frontmatter
+    import os
+
+    paper = data.get("paper", {})
+
+    # Get literature path
+    lit_path = get_literature_path()
+    if not lit_path:
+        lit_path = get_vault_path()
+    if not lit_path:
+        raise HTTPException(400, "Literature path not configured")
+
+    # Get source arXiv ID for subfolder naming (first 6 letters)
+    meta = paper.get("metadata", {})
+    source_arxiv = meta.get("source_arxiv_id", "unknown")
+    subfolder = source_arxiv[:6] if len(source_arxiv) >= 6 else source_arxiv
+
+    # Build target path with subfolder
+    target_dir = lit_path / "FollowUps" / subfolder
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build filename from title
+    title = paper.get("title", "untitled")
+    paper_id = meta.get("paper_id", "unknown")
+    safe_title = "".join(c for c in title[:50] if c.isalnum() or c in " -_").strip()
+    filename = f"{paper_id}-{safe_title}.md"
+    target_path = target_dir / filename
+
+    # Build content
+    content_parts = [f"# {title}\n"]
+
+    if meta.get("contribution"):
+        content_parts.append(f"**核心创新**: {meta['contribution']}\n")
+
+    if meta.get("relationship_label"):
+        content_parts.append(f"**关系**: 原论文的{meta['relationship_label']}\n")
+
+    content_parts.append(f"{paper.get('summary', '')}\n")
+
+    if meta.get("abstract"):
+        content_parts.append("## 摘要\n")
+        content_parts.append(f"{meta['abstract']}\n")
+
+    content_parts.append(f"[原文链接]({paper.get('source_url', '')})")
+
+    content = "\n".join(content_parts)
+
+    # Write with frontmatter
+    post = frontmatter.Post(content)
+    post.metadata.update({
+        "abo-type": "semantic-scholar-paper",
+        "relevance-score": round(paper.get("score", 0.5), 3),
+        "tags": paper.get("tags", []),
+        "authors": meta.get("authors", []),
+        "paper-id": paper_id,
+        "s2-url": meta.get("s2_url", ""),
+        "year": meta.get("year"),
+        "citation-count": meta.get("citation_count", 0),
+        "keywords": meta.get("keywords", []),
+        "relationship": meta.get("relationship", ""),
+        "source-arxiv-id": source_arxiv,
+    })
+
+    # Atomic write
+    tmp = target_path.with_suffix(".tmp")
+    tmp.write_text(frontmatter.dumps(post), encoding="utf-8")
+    os.replace(tmp, target_path)
+
+    return {"ok": True, "path": str(target_path.relative_to(lit_path))}
+
+
 @app.patch("/api/modules/{module_id}/toggle")
 async def toggle_module(module_id: str):
     module = _registry.get(module_id)
