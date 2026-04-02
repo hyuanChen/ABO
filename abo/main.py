@@ -858,6 +858,196 @@ async def fetch_semantic_scholar_follow_ups(data: dict):
         raise HTTPException(500, f"Semantic Scholar fetch failed: {e}")
 
 
+# ── Multi-source figure fetching helpers ─────────────────────────
+
+async def fetch_figures_from_arxiv_html(
+    arxiv_id: str,
+    figures_dir: Path,
+    client: httpx.AsyncClient,
+    max_figures: int = 5
+) -> list[dict]:
+    """Fetch figures from arXiv HTML page with smart prioritization."""
+    figures = []
+
+    try:
+        html_url = f"https://arxiv.org/html/{arxiv_id}"
+        resp = await client.get(html_url, headers={"User-Agent": "ABO/1.0"}, timeout=30)
+
+        if resp.status_code != 200:
+            return figures
+
+        html = resp.text
+        img_pattern = r'<img[^>]+src="([^"]+)"[^>]*>'
+        img_matches = list(re.finditer(img_pattern, html, re.IGNORECASE))
+
+        figure_candidates = []
+        for i, match in enumerate(img_matches[:20]):  # Check first 20 images
+            src = match.group(1)
+            if not src:
+                continue
+
+            img_tag = match.group(0)
+            alt_match = re.search(r'alt="([^"]*)"', img_tag, re.IGNORECASE)
+            alt = alt_match.group(1) if alt_match else ""
+
+            # Skip non-figure images
+            if any(skip in src.lower() for skip in ['icon', 'logo', 'button', 'spacer', 'arrow']):
+                continue
+
+            # Make absolute URL
+            if src.startswith('/'):
+                src = f"https://arxiv.org{src}"
+            elif not src.startswith('http'):
+                if src.startswith(arxiv_id + '/'):
+                    src = f"https://arxiv.org/html/{src}"
+                else:
+                    src = f"https://arxiv.org/html/{arxiv_id}/{src}"
+
+            # Score based on likelihood of being a pipeline/method figure
+            alt_lower = alt.lower()
+            score = 0
+            priority_keywords = [
+                ('pipeline', 30), ('architecture', 25), ('framework', 25),
+                ('overview', 20), ('method', 20), ('system', 15),
+                ('flowchart', 20), ('diagram', 15), ('structure', 15),
+                ('model', 10), ('approach', 10), ('fig', 10), ('figure', 10)
+            ]
+            for kw, pts in priority_keywords:
+                if kw in alt_lower:
+                    score += pts
+
+            figure_candidates.append({
+                'url': src,
+                'caption': alt[:120] if alt else f"Figure {i+1}",
+                'score': score,
+                'index': i
+            })
+
+        # Sort by score (descending) and take top max_figures
+        figure_candidates.sort(key=lambda x: (-x['score'], x['index']))
+        selected_figures = figure_candidates[:max_figures]
+
+        # Download figures
+        for idx, fig in enumerate(selected_figures):
+            try:
+                fig_resp = await client.get(fig['url'], headers={"User-Agent": "ABO/1.0"}, timeout=30)
+                if fig_resp.status_code == 200:
+                    content_type = fig_resp.headers.get('content-type', '')
+                    if 'png' in content_type:
+                        ext = 'png'
+                    elif 'jpeg' in content_type or 'jpg' in content_type:
+                        ext = 'jpg'
+                    elif 'gif' in content_type:
+                        ext = 'gif'
+                    else:
+                        ext = 'png'
+
+                    fig_filename = f"figure_{idx+1:02d}.{ext}"
+                    fig_path = figures_dir / fig_filename
+                    fig_path.write_bytes(fig_resp.content)
+
+                    figures.append({
+                        'filename': fig_filename,
+                        'caption': fig['caption'],
+                        'local_path': f"figures/{fig_filename}",
+                        'original_url': fig['url']
+                    })
+                    await asyncio.sleep(0.3)
+            except Exception as e:
+                print(f"[figures] Failed to download {fig['url']}: {e}")
+                continue
+
+    except Exception as e:
+        print(f"[figures] HTML fetch failed: {e}")
+
+    return figures
+
+
+async def extract_figures_from_arxiv_pdf(
+    arxiv_id: str,
+    figures_dir: Path,
+    client: httpx.AsyncClient,
+    max_figures: int = 5
+) -> list[dict]:
+    """Download arXiv PDF and extract first few pages as figure candidates."""
+    figures = []
+
+    try:
+        from pdf2image import convert_from_path
+        from PIL import Image
+    except ImportError:
+        print("[figures] pdf2image not installed, skipping PDF extraction")
+        return figures
+
+    temp_pdf = None
+    try:
+        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+        resp = await client.get(pdf_url, headers={"User-Agent": "ABO/1.0"}, timeout=60)
+
+        if resp.status_code != 200 or len(resp.content) < 10000:
+            return figures
+
+        # Save to temp file
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
+            f.write(resp.content)
+            temp_pdf = f.name
+
+        # Convert first 5 pages to images
+        images = convert_from_path(temp_pdf, first_page=1, last_page=5, dpi=150)
+
+        for i, image in enumerate(images[:max_figures]):
+            width, height = image.size
+            # Skip pages that are mostly text (tall aspect ratio)
+            if height > width * 1.5:
+                continue
+
+            fig_filename = f"figure_pdf_{i+1:02d}.png"
+            fig_path = figures_dir / fig_filename
+            image.save(fig_path, "PNG")
+
+            figures.append({
+                'filename': fig_filename,
+                'caption': f"PDF Page {i+1}",
+                'local_path': f"figures/{fig_filename}",
+                'original_url': f"pdf_page_{i+1}"
+            })
+
+    except Exception as e:
+        print(f"[figures] PDF extraction failed: {e}")
+
+    finally:
+        if temp_pdf and os.path.exists(temp_pdf):
+            os.unlink(temp_pdf)
+
+    return figures
+
+
+async def fetch_paper_figures(
+    arxiv_id: str,
+    figures_dir: Path,
+    max_figures: int = 5
+) -> list[dict]:
+    """Fetch paper figures using multiple strategies."""
+    figures = []
+
+    async with httpx.AsyncClient() as client:
+        # Strategy 1: arXiv HTML (best quality, proper figures)
+        figures = await fetch_figures_from_arxiv_html(
+            arxiv_id, figures_dir, client, max_figures
+        )
+
+        # Strategy 2: PDF extraction (fallback for HTML failures)
+        if len(figures) < 2:
+            remaining = max_figures - len(figures)
+            pdf_figures = await extract_figures_from_arxiv_pdf(
+                arxiv_id, figures_dir, client, remaining
+            )
+            figures.extend(pdf_figures)
+
+    return figures[:max_figures]
+
+
 @app.post("/api/modules/semantic-scholar/save-to-literature")
 async def save_s2_to_literature(data: dict):
     """Save a Semantic Scholar paper to the literature library with figures and PDF."""
@@ -914,90 +1104,8 @@ async def save_s2_to_literature(data: dict):
 
     if arxiv_id:
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                # Fetch arXiv HTML to get figures
-                html_url = f"https://arxiv.org/html/{arxiv_id}"
-                resp = await client.get(html_url, headers={"User-Agent": "ABO/1.0"})
-
-                if resp.status_code == 200:
-                    html = resp.text
-                    # Find image tags
-                    img_pattern = r'<img[^>]+src="([^"]+)"[^>]*>'
-                    img_matches = list(re.finditer(img_pattern, html, re.IGNORECASE))
-
-                    figure_candidates = []
-                    for i, match in enumerate(img_matches[:15]):  # Check first 15 images
-                        src = match.group(1)
-                        if not src:
-                            continue
-
-                        # Get alt text
-                        img_tag = match.group(0)
-                        alt_match = re.search(r'alt="([^"]*)"', img_tag, re.IGNORECASE)
-                        alt = alt_match.group(1) if alt_match else ""
-
-                        # Skip non-figure images
-                        if any(skip in src.lower() for skip in ['icon', 'logo', 'button', 'spacer']):
-                            continue
-
-                        # Make absolute URL
-                        if src.startswith('/'):
-                            src = f"https://arxiv.org{src}"
-                        elif not src.startswith('http'):
-                            if src.startswith(arxiv_id + '/'):
-                                src = f"https://arxiv.org/html/{src}"
-                            else:
-                                src = f"https://arxiv.org/html/{arxiv_id}/{src}"
-
-                        # Score based on likelihood of being a pipeline/method figure
-                        alt_lower = alt.lower()
-                        score = 0
-                        keywords = ['method', 'pipeline', 'architecture', 'framework', 'overview', 'structure', 'model', 'system', 'approach', 'flowchart', 'diagram', 'fig', 'figure']
-                        for kw in keywords:
-                            if kw in alt_lower:
-                                score += 10
-
-                        figure_candidates.append({
-                            'url': src,
-                            'caption': alt[:100] if alt else f"Figure {i+1}",
-                            'score': score,
-                            'index': i
-                        })
-
-                    # Sort by score (descending) and take top max_figures
-                    figure_candidates.sort(key=lambda x: (-x['score'], x['index']))
-                    selected_figures = figure_candidates[:max_figures]
-
-                    # Download figures
-                    for idx, fig in enumerate(selected_figures):
-                        try:
-                            fig_resp = await client.get(fig['url'], headers={"User-Agent": "ABO/1.0"}, timeout=30)
-                            if fig_resp.status_code == 200:
-                                # Determine extension
-                                content_type = fig_resp.headers.get('content-type', '')
-                                if 'png' in content_type:
-                                    ext = 'png'
-                                elif 'jpeg' in content_type or 'jpg' in content_type:
-                                    ext = 'jpg'
-                                elif 'gif' in content_type:
-                                    ext = 'gif'
-                                else:
-                                    ext = 'png'
-
-                                fig_filename = f"figure_{idx+1:02d}.{ext}"
-                                fig_path = figures_dir / fig_filename
-                                fig_path.write_bytes(fig_resp.content)
-
-                                local_figures.append({
-                                    'filename': fig_filename,
-                                    'caption': fig['caption'],
-                                    'local_path': f"figures/{fig_filename}",
-                                    'original_url': fig['url']
-                                })
-                                await asyncio.sleep(0.5)  # Rate limiting
-                        except Exception as e:
-                            print(f"[s2-save] Failed to download figure {fig['url']}: {e}")
-                            continue
+            local_figures = await fetch_paper_figures(arxiv_id, figures_dir, max_figures)
+            print(f"[s2-save] Fetched {len(local_figures)} figures for {arxiv_id}")
         except Exception as e:
             print(f"[s2-save] Failed to fetch figures: {e}")
 
