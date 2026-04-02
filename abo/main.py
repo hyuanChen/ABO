@@ -159,6 +159,23 @@ async def unread_counts():
     return _card_store.unread_counts()
 
 
+@app.get("/api/cards/prioritized")
+async def get_prioritized_cards(
+    limit: int = 50,
+    unread_only: bool = False,
+):
+    """Get cards sorted by combined AI score + user preference."""
+    keyword_prefs = _prefs.get_all_keyword_prefs()
+    keyword_scores = {k: v.score for k, v in keyword_prefs.items()}
+
+    cards = _card_store.get_prioritized(
+        keyword_scores=keyword_scores,
+        limit=limit,
+        unread_only=unread_only,
+    )
+    return {"cards": [c.to_dict() for c in cards]}
+
+
 class FeedbackReq(BaseModel):
     action: FeedbackAction
 
@@ -168,7 +185,14 @@ async def feedback(card_id: str, body: FeedbackReq):
     card = _card_store.get(card_id)
     if not card:
         raise HTTPException(404, "Card not found")
+
+    # Update derived weights (legacy)
     _prefs.record_feedback(card.tags, body.action.value)
+
+    # Update keyword preferences (Phase 2)
+    _prefs.update_from_feedback(card.tags, body.action.value, card.module_id)
+
+    # Record in card store
     _card_store.record_feedback(card_id, body.action.value)
 
     # Save liked items to markdown
@@ -1445,6 +1469,23 @@ async def get_prefs():
 async def update_prefs(data: dict):
     _prefs.update(data)
     return {"ok": True}
+
+
+@app.get("/api/preferences/keywords")
+async def get_keyword_preferences():
+    """Get all keyword preferences with scores."""
+    prefs = _prefs.get_all_keyword_prefs()
+    return {
+        "keywords": {k: v.to_dict() for k, v in prefs.items()},
+        "top": _prefs.get_top_keywords(20),
+        "disliked": _prefs.get_disliked_keywords(),
+    }
+
+
+@app.get("/api/preferences/keywords/top")
+async def get_top_keywords(limit: int = 20):
+    """Get top liked keywords."""
+    return {"keywords": _prefs.get_top_keywords(limit)}
 
 
 # ── Vault Browser ────────────────────────────────────────────────

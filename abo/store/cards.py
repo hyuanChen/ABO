@@ -105,3 +105,43 @@ class CardStore:
             metadata=json.loads(row[8] or "{}"),
             created_at=row[9] or 0.0,
         )
+
+    def get_prioritized(
+        self,
+        keyword_scores: dict[str, float],
+        limit: int = 50,
+        unread_only: bool = False,
+    ) -> list[Card]:
+        """Get cards sorted by combined AI score + user preference score.
+
+        Args:
+            keyword_scores: Dictionary of keyword -> preference score (-1.0 to 1.0)
+            limit: Maximum number of cards to return
+            unread_only: Only return unread cards
+
+        Returns:
+            List of cards sorted by combined score (descending)
+        """
+        cards = self.list(limit=limit * 2, unread_only=unread_only)
+
+        def calculate_combined_score(card: Card) -> float:
+            """Combine AI score with user preference scores."""
+            base_score = card.score  # AI relevance score (0-1)
+
+            # Calculate preference score from card tags
+            pref_score = 0.0
+            if card.tags and keyword_scores:
+                for tag in card.tags:
+                    tag_lower = tag.lower()
+                    if tag_lower in keyword_scores:
+                        pref_score += keyword_scores[tag_lower]
+
+            # Normalize preference score (-3.0 to 3.0 range -> -0.3 to 0.3)
+            normalized_pref = max(-0.3, min(0.3, pref_score * 0.1))
+
+            # Combined score: 70% AI score, 30% preference influence
+            return base_score * 0.7 + (base_score + normalized_pref) * 0.3
+
+        # Sort by combined score descending
+        cards.sort(key=calculate_combined_score, reverse=True)
+        return cards[:limit]
