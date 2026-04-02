@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Inbox, Sparkles, Wifi, WifiOff, Zap, Layers, Clock, Star } from "lucide-react";
+import { Inbox, Sparkles, Wifi, WifiOff, Layers } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, FeedCard } from "../../core/store";
 import CardView from "./CardView";
@@ -212,7 +212,6 @@ export default function Feed() {
   const [focusIdx, setFocusIdx] = useState(0);
   const [isConnected, setIsConnected] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [cardRatings, setCardRatings] = useState<Record<string, "like" | "neutral" | "dislike">>({});
   const wsRef = useRef<WebSocket | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -288,7 +287,7 @@ export default function Feed() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [focusIdx, feedCards, activeModuleFilter, selectedCategory, cardRatings]);
+  }, [focusIdx, feedCards, activeModuleFilter, cardRatings]);
 
   // Auto-scroll
   useEffect(() => {
@@ -304,9 +303,6 @@ export default function Feed() {
     let cards = feedCards;
     if (activeModuleFilter) {
       cards = cards.filter((c) => c.module_id === activeModuleFilter);
-    }
-    if (selectedCategory) {
-      cards = cards.filter((c) => c.category === selectedCategory);
     }
     return cards;
   }
@@ -326,13 +322,6 @@ export default function Feed() {
   }
 
   const visible = filteredCards();
-
-  // Calculate category counts
-  const categoryCounts = feedCards.reduce((acc, card) => {
-    const cat = card.category || "news";
-    acc[cat] = (acc[cat] || 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
 
   // Empty State - only when there are no cards at all (not due to filtering)
   if (feedCards.length === 0) {
@@ -416,59 +405,6 @@ export default function Feed() {
             unreadCounts={unreadCounts}
           />
 
-          {/* Category Filter */}
-          <div style={{ marginTop: "24px" }}>
-            <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "12px", paddingLeft: "8px" }}>
-              分类筛选
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-              {[
-                { key: "paper", label: "论文", icon: Star, color: "#9D7BDB" },
-                { key: "news", label: "资讯", icon: Zap, color: "#FFB7B2" },
-                { key: "idea", label: "灵感", icon: Sparkles, color: "#A8D8FF" },
-                { key: "todo", label: "待办", icon: Clock, color: "#A8E6CF" },
-              ].map(({ key, label, icon: Icon, color }) => {
-                const count = categoryCounts[key] || 0;
-                if (count === 0) return null;
-                const isActive = selectedCategory === key;
-                return (
-                  <button
-                    key={key}
-                    onClick={() => setSelectedCategory(isActive ? null : key)}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "10px",
-                      width: "100%",
-                      padding: "10px 14px",
-                      borderRadius: "var(--radius-md)",
-                      background: isActive ? "var(--bg-card)" : "transparent",
-                      border: isActive ? "1px solid var(--border-light)" : "1px solid transparent",
-                      color: isActive ? color : "var(--text-secondary)",
-                      fontSize: "0.875rem",
-                      fontWeight: isActive ? 600 : 500,
-                      cursor: "pointer",
-                      transition: "all 0.2s ease",
-                      boxShadow: isActive ? "var(--shadow-soft)" : "none",
-                    }}
-                  >
-                    <Icon style={{ width: "16px", height: "16px" }} />
-                    <span style={{ flex: 1, textAlign: "left" }}>{label}</span>
-                    <span style={{
-                      fontSize: "0.75rem",
-                      fontWeight: 600,
-                      padding: "2px 8px",
-                      borderRadius: "var(--radius-full)",
-                      background: isActive ? `${color}20` : "var(--bg-hover)",
-                      color: isActive ? color : "var(--text-muted)",
-                    }}>
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
           <div
             style={{
               marginTop: "24px",

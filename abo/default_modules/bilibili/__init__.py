@@ -19,7 +19,7 @@ class BilibiliTracker(Module):
     """Track Bilibili videos from specific UP masters."""
 
     id = "bilibili-tracker"
-    name = "哔哩哔哩视频追踪"
+    name = "哔哩哔哩"
     schedule = "0 11 * * *"  # Daily at 11 AM
     icon = "play-circle"
     output = ["obsidian", "ui"]

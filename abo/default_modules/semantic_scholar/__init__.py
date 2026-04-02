@@ -9,7 +9,7 @@ class SemanticScholarTracker(Module):
     """Fetch follow-up papers from Semantic Scholar API."""
 
     id = "semantic-scholar-tracker"
-    name = "Semantic Scholar 后续论文追踪"
+    name = "Semantic Scholar 后续论文"
     schedule = "0 9 * * *"  # Daily at 9 AM
     icon = "git-branch"
     output = ["obsidian", "ui"]

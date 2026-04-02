@@ -19,7 +19,7 @@ class XiaohongshuTracker(Module):
     """Track Xiaohongshu (Little Red Book) notes for research content."""
 
     id = "xiaohongshu-tracker"
-    name = "小红书笔记追踪"
+    name = "小红书"
     schedule = "0 10 * * *"  # Daily at 10 AM
     icon = "book-heart"
     output = ["obsidian", "ui"]

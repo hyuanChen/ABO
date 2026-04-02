@@ -19,7 +19,7 @@ class ZhihuTracker(Module):
     """Track Zhihu content from topics or users."""
 
     id = "zhihu-tracker"
-    name = "知乎内容追踪"
+    name = "知乎"
     schedule = "0 12 * * *"  # Daily at 12 PM
     icon = "help-circle"
     output = ["obsidian", "ui"]

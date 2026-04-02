@@ -19,7 +19,7 @@ class XiaoyuzhouTracker(Module):
     """Track Xiaoyuzhou (Podcast Universe) episodes."""
 
     id = "xiaoyuzhou-tracker"
-    name = "小宇宙播客追踪"
+    name = "小宇宙"
     schedule = "0 9 * * *"  # Daily at 9 AM
     icon = "headphones"
     output = ["obsidian", "ui"]

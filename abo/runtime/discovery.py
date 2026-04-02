@@ -43,8 +43,22 @@ class ModuleRegistry:
         except Exception as e:
             print(f"[discovery] Failed to load {pkg_dir.name}: {e}")
 
+    # Desired module order
+    MODULE_ORDER = [
+        "arxiv-tracker",
+        "semantic-scholar-tracker",
+        "xiaohongshu-tracker",
+        "bilibili-tracker",
+        "xiaoyuzhou-tracker",
+        "zhihu-tracker",
+        "folder-monitor",
+    ]
+
     def all(self) -> list[Module]:
-        return list(self._modules.values())
+        # Sort modules according to desired order
+        modules = list(self._modules.values())
+        order_map = {name: idx for idx, name in enumerate(self.MODULE_ORDER)}
+        return sorted(modules, key=lambda m: order_map.get(m.id, 999))
 
     def enabled(self) -> list[Module]:
         return [m for m in self._modules.values() if m.enabled]
