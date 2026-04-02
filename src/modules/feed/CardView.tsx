@@ -1,4 +1,4 @@
-import { Bookmark, X, Star, ChevronDown, ExternalLink } from "lucide-react";
+import { Star, ChevronDown, ExternalLink } from "lucide-react";
 import type { FeedCard } from "../../core/store";
 
 interface Props {
@@ -6,44 +6,62 @@ interface Props {
   focused: boolean;
   onClick: () => void;
   onFeedback: (action: string) => void;
+  onRating?: (rating: "like" | "neutral" | "dislike") => void;
+  userRating?: "like" | "neutral" | "dislike" | null;
 }
 
-const ACTIONS = [
+// 三级打分操作
+const RATING_ACTIONS = [
+  {
+    key: "like",
+    label: "喜欢",
+    emoji: "👍",
+    shortcut: "L",
+    gradient: "linear-gradient(135deg, #A8E6CF, #7DD3C0)",
+    shadow: "rgba(168, 230, 207, 0.4)",
+    color: "#5BA88C",
+  },
+  {
+    key: "neutral",
+    label: "中立",
+    emoji: "😐",
+    shortcut: "N",
+    gradient: "linear-gradient(135deg, #FFE4B5, #F5C88C)",
+    shadow: "rgba(255, 228, 181, 0.4)",
+    color: "#D4A574",
+  },
+  {
+    key: "dislike",
+    label: "不喜欢",
+    emoji: "👎",
+    shortcut: "D",
+    gradient: "linear-gradient(135deg, #FFB7B2, #FF9E9A)",
+    shadow: "rgba(255, 183, 178, 0.4)",
+    color: "#D48984",
+  },
+];
+
+// 扩展操作
+const EXT_ACTIONS = [
   {
     key: "save",
     label: "保存",
     shortcut: "S",
-    Icon: Bookmark,
-    gradient: "linear-gradient(135deg, #A8E6CF, #7DD3C0)",
-    shadow: "rgba(168, 230, 207, 0.4)",
+    Icon: Star,
+    gradient: "linear-gradient(135deg, #BCA4E3, #9D7BDB)",
+    shadow: "rgba(188, 164, 227, 0.4)",
   },
   {
     key: "skip",
     label: "跳过",
     shortcut: "X",
-    Icon: X,
+    Icon: ChevronDown,
     gradient: "linear-gradient(135deg, #E8E8E8, #D0D0D0)",
     shadow: "rgba(200, 200, 200, 0.3)",
   },
-  {
-    key: "star",
-    label: "精华",
-    shortcut: "F",
-    Icon: Star,
-    gradient: "linear-gradient(135deg, #FFE4B5, #F5C88C)",
-    shadow: "rgba(255, 228, 181, 0.4)",
-  },
-  {
-    key: "deep_dive",
-    label: "深度",
-    shortcut: "D",
-    Icon: ChevronDown,
-    gradient: "linear-gradient(135deg, #BCA4E3, #9D7BDB)",
-    shadow: "rgba(188, 164, 227, 0.4)",
-  },
 ];
 
-export default function CardView({ card, focused, onClick, onFeedback }: Props) {
+export default function CardView({ card, focused, onClick, onFeedback, onRating, userRating }: Props) {
   const scorePercent = Math.round(card.score * 100);
 
   return (
@@ -93,6 +111,31 @@ export default function CardView({ card, focused, onClick, onFeedback }: Props) 
             borderRadius: "0 4px 4px 0",
           }}
         />
+      )}
+
+      {/* User Rating Badge */}
+      {userRating && (
+        <div
+          style={{
+            position: "absolute",
+            top: "-8px",
+            right: "16px",
+            padding: "6px 14px",
+            borderRadius: "var(--radius-full)",
+            background: userRating === "like"
+              ? "linear-gradient(135deg, #A8E6CF, #7DD3C0)"
+              : userRating === "neutral"
+              ? "linear-gradient(135deg, #FFE4B5, #F5C88C)"
+              : "linear-gradient(135deg, #FFB7B2, #FF9E9A)",
+            color: "white",
+            fontSize: "0.8125rem",
+            fontWeight: 700,
+            boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+            zIndex: 10,
+          }}
+        >
+          {userRating === "like" ? "👍 喜欢" : userRating === "neutral" ? "😐 中立" : "👎 不喜欢"}
+        </div>
       )}
 
       {/* Header: Score bar + Source */}
@@ -253,9 +296,78 @@ export default function CardView({ card, focused, onClick, onFeedback }: Props) 
         </div>
       )}
 
-      {/* Action buttons */}
+      {/* Rating Section - 三级打分 */}
+      <div style={{ marginBottom: "12px" }}>
+        <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "8px", fontWeight: 600 }}>
+          内容评分
+        </div>
+        <div style={{ display: "flex", gap: "10px" }}>
+          {RATING_ACTIONS.map(({ key, label, emoji, shortcut, gradient, shadow, color }) => {
+            const isActive = userRating === key;
+            return (
+              <button
+                key={key}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRating?.(key as "like" | "neutral" | "dislike");
+                }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  padding: "10px 16px",
+                  borderRadius: "var(--radius-full)",
+                  background: isActive ? gradient : "var(--bg-card)",
+                  border: isActive ? "1px solid transparent" : "1px solid var(--border-light)",
+                  color: isActive ? "white" : color,
+                  fontSize: "0.8125rem",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
+                  flex: 1,
+                  justifyContent: "center",
+                  boxShadow: isActive ? `0 4px 16px ${shadow}` : "none",
+                  transform: isActive ? "scale(1.02)" : "scale(1)",
+                }}
+                onMouseEnter={(e) => {
+                  if (!isActive) {
+                    e.currentTarget.style.background = gradient;
+                    e.currentTarget.style.color = "white";
+                    e.currentTarget.style.borderColor = "transparent";
+                    e.currentTarget.style.boxShadow = `0 4px 16px ${shadow}`;
+                    e.currentTarget.style.transform = "translateY(-2px)";
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!isActive) {
+                    e.currentTarget.style.background = "var(--bg-card)";
+                    e.currentTarget.style.color = color;
+                    e.currentTarget.style.borderColor = "var(--border-light)";
+                    e.currentTarget.style.boxShadow = "none";
+                    e.currentTarget.style.transform = "translateY(0)";
+                  }
+                }}
+              >
+                <span style={{ fontSize: "1rem" }}>{emoji}</span>
+                <span>{label}</span>
+                <span
+                  style={{
+                    fontSize: "0.6875rem",
+                    opacity: 0.7,
+                    marginLeft: "2px",
+                  }}
+                >
+                  {shortcut}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Extended Actions */}
       <div style={{ display: "flex", gap: "10px" }}>
-        {ACTIONS.map(({ key, label, shortcut, Icon, gradient, shadow }) => (
+        {EXT_ACTIONS.map(({ key, label, shortcut, Icon, gradient, shadow }) => (
           <button
             key={key}
             onClick={(e) => {
@@ -266,12 +378,12 @@ export default function CardView({ card, focused, onClick, onFeedback }: Props) 
               display: "flex",
               alignItems: "center",
               gap: "6px",
-              padding: "10px 16px",
+              padding: "8px 14px",
               borderRadius: "var(--radius-full)",
               background: "var(--bg-card)",
               border: "1px solid var(--border-light)",
-              color: "var(--text-secondary)",
-              fontSize: "0.8125rem",
+              color: "var(--text-muted)",
+              fontSize: "0.75rem",
               fontWeight: 600,
               cursor: "pointer",
               transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
@@ -287,7 +399,7 @@ export default function CardView({ card, focused, onClick, onFeedback }: Props) 
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.background = "var(--bg-card)";
-              e.currentTarget.style.color = "var(--text-secondary)";
+              e.currentTarget.style.color = "var(--text-muted)";
               e.currentTarget.style.borderColor = "var(--border-light)";
               e.currentTarget.style.boxShadow = "none";
               e.currentTarget.style.transform = "translateY(0)";
@@ -295,13 +407,7 @@ export default function CardView({ card, focused, onClick, onFeedback }: Props) 
           >
             <Icon style={{ width: "14px", height: "14px" }} aria-hidden />
             <span>{label}</span>
-            <span
-              style={{
-                fontSize: "0.6875rem",
-                opacity: 0.7,
-                marginLeft: "2px",
-              }}
-            >
+            <span style={{ fontSize: "0.625rem", opacity: 0.7, marginLeft: "2px" }}>
               {shortcut}
             </span>
           </button>

@@ -20,6 +20,10 @@ _WEIGHT_RULES = {
     "save":      lambda tags: {t: 1.05 for t in tags},
     "skip":      lambda tags: {tags[0]: 0.85} if tags else {},
     "deep_dive": lambda tags: {t: 1.1 for t in tags},
+    # 三级打分系统
+    "like":      lambda tags: {t: 1.15 for t in tags},      # 👍 喜欢 - 大幅提升权重
+    "neutral":   lambda tags: {t: 1.0 for t in tags},       # 😐 中立 - 保持权重
+    "dislike":   lambda tags: {t: 0.6 for t in tags},       # 👎 不喜欢 - 大幅降低权重
 }
 
 

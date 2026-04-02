@@ -174,6 +174,8 @@ export default function Feed() {
   const [isConnected, setIsConnected] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [ratingFilter, setRatingFilter] = useState<"all" | "like" | "neutral" | "dislike" | "unrated">("all");
+  const [cardRatings, setCardRatings] = useState<Record<string, "like" | "neutral" | "dislike">>({});
   const wsRef = useRef<WebSocket | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -236,15 +238,16 @@ export default function Feed() {
       switch (e.key) {
         case "j": e.preventDefault(); setFocusIdx((i) => Math.min(i + 1, visible.length - 1)); break;
         case "k": e.preventDefault(); setFocusIdx((i) => Math.max(i - 1, 0)); break;
+        case "l": if (card) { e.preventDefault(); handleRating(card.id, "like"); } break;
+        case "n": if (card) { e.preventDefault(); handleRating(card.id, "neutral"); } break;
+        case "d": if (card) { e.preventDefault(); handleRating(card.id, "dislike"); } break;
         case "s": if (card) { e.preventDefault(); handleFeedback(card.id, "save"); } break;
         case "x": if (card) { e.preventDefault(); handleFeedback(card.id, "skip"); } break;
-        case "f": if (card) { e.preventDefault(); handleFeedback(card.id, "star"); } break;
-        case "d": if (card) { e.preventDefault(); handleFeedback(card.id, "deep_dive"); } break;
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [focusIdx, feedCards, activeModuleFilter, selectedCategory]);
+  }, [focusIdx, feedCards, activeModuleFilter, selectedCategory, ratingFilter, cardRatings]);
 
   // Auto-scroll
   useEffect(() => {
@@ -264,6 +267,14 @@ export default function Feed() {
     if (selectedCategory) {
       cards = cards.filter((c) => c.category === selectedCategory);
     }
+    // Rating filter
+    if (ratingFilter !== "all") {
+      if (ratingFilter === "unrated") {
+        cards = cards.filter((c) => !cardRatings[c.id]);
+      } else {
+        cards = cards.filter((c) => cardRatings[c.id] === ratingFilter);
+      }
+    }
     return cards;
   }
 
@@ -272,6 +283,13 @@ export default function Feed() {
     if (action === "skip") {
       setFeedCards(feedCards.filter((c) => c.id !== cardId));
     }
+  }
+
+  async function handleRating(cardId: string, rating: "like" | "neutral" | "dislike") {
+    // Update local state
+    setCardRatings(prev => ({ ...prev, [cardId]: rating }));
+    // Send to backend
+    await api.post(`/api/cards/${cardId}/feedback`, { action: rating }).catch(() => {});
   }
 
   const visible = filteredCards();
@@ -361,7 +379,56 @@ export default function Feed() {
             counts={categoryCounts}
           />
 
-          {/* Connection status */}
+          {/* Rating Filter */}
+          <div style={{ marginTop: "24px", padding: "16px", borderRadius: "var(--radius-lg)", background: "var(--bg-card)", border: "1px solid var(--border-light)" }}>
+            <p style={{ fontSize: "0.8125rem", fontWeight: 700, color: "var(--text-secondary)", marginBottom: "12px" }}>
+              评分筛选
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {[
+                { key: "all", label: "全部", count: feedCards.length, emoji: "📋" },
+                { key: "like", label: "喜欢", count: Object.values(cardRatings).filter(r => r === "like").length, emoji: "👍" },
+                { key: "neutral", label: "中立", count: Object.values(cardRatings).filter(r => r === "neutral").length, emoji: "😐" },
+                { key: "dislike", label: "不喜欢", count: Object.values(cardRatings).filter(r => r === "dislike").length, emoji: "👎" },
+                { key: "unrated", label: "未评分", count: feedCards.filter(c => !cardRatings[c.id]).length, emoji: "❓" },
+              ].map(({ key, label, count, emoji }) => {
+                const isActive = ratingFilter === key;
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setRatingFilter(key as any)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                      padding: "10px 12px",
+                      borderRadius: "var(--radius-md)",
+                      background: isActive ? "rgba(188, 164, 227, 0.15)" : "transparent",
+                      border: isActive ? "1px solid rgba(188, 164, 227, 0.3)" : "1px solid transparent",
+                      color: isActive ? "var(--color-primary)" : "var(--text-secondary)",
+                      fontSize: "0.875rem",
+                      fontWeight: isActive ? 600 : 500,
+                      cursor: "pointer",
+                      transition: "all 0.2s ease",
+                    }}
+                  >
+                    <span>{emoji}</span>
+                    <span style={{ flex: 1, textAlign: "left" }}>{label}</span>
+                    <span style={{
+                      fontSize: "0.75rem",
+                      fontWeight: 600,
+                      padding: "2px 8px",
+                      borderRadius: "var(--radius-full)",
+                      background: isActive ? "rgba(188, 164, 227, 0.2)" : "var(--bg-hover)",
+                      color: isActive ? "var(--color-primary)" : "var(--text-muted)",
+                    }}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           <div
             style={{
               marginTop: "24px",
@@ -392,7 +459,7 @@ export default function Feed() {
             <div style={{ marginTop: "24px", padding: "16px", borderRadius: "var(--radius-lg)", background: "var(--bg-card)", border: "1px solid var(--border-light)" }}>
               <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "10px", fontWeight: 600 }}>快捷键</p>
               <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                {["J ↓ 下一条", "K ↑ 上一条", "S 保存", "X 跳过", "F 精华", "D 深度"].map((hint) => (
+                {["J ↓ 下一条", "K ↑ 上一条", "L 👍 喜欢", "N 😐 中立", "D 👎 不喜欢", "S 💾 保存", "X ⏭ 跳过"].map((hint) => (
                   <span key={hint} style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", fontFamily: "monospace" }}>
                     {hint}
                   </span>
@@ -452,6 +519,8 @@ export default function Feed() {
                   focused={i === focusIdx}
                   onClick={() => setFocusIdx(i)}
                   onFeedback={(action) => handleFeedback(card.id, action)}
+                  onRating={(rating) => handleRating(card.id, rating)}
+                  userRating={cardRatings[card.id]}
                 />
               ))
             )}
