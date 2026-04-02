@@ -204,6 +204,14 @@ async def feedback(card_id: str, body: FeedbackReq):
     game_action = action_map.get(body.action.value, "card_skip")
     rewards = apply_action("default", game_action, {"card_id": card_id, "module": card.module_id})
 
+    # Broadcast reward notification (Phase 4)
+    if rewards.get("rewards"):
+        await broadcaster.send_reward(
+            action=game_action,
+            rewards=rewards["rewards"],
+            metadata={"card_id": card_id, "card_title": card.title}
+        )
+
     # Record in card store
     _card_store.record_feedback(card_id, body.action.value)
 

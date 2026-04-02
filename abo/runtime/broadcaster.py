@@ -21,6 +21,15 @@ class Broadcaster:
     async def send_event(self, event: dict):
         await self._broadcast(json.dumps(event))
 
+    async def send_reward(self, action: str, rewards: dict, metadata: dict = None):
+        """Broadcast reward notification to all clients."""
+        await self._broadcast(json.dumps({
+            "type": "reward_earned",
+            "action": action,
+            "rewards": rewards,
+            "metadata": metadata or {},
+        }))
+
     async def _broadcast(self, payload: str):
         if not self._clients:
             print(f"[broadcaster] No clients connected, skipping broadcast")
