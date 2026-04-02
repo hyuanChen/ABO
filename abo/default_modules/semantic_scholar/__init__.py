@@ -17,6 +17,9 @@ class SemanticScholarTracker(Module):
     # Semantic Scholar API base URL
     API_BASE = "https://api.semanticscholar.org/graph/v1"
 
+    # Default queries for scheduled execution (user's research interests)
+    DEFAULT_QUERIES = ["VGGT", "Gaussian Splatting", "NeRF"]
+
     async def fetch_paper_details(self, arxiv_id: str) -> dict | None:
         """Fetch paper details from Semantic Scholar using arXiv ID."""
         # Remove arxiv: prefix if present
@@ -192,10 +195,38 @@ class SemanticScholarTracker(Module):
         fetch_citations: bool = True,
         fetch_references: bool = False,
         limit: int = 20,
+        queries: list[str] = None,
+        days_back: int = 1,
     ) -> list[Item]:
-        """Fetch follow-up papers for a given arXiv ID or paper title."""
+        """Fetch follow-up papers for a given arXiv ID or paper title.
+
+        For scheduled execution, uses DEFAULT_QUERIES to track research interests.
+        """
+        # Use provided queries or default queries for scheduled execution
+        queries_to_use = queries if queries is not None else self.DEFAULT_QUERIES
+
+        if queries_to_use:
+            all_items = []
+            for query in queries_to_use:
+                items = await self._fetch_single(
+                    query, fetch_citations, fetch_references, limit
+                )
+                all_items.extend(items)
+            return all_items
+
         if not arxiv_id:
             return []
+
+        return await self._fetch_single(arxiv_id, fetch_citations, fetch_references, limit)
+
+    async def _fetch_single(
+        self,
+        arxiv_id: str,
+        fetch_citations: bool = True,
+        fetch_references: bool = False,
+        limit: int = 20,
+    ) -> list[Item]:
+        """Fetch follow-up papers for a single arXiv ID or title."""
 
         # Check if input looks like an arXiv ID (digits and dots, optionally with version)
         import re
