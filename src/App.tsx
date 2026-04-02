@@ -2,17 +2,25 @@ import { useEffect } from "react";
 import NavSidebar from "./modules/nav/NavSidebar";
 import MainContent from "./modules/MainContent";
 import ToastContainer from "./components/Toast";
-import { useStore } from "./core/store";
+import { useStore, FeedModule } from "./core/store";
 import { api } from "./core/api";
 
 export default function App() {
   const setConfig = useStore((s) => s.setConfig);
+  const setFeedModules = useStore((s) => s.setFeedModules);
 
   useEffect(() => {
     api.get<{ vault_path: string; literature_path?: string; version: string }>("/api/config")
       .then(setConfig)
       .catch(() => {});
   }, [setConfig]);
+
+  // Load modules on app start so FeedSidebar shows all modules
+  useEffect(() => {
+    api.get<{ modules: FeedModule[] }>("/api/modules")
+      .then((r) => setFeedModules(r.modules))
+      .catch(() => {});
+  }, [setFeedModules]);
 
   return (
     <div
