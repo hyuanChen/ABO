@@ -192,6 +192,18 @@ async def feedback(card_id: str, body: FeedbackReq):
     # Update keyword preferences (Phase 2)
     _prefs.update_from_feedback(card.tags, body.action.value, card.module_id)
 
+    # Apply game rewards (Phase 3)
+    from .game import apply_action
+    action_map = {
+        "like": "card_like",
+        "dislike": "card_dislike",
+        "save": "card_save",
+        "skip": "card_skip",
+        "star": "star_paper",
+    }
+    game_action = action_map.get(body.action.value, "card_skip")
+    rewards = apply_action("default", game_action, {"card_id": card_id, "module": card.module_id})
+
     # Record in card store
     _card_store.record_feedback(card_id, body.action.value)
 
@@ -203,7 +215,8 @@ async def feedback(card_id: str, body: FeedbackReq):
     module = _registry.get(card.module_id)
     if module:
         await module.on_feedback(card_id, body.action)
-    return {"ok": True}
+
+    return {"ok": True, "rewards": rewards.get("rewards", {})}
 
 
 # ── Modules ──────────────────────────────────────────────────────
@@ -1486,6 +1499,25 @@ async def get_keyword_preferences():
 async def get_top_keywords(limit: int = 20):
     """Get top liked keywords."""
     return {"keywords": _prefs.get_top_keywords(limit)}
+
+
+# ── Gamification (Phase 3) ───────────────────────────────────────
+
+@app.get("/api/game/stats")
+async def get_game_stats():
+    """Get daily gaming stats (happiness, SAN, energy, achievements)."""
+    from .game import get_daily_stats
+    return get_daily_stats()
+
+
+@app.post("/api/game/action")
+async def post_game_action(data: dict):
+    """Record a game action and get rewards."""
+    from .game import apply_action
+    action = data.get("action", "")
+    metadata = data.get("metadata", {})
+    result = apply_action("default", action, metadata)
+    return result
 
 
 # ── Vault Browser ────────────────────────────────────────────────
