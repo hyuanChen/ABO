@@ -6,6 +6,14 @@ import CardView from "./CardView";
 
 const WS_URL = "ws://127.0.0.1:8765/ws/feed";
 
+// Load modules from API
+async function loadModules(setFeedModules: (modules: any[]) => void) {
+  try {
+    const r = await api.get<{ modules: any[] }>("/api/modules");
+    setFeedModules(r.modules);
+  } catch {}
+}
+
 // Mock data generator for UI testing
 function generateMockCards(): FeedCard[] {
   const now = Date.now();
@@ -189,6 +197,9 @@ export default function Feed() {
 
   // Initial load
   useEffect(() => {
+    // Load modules first so FeedSidebar can display them
+    loadModules(useStore.getState().setFeedModules);
+
     const params = activeModuleFilter
       ? `?module_id=${activeModuleFilter}&unread_only=true`
       : "?unread_only=true";

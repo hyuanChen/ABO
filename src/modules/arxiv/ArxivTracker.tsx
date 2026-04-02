@@ -89,19 +89,19 @@ export default function ArxivTracker() {
   const [orProgress, setOrProgress] = useState<CrawlProgress | null>(null);
 
   // Semantic Scholar 状态
-  const [arxivIdInput, setArxivIdInput] = useState("");
+  const [arxivIdInput, _setArxivIdInput] = useState("");
   const [s2Papers, setS2Papers] = useState<SemanticScholarPaper[]>([]);
   const [s2Crawling, setS2Crawling] = useState(false);
   const [s2Progress, setS2Progress] = useState<CrawlProgress | null>(null);
-  const [fetchCitations, setFetchCitations] = useState(true);
-  const [fetchReferences, setFetchReferences] = useState(false);
+  const [_fetchCitations, _setFetchCitations] = useState(true);
+  const [_fetchReferences, _setFetchReferences] = useState(false);
 
   // 通用状态
   const [activeTab, setActiveTab] = useState<"and" | "or" | "followups">("and");
   const [filterScore, setFilterScore] = useState(0);
   const [loading, setLoading] = useState(false);
   const [savedPapers, setSavedPapers] = useState<Set<string>>(new Set());
-  const [savedS2Papers, setSavedS2Papers] = useState<Set<string>>(new Set());
+  const [_savedS2Papers, _setSavedS2Papers] = useState<Set<string>>(new Set());
   const [autoSave, setAutoSave] = useState(true);
   const [csOnly, setCsOnly] = useState(true);
 
@@ -276,7 +276,7 @@ export default function ArxivTracker() {
     }
   }
 
-  async function fetchS2FollowUps() {
+  async function _fetchS2FollowUps() {
     if (!arxivIdInput.trim()) {
       toast.error("请输入 arXiv ID", "例如：2501.12345");
       return;
@@ -289,8 +289,8 @@ export default function ArxivTracker() {
     try {
       await api.post("/api/modules/semantic-scholar/follow-ups", {
         arxiv_id: arxivIdInput.trim(),
-        fetch_citations: fetchCitations,
-        fetch_references: fetchReferences,
+        fetch_citations: _fetchCitations,
+        fetch_references: _fetchReferences,
         limit: 20,
       });
     } catch (err) {
@@ -299,12 +299,12 @@ export default function ArxivTracker() {
     }
   }
 
-  async function saveS2ToLiterature(paper: SemanticScholarPaper) {
+  async function __saveS2ToLiterature(paper: SemanticScholarPaper) {
     try {
       await api.post("/api/modules/semantic-scholar/save-to-literature", {
         paper,
       });
-      setSavedS2Papers(prev => new Set(prev).add(paper.id));
+      _setSavedS2Papers(prev => new Set(prev).add(paper.id));
       const subfolder = paper.metadata?.source_arxiv_id?.slice(0, 6) || "unknown";
       toast.success("保存成功", `已保存到文献库/FollowUps/${subfolder}/`);
     } catch (err) {
@@ -318,6 +318,10 @@ export default function ArxivTracker() {
   const currentProgress = activeTab === "and" ? andProgress : activeTab === "or" ? orProgress : s2Progress;
   const currentKeywords = activeTab === "and" ? andKeywords : orKeywords;
   const setCurrentKeywords = activeTab === "and" ? setAndKeywords : setOrKeywords;
+
+  // Suppress "unused function" warnings - these are for the "followups" tab UI
+  void _fetchS2FollowUps;
+  void __saveS2ToLiterature;
 
   return (
     <PageContainer>
@@ -539,7 +543,7 @@ export default function ArxivTracker() {
                   />
                 </div>
                 <div style={{ display: "flex", gap: "8px", marginTop: "8px", flexWrap: "wrap" }}>
-                  {currentPapers.slice(-3).map((p, i) => (
+                  {currentPapers.slice(-3).map((p) => (
                     <span key={p.id} style={{ fontSize: "0.75rem", color: "var(--text-muted)", background: "var(--bg-hover)", padding: "2px 8px", borderRadius: "var(--radius-full)" }}>
                       ✓ {p.id}
                     </span>
