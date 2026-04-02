@@ -1048,6 +1048,56 @@ async def fetch_paper_figures(
     return figures[:max_figures]
 
 
+async def download_arxiv_pdf(
+    arxiv_id: str,
+    target_path: Path,
+    timeout: int = 60
+) -> str | None:
+    """Download PDF from arXiv with multiple source fallback and retries."""
+    import asyncio
+
+    # Clean arxiv_id (remove arxiv: prefix if present)
+    clean_id = arxiv_id.replace("arxiv:", "").strip()
+
+    sources = [
+        f"https://arxiv.org/pdf/{clean_id}.pdf",
+        f"https://ar5iv.org/pdf/{clean_id}.pdf",
+        f"https://r.jina.ai/http://arxiv.org/pdf/{clean_id}.pdf",
+    ]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/pdf",
+    }
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        for attempt, url in enumerate(sources):
+            try:
+                print(f"[pdf] Trying source {attempt + 1}/{len(sources)}: {url.split('/')[2]}")
+                resp = await client.get(url, headers=headers)
+
+                if resp.status_code == 200:
+                    content = resp.content
+                    # Validate PDF magic number
+                    if len(content) > 10000 and content[:4] == b'%PDF':
+                        target_path.write_bytes(content)
+                        print(f"[pdf] Successfully downloaded PDF ({len(content)} bytes)")
+                        return str(target_path)
+                    else:
+                        print(f"[pdf] Invalid PDF from {url} (size: {len(content)}, magic: {content[:4]})")
+                else:
+                    print(f"[pdf] HTTP {resp.status_code} from {url}")
+
+                await asyncio.sleep(0.5 * (attempt + 1))  # Increasing delay
+
+            except Exception as e:
+                print(f"[pdf] Failed to download from {url}: {e}")
+                continue
+
+    print(f"[pdf] All sources failed for {arxiv_id}")
+    return None
+
+
 @app.post("/api/modules/semantic-scholar/save-to-literature")
 async def save_s2_to_literature(data: dict):
     """Save a Semantic Scholar paper to the literature library with figures and PDF."""
@@ -1112,16 +1162,13 @@ async def save_s2_to_literature(data: dict):
     # Try to download PDF if arxiv_id exists
     pdf_path = None
     if arxiv_id and save_pdf:
+        pdf_filename = f"{paper_id}.pdf"
+        pdf_full_path = paper_folder / pdf_filename
         try:
-            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-            async with httpx.AsyncClient(timeout=60) as client:
-                pdf_resp = await client.get(pdf_url, headers={"User-Agent": "ABO/1.0"})
-                if pdf_resp.status_code == 200:
-                    pdf_filename = f"{paper_id}.pdf"
-                    pdf_full_path = paper_folder / pdf_filename
-                    pdf_full_path.write_bytes(pdf_resp.content)
-                    pdf_path = pdf_filename
-                    print(f"[s2-save] Downloaded PDF: {pdf_filename}")
+            result = await download_arxiv_pdf(arxiv_id, pdf_full_path)
+            if result:
+                pdf_path = pdf_filename
+                print(f"[s2-save] Saved PDF: {pdf_filename}")
         except Exception as e:
             print(f"[s2-save] Failed to download PDF: {e}")
 
