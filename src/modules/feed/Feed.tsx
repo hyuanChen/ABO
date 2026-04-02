@@ -105,67 +105,97 @@ function generateMockCards(): FeedCard[] {
   ];
 }
 
-// Category Tabs Component - Settings-style navigation
-function CategoryTabs({
-  selectedCategory,
+// Module Filter Component - 模块筛选
+function ModuleFilter({
+  modules,
+  activeFilter,
   onSelect,
-  counts,
+  unreadCounts,
 }: {
-  selectedCategory: string | null;
-  onSelect: (cat: string | null) => void;
-  counts: Record<string, number>;
+  modules: { id: string; name: string; enabled: boolean }[];
+  activeFilter: string | null;
+  onSelect: (id: string | null) => void;
+  unreadCounts: Record<string, number>;
 }) {
-  const tabs = [
-    { id: "paper", label: "论文", icon: Star, count: counts["paper"] || 0, color: "#9D7BDB" },
-    { id: "news", label: "资讯", icon: Zap, count: counts["news"] || 0, color: "#FFB7B2" },
-    { id: "idea", label: "灵感", icon: Sparkles, count: counts["idea"] || 0, color: "#A8D8FF" },
-    { id: "todo", label: "待办", icon: Clock, count: counts["todo"] || 0, color: "#A8E6CF" },
-  ];
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-      {tabs.map(({ id, label, icon: Icon, count, color }) => {
-        // Hide tabs with 0 count (including "全部" when total is 0)
-        if (count === 0) return null;
-        const isActive = selectedCategory === id;
+    <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+      {/* 全部模块按钮 */}
+      <button
+        onClick={() => onSelect(null)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "12px",
+          width: "100%",
+          padding: "12px 16px",
+          borderRadius: "var(--radius-lg)",
+          background: activeFilter === null ? "var(--bg-card)" : "transparent",
+          border: activeFilter === null ? "1px solid var(--border-light)" : "1px solid transparent",
+          color: activeFilter === null ? "var(--color-primary)" : "var(--text-secondary)",
+          fontSize: "0.9375rem",
+          fontWeight: activeFilter === null ? 700 : 600,
+          cursor: "pointer",
+          transition: "all 0.2s ease",
+          boxShadow: activeFilter === null ? "var(--shadow-soft)" : "none",
+        }}
+      >
+        <Layers style={{ width: "18px", height: "18px" }} />
+        <span style={{ flex: 1, textAlign: "left" }}>全部情报</span>
+      </button>
+
+      <div style={{ height: "1px", background: "var(--border-light)", margin: "8px 0" }} />
+
+      {/* 各模块按钮 */}
+      {modules.map((mod) => {
+        const count = unreadCounts[mod.id] ?? 0;
+        const isActive = activeFilter === mod.id;
         return (
           <button
-            key={id ?? "all"}
-            onClick={() => onSelect(id)}
+            key={mod.id}
+            onClick={() => onSelect(isActive ? null : mod.id)}
             style={{
               display: "flex",
               alignItems: "center",
-              gap: "12px",
+              gap: "10px",
               width: "100%",
-              padding: "14px 18px",
-              borderRadius: "var(--radius-lg)",
-              background: isActive ? "var(--bg-card)" : "transparent",
-              border: isActive ? "1px solid var(--border-light)" : "1px solid transparent",
-              color: isActive ? (color ?? "var(--color-primary)") : "var(--text-secondary)",
-              fontSize: "0.9375rem",
-              fontWeight: 600,
+              padding: "10px 14px",
+              borderRadius: "var(--radius-md)",
+              background: isActive ? "rgba(188, 164, 227, 0.15)" : "transparent",
+              border: isActive ? "1px solid rgba(188, 164, 227, 0.3)" : "1px solid transparent",
+              color: isActive ? "var(--color-primary)" : "var(--text-secondary)",
+              fontSize: "0.875rem",
+              fontWeight: isActive ? 600 : 500,
               cursor: "pointer",
-              transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
-              boxShadow: isActive ? "var(--shadow-soft)" : "none",
-              transform: isActive ? "scale(1.02)" : "scale(1)",
+              transition: "all 0.2s ease",
             }}
           >
-            <Icon style={{ width: "20px", height: "20px", color: isActive ? color : undefined }} />
-            <span style={{ flex: 1, textAlign: "left" }}>{label}</span>
-            <span
+            <div
               style={{
-                fontSize: "0.8125rem",
-                fontWeight: 700,
-                padding: "4px 10px",
-                borderRadius: "var(--radius-full)",
-                background: isActive ? (color ? `${color}20` : "var(--bg-hover)") : "var(--bg-hover)",
-                color: isActive ? (color ?? "var(--color-primary)") : "var(--text-muted)",
-                minWidth: "28px",
-                textAlign: "center",
+                width: "6px",
+                height: "6px",
+                borderRadius: "50%",
+                background: mod.enabled ? "#A8E6CF" : "var(--text-muted)",
+                flexShrink: 0,
               }}
-            >
-              {count}
+            />
+            <span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {mod.name}
             </span>
+            {count > 0 && (
+              <span
+                style={{
+                  fontSize: "0.75rem",
+                  fontWeight: 600,
+                  padding: "2px 8px",
+                  borderRadius: "var(--radius-full)",
+                  background: isActive ? "rgba(188, 164, 227, 0.25)" : "var(--bg-hover)",
+                  color: isActive ? "var(--color-primary)" : "var(--text-muted)",
+                  flexShrink: 0,
+                }}
+              >
+                {count}
+              </span>
+            )}
           </button>
         );
       })}
@@ -176,13 +206,13 @@ function CategoryTabs({
 export default function Feed() {
   const {
     feedCards, setFeedCards, prependCard,
-    activeModuleFilter, setUnreadCounts,
+    activeModuleFilter, setActiveModuleFilter,
+    setUnreadCounts, feedModules, unreadCounts,
   } = useStore();
   const [focusIdx, setFocusIdx] = useState(0);
   const [isConnected, setIsConnected] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
-  const [ratingFilter, setRatingFilter] = useState<"all" | "like" | "neutral" | "dislike" | "unrated">("all");
   const [cardRatings, setCardRatings] = useState<Record<string, "like" | "neutral" | "dislike">>({});
   const wsRef = useRef<WebSocket | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -258,7 +288,7 @@ export default function Feed() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [focusIdx, feedCards, activeModuleFilter, selectedCategory, ratingFilter, cardRatings]);
+  }, [focusIdx, feedCards, activeModuleFilter, selectedCategory, cardRatings]);
 
   // Auto-scroll
   useEffect(() => {
@@ -277,14 +307,6 @@ export default function Feed() {
     }
     if (selectedCategory) {
       cards = cards.filter((c) => c.category === selectedCategory);
-    }
-    // Rating filter
-    if (ratingFilter !== "all") {
-      if (ratingFilter === "unrated") {
-        cards = cards.filter((c) => !cardRatings[c.id]);
-      } else {
-        cards = cards.filter((c) => cardRatings[c.id] === ratingFilter);
-      }
     }
     return cards;
   }
@@ -382,56 +404,63 @@ export default function Feed() {
   return (
     <div ref={containerRef} style={{ height: "100%", overflowY: "auto", background: "var(--bg-app)" }}>
       <div style={{ maxWidth: "min(1100px, 95vw)", margin: "0 auto", padding: "clamp(20px, 3vw, 32px) clamp(16px, 3vw, 32px)", display: "flex", gap: "clamp(24px, 3vw, 40px)" }}>
-        {/* Left Sidebar - Category Filter */}
+        {/* Left Sidebar - Module Filter */}
         <div style={{ width: "180px", flexShrink: 0, position: "sticky", top: "20px", height: "fit-content" }}>
-          <CategoryTabs
-            selectedCategory={selectedCategory}
-            onSelect={setSelectedCategory}
-            counts={categoryCounts}
+          <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "12px", paddingLeft: "8px" }}>
+            情报模块
+          </div>
+          <ModuleFilter
+            modules={feedModules}
+            activeFilter={activeModuleFilter}
+            onSelect={setActiveModuleFilter}
+            unreadCounts={unreadCounts}
           />
 
-          {/* Rating Filter */}
-          <div style={{ marginTop: "24px", padding: "16px", borderRadius: "var(--radius-lg)", background: "var(--bg-card)", border: "1px solid var(--border-light)" }}>
-            <p style={{ fontSize: "0.8125rem", fontWeight: 700, color: "var(--text-secondary)", marginBottom: "12px" }}>
-              评分筛选
-            </p>
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          {/* Category Filter */}
+          <div style={{ marginTop: "24px" }}>
+            <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "12px", paddingLeft: "8px" }}>
+              分类筛选
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
               {[
-                { key: "all", label: "全部", count: feedCards.length, emoji: "📋" },
-                { key: "like", label: "喜欢", count: Object.values(cardRatings).filter(r => r === "like").length, emoji: "👍" },
-                { key: "neutral", label: "中立", count: Object.values(cardRatings).filter(r => r === "neutral").length, emoji: "😐" },
-                { key: "dislike", label: "不喜欢", count: Object.values(cardRatings).filter(r => r === "dislike").length, emoji: "👎" },
-                { key: "unrated", label: "未评分", count: feedCards.filter(c => !cardRatings[c.id]).length, emoji: "❓" },
-              ].map(({ key, label, count, emoji }) => {
-                const isActive = ratingFilter === key;
+                { key: "paper", label: "论文", icon: Star, color: "#9D7BDB" },
+                { key: "news", label: "资讯", icon: Zap, color: "#FFB7B2" },
+                { key: "idea", label: "灵感", icon: Sparkles, color: "#A8D8FF" },
+                { key: "todo", label: "待办", icon: Clock, color: "#A8E6CF" },
+              ].map(({ key, label, icon: Icon, color }) => {
+                const count = categoryCounts[key] || 0;
+                if (count === 0) return null;
+                const isActive = selectedCategory === key;
                 return (
                   <button
                     key={key}
-                    onClick={() => setRatingFilter(key as any)}
+                    onClick={() => setSelectedCategory(isActive ? null : key)}
                     style={{
                       display: "flex",
                       alignItems: "center",
-                      gap: "8px",
-                      padding: "10px 12px",
+                      gap: "10px",
+                      width: "100%",
+                      padding: "10px 14px",
                       borderRadius: "var(--radius-md)",
-                      background: isActive ? "rgba(188, 164, 227, 0.15)" : "transparent",
-                      border: isActive ? "1px solid rgba(188, 164, 227, 0.3)" : "1px solid transparent",
-                      color: isActive ? "var(--color-primary)" : "var(--text-secondary)",
+                      background: isActive ? "var(--bg-card)" : "transparent",
+                      border: isActive ? "1px solid var(--border-light)" : "1px solid transparent",
+                      color: isActive ? color : "var(--text-secondary)",
                       fontSize: "0.875rem",
                       fontWeight: isActive ? 600 : 500,
                       cursor: "pointer",
                       transition: "all 0.2s ease",
+                      boxShadow: isActive ? "var(--shadow-soft)" : "none",
                     }}
                   >
-                    <span>{emoji}</span>
+                    <Icon style={{ width: "16px", height: "16px" }} />
                     <span style={{ flex: 1, textAlign: "left" }}>{label}</span>
                     <span style={{
                       fontSize: "0.75rem",
                       fontWeight: 600,
                       padding: "2px 8px",
                       borderRadius: "var(--radius-full)",
-                      background: isActive ? "rgba(188, 164, 227, 0.2)" : "var(--bg-hover)",
-                      color: isActive ? "var(--color-primary)" : "var(--text-muted)",
+                      background: isActive ? `${color}20` : "var(--bg-hover)",
+                      color: isActive ? color : "var(--text-muted)",
                     }}>
                       {count}
                     </span>

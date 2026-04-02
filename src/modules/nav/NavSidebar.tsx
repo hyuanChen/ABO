@@ -451,72 +451,122 @@ export default function NavSidebar() {
           {feedModules.map((mod) => (
             <ModuleItem key={mod.id} mod={mod} />
           ))}
-          {/* Module-specific pages */}
-          <button
-            onClick={() => {
-              setActiveTab("arxiv");
-              if (isMobile) setIsOpen(false);
-            }}
-            style={{
-              width: "100%",
-              padding: "10px 14px 10px 52px",
-              borderRadius: "var(--radius-full)",
-              background: activeTab === "arxiv" ? "var(--bg-hover)" : "transparent",
-              color: activeTab === "arxiv" ? "var(--color-primary)" : "var(--text-secondary)",
-              transition: "all 0.2s ease",
-              display: "flex",
-              alignItems: "center",
-              gap: "10px",
-              border: "1px solid transparent",
-              fontSize: "0.8125rem",
-              cursor: "pointer",
-              fontWeight: activeTab === "arxiv" ? 600 : 500,
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "var(--bg-hover)";
-              e.currentTarget.style.color = "var(--text-main)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = activeTab === "arxiv" ? "var(--bg-hover)" : "transparent";
-              e.currentTarget.style.color = activeTab === "arxiv" ? "var(--color-primary)" : "var(--text-secondary)";
-            }}
-          >
-            <Rss className="w-4 h-4" style={{ flexShrink: 0 }} />
-            <span style={{ flex: 1, textAlign: "left" }}>arXiv追踪</span>
-          </button>
-          <button
-            onClick={() => {
-              setActiveTab("health");
-              if (isMobile) setIsOpen(false);
-            }}
-            style={{
-              width: "100%",
-              padding: "10px 14px 10px 52px",
-              borderRadius: "var(--radius-full)",
-              background: activeTab === "health" ? "var(--bg-hover)" : "transparent",
-              color: activeTab === "health" ? "var(--color-primary)" : "var(--text-secondary)",
-              transition: "all 0.2s ease",
-              display: "flex",
-              alignItems: "center",
-              gap: "10px",
-              border: "1px solid transparent",
-              fontSize: "0.8125rem",
-              cursor: "pointer",
-              fontWeight: activeTab === "health" ? 600 : 500,
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "var(--bg-hover)";
-              e.currentTarget.style.color = "var(--text-main)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = activeTab === "health" ? "var(--bg-hover)" : "transparent";
-              e.currentTarget.style.color = activeTab === "health" ? "var(--color-primary)" : "var(--text-secondary)";
-            }}
-          >
-            <Heart className="w-4 h-4" style={{ flexShrink: 0 }} />
-            <span style={{ flex: 1, textAlign: "left" }}>健康管理</span>
-          </button>
         </div>
+      </div>
+
+      {/* Divider */}
+      <div style={{ height: "1px", background: "var(--border-light)", margin: "16px 8px", flexShrink: 0 }} />
+
+      {/* Section Label */}
+      <div style={{ fontSize: "0.6875rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", padding: "0 16px 8px", flexShrink: 0 }}>
+        主动工具
+      </div>
+
+      {/* Active Tools - arXiv & Health */}
+      <div style={{ display: "flex", flexDirection: "column", gap: "8px", flexShrink: 0 }}>
+        <button
+          onClick={() => {
+            setActiveTab("arxiv");
+            if (isMobile) setIsOpen(false);
+          }}
+          style={{
+            width: "100%",
+            padding: "clamp(10px, 1.5vw, 12px) clamp(14px, 2vw, 16px)",
+            borderRadius: "var(--radius-full)",
+            background: activeTab === "arxiv"
+              ? "linear-gradient(135deg, rgba(188, 164, 227, 0.25), rgba(188, 164, 227, 0.15))"
+              : "linear-gradient(135deg, rgba(188, 164, 227, 0.15), rgba(188, 164, 227, 0.08))",
+            color: "var(--color-primary-dark)",
+            transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+            border: "1px solid rgba(188, 164, 227, 0.3)",
+            cursor: "pointer",
+          }}
+          onMouseEnter={(e) => {
+            if (activeTab !== "arxiv") {
+              e.currentTarget.style.background = "linear-gradient(135deg, rgba(188, 164, 227, 0.25), rgba(188, 164, 227, 0.15))";
+            }
+            e.currentTarget.style.transform = "scale(1.02)";
+          }}
+          onMouseLeave={(e) => {
+            if (activeTab !== "arxiv") {
+              e.currentTarget.style.background = "linear-gradient(135deg, rgba(188, 164, 227, 0.15), rgba(188, 164, 227, 0.08))";
+            }
+            e.currentTarget.style.transform = "scale(1)";
+          }}
+        >
+          <div
+            style={{
+              width: "clamp(32px, 4vw, 36px)",
+              height: "clamp(32px, 4vw, 36px)",
+              borderRadius: "50%",
+              background: "rgba(188, 164, 227, 0.25)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <Rss className="w-[18px] h-[18px] shrink-0" style={{ color: "var(--color-primary-dark)" }} aria-hidden />
+          </div>
+          <span style={{ fontWeight: 600, fontSize: "clamp(0.875rem, 1.2vw, 0.9375rem)", flex: 1, textAlign: "left" }}>
+            arXiv追踪
+          </span>
+        </button>
+
+        <button
+          onClick={() => {
+            setActiveTab("health");
+            if (isMobile) setIsOpen(false);
+          }}
+          style={{
+            width: "100%",
+            padding: "clamp(10px, 1.5vw, 12px) clamp(14px, 2vw, 16px)",
+            borderRadius: "var(--radius-full)",
+            background: activeTab === "health"
+              ? "linear-gradient(135deg, rgba(255, 183, 178, 0.3), rgba(255, 183, 178, 0.2))"
+              : "linear-gradient(135deg, rgba(255, 183, 178, 0.2), rgba(255, 183, 178, 0.1))",
+            color: "#D48984",
+            transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+            border: "1px solid rgba(255, 183, 178, 0.4)",
+            cursor: "pointer",
+          }}
+          onMouseEnter={(e) => {
+            if (activeTab !== "health") {
+              e.currentTarget.style.background = "linear-gradient(135deg, rgba(255, 183, 178, 0.3), rgba(255, 183, 178, 0.2))";
+            }
+            e.currentTarget.style.transform = "scale(1.02)";
+          }}
+          onMouseLeave={(e) => {
+            if (activeTab !== "health") {
+              e.currentTarget.style.background = "linear-gradient(135deg, rgba(255, 183, 178, 0.2), rgba(255, 183, 178, 0.1))";
+            }
+            e.currentTarget.style.transform = "scale(1)";
+          }}
+        >
+          <div
+            style={{
+              width: "clamp(32px, 4vw, 36px)",
+              height: "clamp(32px, 4vw, 36px)",
+              borderRadius: "50%",
+              background: "rgba(255, 183, 178, 0.3)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <Heart className="w-[18px] h-[18px] shrink-0" style={{ color: "#D48984" }} aria-hidden />
+          </div>
+          <span style={{ fontWeight: 600, fontSize: "clamp(0.875rem, 1.2vw, 0.9375rem)", flex: 1, textAlign: "left" }}>
+            健康管理
+          </span>
+        </button>
       </div>
 
       {/* Spacer to push bottom section down */}

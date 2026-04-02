@@ -248,6 +248,72 @@ export default function CardView({ card, focused, onClick, onFeedback, onRating,
         {card.title}
       </h3>
 
+      {/* Rating Section - 三级打分 (横排，移到摘要上方) */}
+      <div style={{ marginBottom: "12px" }}>
+        <div style={{ display: "flex", gap: "10px" }}>
+          {RATING_ACTIONS.map(({ key, label, emoji, shortcut, gradient, shadow, color }) => {
+            const isActive = userRating === key;
+            return (
+              <button
+                key={key}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRating?.(key as "like" | "neutral" | "dislike");
+                }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  padding: "8px 14px",
+                  borderRadius: "var(--radius-full)",
+                  background: isActive ? gradient : "var(--bg-hover)",
+                  border: isActive ? "1px solid transparent" : "1px solid var(--border-light)",
+                  color: isActive ? "white" : color,
+                  fontSize: "0.8125rem",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
+                  flex: 1,
+                  justifyContent: "center",
+                  boxShadow: isActive ? `0 4px 16px ${shadow}` : "none",
+                  transform: isActive ? "scale(1.02)" : "scale(1)",
+                }}
+                onMouseEnter={(e) => {
+                  if (!isActive) {
+                    e.currentTarget.style.background = gradient;
+                    e.currentTarget.style.color = "white";
+                    e.currentTarget.style.borderColor = "transparent";
+                    e.currentTarget.style.boxShadow = `0 4px 16px ${shadow}`;
+                    e.currentTarget.style.transform = "translateY(-2px)";
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!isActive) {
+                    e.currentTarget.style.background = "var(--bg-hover)";
+                    e.currentTarget.style.color = color;
+                    e.currentTarget.style.borderColor = "var(--border-light)";
+                    e.currentTarget.style.boxShadow = "none";
+                    e.currentTarget.style.transform = "translateY(0)";
+                  }
+                }}
+              >
+                <span style={{ fontSize: "1rem" }}>{emoji}</span>
+                <span>{label}</span>
+                <span
+                  style={{
+                    fontSize: "0.6875rem",
+                    opacity: 0.7,
+                    marginLeft: "2px",
+                  }}
+                >
+                  {shortcut}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Summary */}
       <p
         style={{
@@ -295,75 +361,6 @@ export default function CardView({ card, focused, onClick, onFeedback, onRating,
           ))}
         </div>
       )}
-
-      {/* Rating Section - 三级打分 */}
-      <div style={{ marginBottom: "12px" }}>
-        <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "8px", fontWeight: 600 }}>
-          内容评分
-        </div>
-        <div style={{ display: "flex", gap: "10px" }}>
-          {RATING_ACTIONS.map(({ key, label, emoji, shortcut, gradient, shadow, color }) => {
-            const isActive = userRating === key;
-            return (
-              <button
-                key={key}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRating?.(key as "like" | "neutral" | "dislike");
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  padding: "10px 16px",
-                  borderRadius: "var(--radius-full)",
-                  background: isActive ? gradient : "var(--bg-card)",
-                  border: isActive ? "1px solid transparent" : "1px solid var(--border-light)",
-                  color: isActive ? "white" : color,
-                  fontSize: "0.8125rem",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
-                  flex: 1,
-                  justifyContent: "center",
-                  boxShadow: isActive ? `0 4px 16px ${shadow}` : "none",
-                  transform: isActive ? "scale(1.02)" : "scale(1)",
-                }}
-                onMouseEnter={(e) => {
-                  if (!isActive) {
-                    e.currentTarget.style.background = gradient;
-                    e.currentTarget.style.color = "white";
-                    e.currentTarget.style.borderColor = "transparent";
-                    e.currentTarget.style.boxShadow = `0 4px 16px ${shadow}`;
-                    e.currentTarget.style.transform = "translateY(-2px)";
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (!isActive) {
-                    e.currentTarget.style.background = "var(--bg-card)";
-                    e.currentTarget.style.color = color;
-                    e.currentTarget.style.borderColor = "var(--border-light)";
-                    e.currentTarget.style.boxShadow = "none";
-                    e.currentTarget.style.transform = "translateY(0)";
-                  }
-                }}
-              >
-                <span style={{ fontSize: "1rem" }}>{emoji}</span>
-                <span>{label}</span>
-                <span
-                  style={{
-                    fontSize: "0.6875rem",
-                    opacity: 0.7,
-                    marginLeft: "2px",
-                  }}
-                >
-                  {shortcut}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
 
       {/* Extended Actions */}
       <div style={{ display: "flex", gap: "10px" }}>
