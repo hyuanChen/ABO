@@ -2,6 +2,7 @@
 ABO Backend — FastAPI 入口
 """
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket
@@ -23,6 +24,26 @@ _registry = ModuleRegistry()
 _card_store = CardStore()
 _prefs = PreferenceEngine()
 _scheduler: ModuleScheduler | None = None
+
+# ── 爬取任务取消控制 ────────────────────────────────────────────
+_crawl_cancel_flags: dict[str, bool] = {}  # session_id -> should_cancel
+
+def _generate_crawl_session_id() -> str:
+    """Generate a unique session ID for crawl operations."""
+    import uuid
+    return str(uuid.uuid4())[:8]
+
+def _should_cancel_crawl(session_id: str) -> bool:
+    """Check if a crawl session should be cancelled."""
+    return _crawl_cancel_flags.get(session_id, False)
+
+def _cancel_crawl(session_id: str):
+    """Mark a crawl session for cancellation."""
+    _crawl_cancel_flags[session_id] = True
+
+def _cleanup_crawl_session(session_id: str):
+    """Clean up a crawl session after completion."""
+    _crawl_cancel_flags.pop(session_id, None)
 
 init_profile_routes(_card_store)
 
@@ -104,12 +125,16 @@ async def health():
 
 @app.websocket("/ws/feed")
 async def feed_ws(ws: WebSocket):
+    print(f"[websocket] New connection from {ws.client}")
     await ws.accept()
+    print(f"[websocket] Connection accepted")
     broadcaster.register(ws)
     try:
         while True:
-            await ws.receive_text()
-    except Exception:
+            msg = await ws.receive_text()
+            print(f"[websocket] Received: {msg[:50]}...")
+    except Exception as e:
+        print(f"[websocket] Connection closed: {e}")
         broadcaster.unregister(ws)
 
 
@@ -145,6 +170,12 @@ async def feedback(card_id: str, body: FeedbackReq):
         raise HTTPException(404, "Card not found")
     _prefs.record_feedback(card.tags, body.action.value)
     _card_store.record_feedback(card_id, body.action.value)
+
+    # Save liked items to markdown
+    if body.action.value == "like":
+        card_dict = card.to_dict()
+        _prefs.save_liked_to_markdown(card_dict)
+
     module = _registry.get(card.module_id)
     if module:
         await module.on_feedback(card_id, body.action)
@@ -184,8 +215,9 @@ async def crawl_arxiv_live(data: dict = None):
     prefs = _prefs.get_prefs_for_module("arxiv-tracker")
     keywords = data.get("keywords", []) if data else []
     max_results = data.get("max_results", 20) if data else 20
-    search_mode = data.get("mode", "AND") if data else "AND"  # "AND" or "OR"
+    search_mode = data.get("mode", "AND") if data else "AND"  # "AND", "OR", or "AND_OR"
     cs_only = data.get("cs_only", True) if data else True  # Default to CS only
+    days_back = data.get("days_back", 3) if data else 3  # Default to last 3 days
 
     # Get existing arXiv IDs from literature library to avoid duplicates
     existing_ids = set()
@@ -205,8 +237,16 @@ async def crawl_arxiv_live(data: dict = None):
 
     tracker = ArxivTracker()
     results = []
+    session_id = _generate_crawl_session_id()
 
     try:
+        # Send session ID to client for cancellation
+        await broadcaster.send_event({
+            "type": "crawl_started",
+            "session_id": session_id,
+            "message": "爬取任务已启动"
+        })
+
         # Fetch with deduplication
         await broadcaster.send_event({
             "type": "crawl_progress",
@@ -216,46 +256,92 @@ async def crawl_arxiv_live(data: dict = None):
             "message": "正在从 arXiv 获取论文列表..."
         })
 
+        # Check for cancellation before fetch
+        if _should_cancel_crawl(session_id):
+            await broadcaster.send_event({
+                "type": "crawl_cancelled",
+                "message": "爬取任务已取消"
+            })
+            _cleanup_crawl_session(session_id)
+            return {"papers": [], "count": 0, "cancelled": True}
+
         items = await tracker.fetch(
             custom_keywords=keywords if keywords else None,
             max_results=max_results,
             existing_ids=existing_ids,
             mode=search_mode,  # AND or OR mode
-            cs_only=cs_only
+            cs_only=cs_only,
+            days_back=days_back  # Last N days
         )
 
         # Process each paper with progress update
         for i, item in enumerate(items):
+            # Check for cancellation before processing each paper
+            if _should_cancel_crawl(session_id):
+                await broadcaster.send_event({
+                    "type": "crawl_cancelled",
+                    "message": f"爬取任务已取消，已处理 {i}/{len(items)} 篇论文"
+                })
+                _cleanup_crawl_session(session_id)
+                return {"papers": results, "count": len(results), "cancelled": True}
+            paper_title = item.raw.get('title', '')
+            paper_id = item.id
+            print(f"[arxiv-crawl] Processing {i+1}/{len(items)}: {paper_id}")
+
             # Send progress before processing
             await broadcaster.send_event({
                 "type": "crawl_progress",
                 "phase": "processing",
                 "current": i + 1,
                 "total": len(items),
-                "message": f"正在处理第 {i+1}/{len(items)} 篇论文: {item.raw.get('title', '')[:40]}..."
+                "message": f"正在处理第 {i+1}/{len(items)} 篇论文...",
+                "currentPaperTitle": paper_title[:80] + "..." if len(paper_title) > 80 else paper_title
             })
 
-            card_list = await tracker.process([item], prefs)
-            if card_list:
-                card = card_list[0]
-                paper_data = {
-                    "id": card.id,
-                    "title": card.title,
-                    "summary": card.summary,
-                    "score": card.score,
-                    "tags": card.tags,
-                    "source_url": card.source_url,
-                    "metadata": card.metadata,
-                }
-                results.append(paper_data)
+            try:
+                # Add delay between processing papers to avoid rate limiting
+                if i > 0:
+                    await asyncio.sleep(3)  # 3 second delay between papers
 
-                # Send partial result
+                # Process single paper with 60s timeout
+                card_list = await asyncio.wait_for(
+                    tracker.process([item], prefs),
+                    timeout=60
+                )
+                if card_list:
+                    card = card_list[0]
+                    paper_data = {
+                        "id": card.id,
+                        "title": card.title,
+                        "summary": card.summary,
+                        "score": card.score,
+                        "tags": card.tags,
+                        "source_url": card.source_url,
+                        "metadata": card.metadata,
+                    }
+                    results.append(paper_data)
+
+                    # Send partial result
+                    await broadcaster.send_event({
+                        "type": "crawl_paper",
+                        "paper": paper_data,
+                        "current": i + 1,
+                        "total": len(items)
+                    })
+                    print(f"[arxiv-crawl] Completed {paper_id}: {card.title[:50]}...")
+            except asyncio.TimeoutError:
+                print(f"[arxiv-crawl] Timeout processing {paper_id}, skipping")
                 await broadcaster.send_event({
-                    "type": "crawl_paper",
-                    "paper": paper_data,
+                    "type": "crawl_progress",
+                    "phase": "processing",
                     "current": i + 1,
-                    "total": len(items)
+                    "total": len(items),
+                    "message": f"处理超时，跳过第 {i+1} 篇...",
+                    "currentPaperTitle": paper_title[:80] + "..." if len(paper_title) > 80 else paper_title
                 })
+            except Exception as e:
+                print(f"[arxiv-crawl] Error processing {paper_id}: {e}")
+                # Continue with next paper
 
         # Sort by published date (descending)
         results.sort(key=lambda x: x.get("metadata", {}).get("published", ""), reverse=True)
@@ -269,6 +355,9 @@ async def crawl_arxiv_live(data: dict = None):
             "skipped_duplicates": len(existing_ids)
         })
 
+        # Clean up session on success
+        _cleanup_crawl_session(session_id)
+
         return {
             "papers": results,
             "count": len(results),
@@ -276,21 +365,73 @@ async def crawl_arxiv_live(data: dict = None):
             "skipped_duplicates": len(existing_ids)
         }
     except Exception as e:
+        # Clean up session on error
+        _cleanup_crawl_session(session_id)
+
+        error_msg = str(e)
+        # Provide user-friendly message for rate limit or service unavailable
+        if "503" in error_msg or "暂时不可用" in error_msg:
+            error_msg = "arXiv API 暂时不可用 (503)。请等待几分钟后重试。"
+        elif "rate exceeded" in error_msg.lower() or "rate limit" in error_msg.lower() or "429" in error_msg:
+            error_msg = "arXiv API 请求太频繁。请等待 2-3 分钟后重试，或减少每次爬取的论文数量。"
         await broadcaster.send_event({
             "type": "crawl_error",
-            "error": str(e)
+            "error": error_msg
         })
         raise HTTPException(500, f"Crawl failed: {e}")
 
 
+@app.post("/api/modules/arxiv-tracker/cancel")
+async def cancel_arxiv_crawl(data: dict):
+    """Cancel an ongoing arXiv crawl by session ID."""
+    session_id = data.get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id is required")
+
+    if session_id not in _crawl_cancel_flags:
+        return {"status": "not_found", "message": "未找到正在进行的爬取任务"}
+
+    _cancel_crawl(session_id)
+    await broadcaster.send_event({
+        "type": "crawl_cancelling",
+        "session_id": session_id,
+        "message": "正在取消爬取任务..."
+    })
+    return {"status": "ok", "message": "已发送取消信号"}
+
+
+@app.get("/api/proxy/image")
+async def proxy_image(url: str):
+    """Proxy image requests to avoid CORS issues."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers={
+                "User-Agent": "ABO-arXiv-Tracker/1.0",
+                "Referer": "https://arxiv.org/"
+            })
+        if resp.status_code != 200:
+            raise HTTPException(404, "Image not found")
+        from fastapi import Response
+        return Response(
+            content=resp.content,
+            media_type=resp.headers.get("content-type", "image/png")
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Failed to proxy image: {e}")
+
+
 @app.post("/api/modules/arxiv-tracker/save-to-literature")
 async def save_arxiv_to_literature(data: dict):
-    """Save an arXiv paper to the literature library."""
+    """Save an arXiv paper to the literature library with figures and optional PDF."""
     import frontmatter
     import os
+    import httpx
+    import asyncio
 
     paper = data.get("paper", {})
     folder = data.get("folder", "arxiv")
+    save_pdf = data.get("save_pdf", True)  # Default to saving PDF
 
     # Get literature path
     lit_path = get_literature_path()
@@ -303,16 +444,88 @@ async def save_arxiv_to_literature(data: dict):
     target_dir = lit_path / folder
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build filename from title
+    # Build filename: Title first, then arXiv ID (e.g., "Paper Title-arxiv.2501.12345.md")
     title = paper.get("title", "untitled")
     arxiv_id = paper.get("id", "unknown")
-    safe_title = "".join(c for c in title[:50] if c.isalnum() or c in " -_").strip()
-    filename = f"{arxiv_id}-{safe_title}.md"
+    safe_title = "".join(c for c in title[:80] if c.isalnum() or c in " -_").strip()
+    filename_base = f"{safe_title}-{arxiv_id}"
+    filename = f"{filename_base}.md"
     target_path = target_dir / filename
 
-    # Build content
+    # Create figures directory
+    figures_dir = target_dir / f"{filename_base}.figures"
+    figures_dir.mkdir(exist_ok=True)
+
     meta = paper.get("metadata", {})
+    pdf_url = meta.get("pdf-url", f"https://arxiv.org/pdf/{arxiv_id}.pdf")
+
+    # Download PDF if requested
+    pdf_path = None
+    if save_pdf and pdf_url:
+        pdf_dir = lit_path / "arxiv_pdf"
+        pdf_dir.mkdir(exist_ok=True)
+        pdf_filename = f"{filename_base}.pdf"
+        pdf_path = pdf_dir / pdf_filename
+
+        try:
+            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                resp = await client.get(pdf_url, headers={"User-Agent": "ABO-arXiv-Tracker/1.0"})
+                if resp.status_code == 200:
+                    pdf_path.write_bytes(resp.content)
+                    pdf_path = str(pdf_path.relative_to(lit_path))
+                else:
+                    pdf_path = None
+        except Exception as e:
+            print(f"Failed to download PDF for {arxiv_id}: {e}")
+            pdf_path = None
+
+    # Download figures
+    figures = meta.get("figures", [])
+    local_figures = []
+
+    async def download_figure(fig: dict, idx: int) -> dict | None:
+        """Download a single figure."""
+        url = fig.get("url", "")
+        if not url:
+            return None
+
+        # Determine file extension
+        ext = ".png"
+        if ".jpg" in url.lower() or ".jpeg" in url.lower():
+            ext = ".jpg"
+        elif ".gif" in url.lower():
+            ext = ".gif"
+
+        local_name = f"figure_{idx + 1}{ext}"
+        local_path = figures_dir / local_name
+
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                resp = await client.get(url, headers={"User-Agent": "ABO-arXiv-Tracker/1.0"})
+                if resp.status_code == 200:
+                    local_path.write_bytes(resp.content)
+                    return {
+                        "filename": local_name,
+                        "caption": fig.get("caption", f"Figure {idx + 1}"),
+                        "local_path": str(local_path.relative_to(lit_path)),
+                        "original_url": url,
+                    }
+        except Exception as e:
+            print(f"Failed to download figure {idx + 1}: {e}")
+        return None
+
+    # Download all figures concurrently
+    if figures:
+        download_tasks = [download_figure(fig, idx) for idx, fig in enumerate(figures[:5])]
+        downloaded = await asyncio.gather(*download_tasks)
+        local_figures = [f for f in downloaded if f]
+
+    # Build content
     content_parts = [f"# {title}\n"]
+
+    # Add PDF link if downloaded
+    if pdf_path:
+        content_parts.append(f"**[📄 PDF 下载](../arxiv_pdf/{filename_base}.pdf)**\n")
 
     if meta.get("contribution"):
         content_parts.append(f"**核心创新**: {meta['contribution']}\n")
@@ -322,6 +535,13 @@ async def save_arxiv_to_literature(data: dict):
     if meta.get("abstract"):
         content_parts.append("## 摘要\n")
         content_parts.append(f"{meta['abstract']}\n")
+
+    # Add figures section
+    if local_figures:
+        content_parts.append("## 图片\n")
+        for fig in local_figures:
+            content_parts.append(f"### {fig['caption']}\n")
+            content_parts.append(f"![{fig['caption']}]({fig['local_path']})\n")
 
     content_parts.append(f"[原文链接]({paper.get('source_url', '')})")
 
@@ -335,9 +555,12 @@ async def save_arxiv_to_literature(data: dict):
         "tags": paper.get("tags", []),
         "authors": meta.get("authors", []),
         "arxiv-id": arxiv_id,
-        "pdf-url": meta.get("pdf-url", ""),
+        "pdf-url": pdf_url,
+        "pdf-path": pdf_path,
         "published": meta.get("published", ""),
         "keywords": meta.get("keywords", []),
+        "figures": local_figures,
+        "figures_dir": str(figures_dir.relative_to(lit_path)),
     })
 
     # Atomic write
@@ -345,7 +568,190 @@ async def save_arxiv_to_literature(data: dict):
     tmp.write_text(frontmatter.dumps(post), encoding="utf-8")
     os.replace(tmp, target_path)
 
-    return {"ok": True, "path": str(target_path.relative_to(lit_path))}
+    # Update CardStore with local_figures so they persist after refresh
+    try:
+        from .store.cards import CardStore
+        card_store = CardStore()
+        existing_card = card_store.get(arxiv_id)
+        if existing_card:
+            existing_card.metadata["local_figures"] = local_figures
+            existing_card.metadata["figures_dir"] = str(figures_dir.relative_to(lit_path))
+            existing_card.metadata["saved_to_literature"] = True
+            existing_card.metadata["literature_path"] = str(target_path.relative_to(lit_path))
+            if pdf_path:
+                existing_card.metadata["pdf_path"] = pdf_path
+            card_store.save(existing_card)
+    except Exception as e:
+        print(f"Failed to update CardStore for {arxiv_id}: {e}")
+
+    return {
+        "ok": True,
+        "path": str(target_path.relative_to(lit_path)),
+        "figures": local_figures,
+        "pdf": pdf_path,
+    }
+
+
+@app.get("/api/modules/arxiv-tracker/categories")
+async def get_arxiv_categories():
+    """Get all available arXiv categories/subcategories."""
+    from .default_modules.arxiv import get_available_categories
+    return {"categories": get_available_categories()}
+
+
+@app.post("/api/modules/arxiv-tracker/crawl-by-category")
+async def crawl_arxiv_by_category(data: dict = None):
+    """
+    Real-time arXiv crawl by category/subcategory with full metadata.
+
+    Request body:
+    {
+        "categories": ["cs.CV", "cs.LG"],  # Subcategories to search
+        "keywords": ["vision", "image"],   # Optional keywords
+        "max_results": 50,
+        "days_back": 7,                    # Only papers from last N days
+        "sort_by": "submittedDate",        # or "lastUpdatedDate", "relevance"
+        "sort_order": "descending"
+    }
+    """
+    from .default_modules.arxiv import ArxivTracker
+    import asyncio
+
+    data = data or {}
+    categories = data.get("categories", ["cs.*"])
+    keywords = data.get("keywords", [])
+    max_results = data.get("max_results", 50)
+    days_back = data.get("days_back", 7)
+    sort_by = data.get("sort_by", "submittedDate")
+    sort_order = data.get("sort_order", "descending")
+
+    prefs = _prefs.get_prefs_for_module("arxiv-tracker")
+
+    # Get existing arXiv IDs for deduplication
+    existing_ids = set()
+    try:
+        lit_path = get_literature_path() or get_vault_path()
+        if lit_path:
+            arxiv_dir = lit_path / "arxiv"
+            if arxiv_dir.exists():
+                for f in arxiv_dir.glob("**/*.md"):
+                    # Match arXiv ID patterns in filename
+                    import re
+                    match = re.search(r'(\d{4}\.\d{4,5})', f.name)
+                    if match:
+                        existing_ids.add(match.group(1))
+    except Exception:
+        pass
+
+    tracker = ArxivTracker()
+    results = []
+
+    try:
+        # Send initial progress
+        await broadcaster.send_event({
+            "type": "crawl_progress",
+            "phase": "fetching",
+            "current": 0,
+            "total": max_results,
+            "message": f"正在从 arXiv 获取论文 (分类: {', '.join(categories)})..."
+        })
+
+        # Fetch papers by category
+        items = await tracker.fetch_by_category(
+            categories=categories,
+            keywords=keywords if keywords else None,
+            max_results=max_results,
+            days_back=days_back,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            existing_ids=existing_ids,
+        )
+
+        if not items:
+            await broadcaster.send_event({
+                "type": "crawl_complete",
+                "papers": [],
+                "count": 0,
+                "message": "未找到符合条件的论文"
+            })
+            return {"papers": [], "count": 0}
+
+        # Process each paper
+        for i, item in enumerate(items):
+            paper_title = item.raw.get('title', '')
+            paper_id = item.id
+
+            await broadcaster.send_event({
+                "type": "crawl_progress",
+                "phase": "processing",
+                "current": i + 1,
+                "total": len(items),
+                "message": f"正在分析第 {i+1}/{len(items)} 篇论文...",
+                "currentPaperTitle": paper_title[:80] + "..." if len(paper_title) > 80 else paper_title
+            })
+
+            try:
+                # Process single paper
+                card_list = await asyncio.wait_for(
+                    tracker.process([item], prefs),
+                    timeout=60
+                )
+
+                if card_list:
+                    card = card_list[0]
+                    paper_data = {
+                        "id": card.id,
+                        "title": card.title,
+                        "summary": card.summary,
+                        "score": card.score,
+                        "tags": card.tags,
+                        "source_url": card.source_url,
+                        "metadata": card.metadata,
+                    }
+                    results.append(paper_data)
+
+                    # Send real-time update
+                    await broadcaster.send_event({
+                        "type": "crawl_paper",
+                        "paper": paper_data,
+                        "current": i + 1,
+                        "total": len(items)
+                    })
+            except asyncio.TimeoutError:
+                print(f"[arxiv-crawl] Timeout processing {paper_id}, skipping")
+                continue
+            except Exception as e:
+                print(f"[arxiv-crawl] Error processing {paper_id}: {e}")
+                continue
+
+        # Send completion
+        await broadcaster.send_event({
+            "type": "crawl_complete",
+            "papers": results,
+            "count": len(results),
+            "requested": max_results,
+            "categories": categories
+        })
+
+        return {
+            "papers": results,
+            "count": len(results),
+            "requested": max_results,
+            "categories": categories
+        }
+
+    except Exception as e:
+        error_msg = str(e)
+        if "503" in error_msg:
+            error_msg = "arXiv API 暂时不可用 (503)。请等待几分钟后重试。"
+        elif "429" in error_msg:
+            error_msg = "arXiv API 速率限制已达到。请等待 1-2 分钟后重试。"
+
+        await broadcaster.send_event({
+            "type": "crawl_error",
+            "error": error_msg
+        })
+        raise HTTPException(500, f"Crawl failed: {e}")
 
 
 @app.post("/api/modules/semantic-scholar/follow-ups")
@@ -454,11 +860,16 @@ async def fetch_semantic_scholar_follow_ups(data: dict):
 
 @app.post("/api/modules/semantic-scholar/save-to-literature")
 async def save_s2_to_literature(data: dict):
-    """Save a Semantic Scholar paper to the literature library in a subfolder."""
+    """Save a Semantic Scholar paper to the literature library with figures and PDF."""
     import frontmatter
     import os
+    import httpx
+    import re
+    import asyncio
 
     paper = data.get("paper", {})
+    save_pdf = data.get("save_pdf", True)
+    max_figures = data.get("max_figures", 5)
 
     # Get literature path
     lit_path = get_literature_path()
@@ -467,38 +878,178 @@ async def save_s2_to_literature(data: dict):
     if not lit_path:
         raise HTTPException(400, "Literature path not configured")
 
-    # Get source arXiv ID for subfolder naming (first 6 letters)
+    # Get source paper title for subfolder naming (first 5 letters)
     meta = paper.get("metadata", {})
-    source_arxiv = meta.get("source_arxiv_id", "unknown")
-    subfolder = source_arxiv[:6] if len(source_arxiv) >= 6 else source_arxiv
+    source_title = meta.get("source_paper_title", "unknown")
+    # Extract first 5 alphanumeric characters from source title
+    subfolder_prefix = "".join(c for c in source_title[:10] if c.isalnum())[:5].upper()
+    if not subfolder_prefix:
+        subfolder_prefix = "FOLLOWUP"
 
-    # Build target path with subfolder
-    target_dir = lit_path / "FollowUps" / subfolder
-    target_dir.mkdir(parents=True, exist_ok=True)
+    # Build target path with subfolder: {Prefix}_后续论文/{paper_id}/
+    target_dir = lit_path / "FollowUps" / f"{subfolder_prefix}_后续论文"
+    paper_folder = target_dir / paper.get("id", "unknown")
+    paper_folder.mkdir(parents=True, exist_ok=True)
+
+    # Figures folder
+    figures_dir = paper_folder / "figures"
+    figures_dir.mkdir(exist_ok=True)
 
     # Build filename from title
     title = paper.get("title", "untitled")
-    paper_id = meta.get("paper_id", "unknown")
-    safe_title = "".join(c for c in title[:50] if c.isalnum() or c in " -_").strip()
+    paper_id = meta.get("paper_id", "unknown")[:12]
+    safe_title = "".join(c for c in title[:40] if c.isalnum() or c in " -_").strip()
     filename = f"{paper_id}-{safe_title}.md"
-    target_path = target_dir / filename
+    target_path = paper_folder / filename
 
-    # Build content
+    # Try to fetch figures from arXiv if arxiv_id exists
+    local_figures = []
+    arxiv_id = meta.get("arxiv_id", "")
+
+    if arxiv_id:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Fetch arXiv HTML to get figures
+                html_url = f"https://arxiv.org/html/{arxiv_id}"
+                resp = await client.get(html_url, headers={"User-Agent": "ABO/1.0"})
+
+                if resp.status_code == 200:
+                    html = resp.text
+                    # Find image tags
+                    img_pattern = r'<img[^>]+src="([^"]+)"[^>]*>'
+                    img_matches = list(re.finditer(img_pattern, html, re.IGNORECASE))
+
+                    figure_candidates = []
+                    for i, match in enumerate(img_matches[:15]):  # Check first 15 images
+                        src = match.group(1)
+                        if not src:
+                            continue
+
+                        # Get alt text
+                        img_tag = match.group(0)
+                        alt_match = re.search(r'alt="([^"]*)"', img_tag, re.IGNORECASE)
+                        alt = alt_match.group(1) if alt_match else ""
+
+                        # Skip non-figure images
+                        if any(skip in src.lower() for skip in ['icon', 'logo', 'button', 'spacer']):
+                            continue
+
+                        # Make absolute URL
+                        if src.startswith('/'):
+                            src = f"https://arxiv.org{src}"
+                        elif not src.startswith('http'):
+                            if src.startswith(arxiv_id + '/'):
+                                src = f"https://arxiv.org/html/{src}"
+                            else:
+                                src = f"https://arxiv.org/html/{arxiv_id}/{src}"
+
+                        # Score based on likelihood of being a pipeline/method figure
+                        alt_lower = alt.lower()
+                        score = 0
+                        keywords = ['method', 'pipeline', 'architecture', 'framework', 'overview', 'structure', 'model', 'system', 'approach', 'flowchart', 'diagram', 'fig', 'figure']
+                        for kw in keywords:
+                            if kw in alt_lower:
+                                score += 10
+
+                        figure_candidates.append({
+                            'url': src,
+                            'caption': alt[:100] if alt else f"Figure {i+1}",
+                            'score': score,
+                            'index': i
+                        })
+
+                    # Sort by score (descending) and take top max_figures
+                    figure_candidates.sort(key=lambda x: (-x['score'], x['index']))
+                    selected_figures = figure_candidates[:max_figures]
+
+                    # Download figures
+                    for idx, fig in enumerate(selected_figures):
+                        try:
+                            fig_resp = await client.get(fig['url'], headers={"User-Agent": "ABO/1.0"}, timeout=30)
+                            if fig_resp.status_code == 200:
+                                # Determine extension
+                                content_type = fig_resp.headers.get('content-type', '')
+                                if 'png' in content_type:
+                                    ext = 'png'
+                                elif 'jpeg' in content_type or 'jpg' in content_type:
+                                    ext = 'jpg'
+                                elif 'gif' in content_type:
+                                    ext = 'gif'
+                                else:
+                                    ext = 'png'
+
+                                fig_filename = f"figure_{idx+1:02d}.{ext}"
+                                fig_path = figures_dir / fig_filename
+                                fig_path.write_bytes(fig_resp.content)
+
+                                local_figures.append({
+                                    'filename': fig_filename,
+                                    'caption': fig['caption'],
+                                    'local_path': f"figures/{fig_filename}",
+                                    'original_url': fig['url']
+                                })
+                                await asyncio.sleep(0.5)  # Rate limiting
+                        except Exception as e:
+                            print(f"[s2-save] Failed to download figure {fig['url']}: {e}")
+                            continue
+        except Exception as e:
+            print(f"[s2-save] Failed to fetch figures: {e}")
+
+    # Try to download PDF if arxiv_id exists
+    pdf_path = None
+    if arxiv_id and save_pdf:
+        try:
+            pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+            async with httpx.AsyncClient(timeout=60) as client:
+                pdf_resp = await client.get(pdf_url, headers={"User-Agent": "ABO/1.0"})
+                if pdf_resp.status_code == 200:
+                    pdf_filename = f"{paper_id}.pdf"
+                    pdf_full_path = paper_folder / pdf_filename
+                    pdf_full_path.write_bytes(pdf_resp.content)
+                    pdf_path = pdf_filename
+                    print(f"[s2-save] Downloaded PDF: {pdf_filename}")
+        except Exception as e:
+            print(f"[s2-save] Failed to download PDF: {e}")
+
+    # Build content with visualizations
     content_parts = [f"# {title}\n"]
 
+    # Add metadata section
+    content_parts.append("## 论文信息\n")
+    if meta.get("authors"):
+        content_parts.append(f"**作者**: {', '.join(meta['authors'][:5])}{' 等' if len(meta['authors']) > 5 else ''}\n")
+    if meta.get("year"):
+        content_parts.append(f"**年份**: {meta['year']}\n")
+    if meta.get("venue"):
+        content_parts.append(f"**期刊/会议**: {meta['venue']}\n")
+    if meta.get("citation_count"):
+        content_parts.append(f"**引用数**: {meta['citation_count']}\n")
+    content_parts.append(f"**来源**: [{paper.get('source_url', '')}]({paper.get('source_url', '')})\n")
+
     if meta.get("contribution"):
-        content_parts.append(f"**核心创新**: {meta['contribution']}\n")
+        content_parts.append(f"\n**核心创新**: {meta['contribution']}\n")
 
-    if meta.get("relationship_label"):
-        content_parts.append(f"**关系**: 原论文的{meta['relationship_label']}\n")
+    content_parts.append(f"\n**ABO评分**: {round(paper.get('score', 0) * 10, 1)}/10\n")
 
+    # Add summary
+    content_parts.append(f"\n## 摘要\n")
     content_parts.append(f"{paper.get('summary', '')}\n")
 
     if meta.get("abstract"):
-        content_parts.append("## 摘要\n")
+        content_parts.append(f"\n### 原文摘要\n")
         content_parts.append(f"{meta['abstract']}\n")
 
-    content_parts.append(f"[原文链接]({paper.get('source_url', '')})")
+    # Add figures section
+    if local_figures:
+        content_parts.append(f"\n## 图表 ({len(local_figures)}张)\n")
+        for fig in local_figures:
+            content_parts.append(f"### {fig['caption']}\n")
+            content_parts.append(f"![{fig['caption']}]({fig['local_path']})\n")
+
+    # Add PDF link
+    if pdf_path:
+        content_parts.append(f"\n## PDF\n")
+        content_parts.append(f"[下载PDF]({pdf_path})\n")
 
     content = "\n".join(content_parts)
 
@@ -510,12 +1061,17 @@ async def save_s2_to_literature(data: dict):
         "tags": paper.get("tags", []),
         "authors": meta.get("authors", []),
         "paper-id": paper_id,
+        "arxiv-id": arxiv_id,
         "s2-url": meta.get("s2_url", ""),
         "year": meta.get("year"),
+        "venue": meta.get("venue", ""),
         "citation-count": meta.get("citation_count", 0),
         "keywords": meta.get("keywords", []),
-        "relationship": meta.get("relationship", ""),
-        "source-arxiv-id": source_arxiv,
+        "source-paper-title": source_title,
+        "figures": local_figures,
+        "figures-dir": str(figures_dir.relative_to(paper_folder)) if local_figures else None,
+        "pdf-path": pdf_path,
+        "saved-at": datetime.now().isoformat(),
     })
 
     # Atomic write
@@ -523,7 +1079,176 @@ async def save_s2_to_literature(data: dict):
     tmp.write_text(frontmatter.dumps(post), encoding="utf-8")
     os.replace(tmp, target_path)
 
-    return {"ok": True, "path": str(target_path.relative_to(lit_path))}
+    return {
+        "ok": True,
+        "path": str(target_path.relative_to(lit_path)),
+        "figures": local_figures,
+        "pdf": pdf_path,
+        "folder": str(paper_folder.relative_to(lit_path))
+    }
+
+
+# ── Semantic Scholar Tracker (VGGT Follow-ups) ───────────────────
+
+@app.post("/api/modules/semantic-scholar-tracker/crawl")
+async def crawl_semantic_scholar_tracker(data: dict = None):
+    """Real-time Semantic Scholar follow-up crawl with progress via WebSocket."""
+    from .default_modules.semantic_scholar_tracker import SemanticScholarTracker
+    import asyncio
+
+    data = data or {}
+    query = data.get("query", "VGGT")
+    max_results = data.get("max_results", 20)
+    days_back = data.get("days_back", 7)
+
+    prefs = _prefs.get_prefs_for_module("semantic-scholar-tracker")
+    tracker = SemanticScholarTracker()
+    results = []
+    session_id = _generate_crawl_session_id()
+
+    try:
+        # Send session ID to client
+        await broadcaster.send_event({
+            "type": "crawl_started",
+            "module": "semantic-scholar-tracker",
+            "session_id": session_id,
+            "message": f"开始搜索 '{query}' 的后续论文..."
+        })
+
+        # Check for cancellation
+        if _should_cancel_crawl(session_id):
+            await broadcaster.send_event({
+                "type": "crawl_cancelled",
+                "module": "semantic-scholar-tracker",
+                "session_id": session_id
+            })
+            _cleanup_crawl_session(session_id)
+            return {"papers": [], "count": 0, "cancelled": True}
+
+        # Fetch papers
+        await broadcaster.send_event({
+            "type": "crawl_progress",
+            "module": "semantic-scholar-tracker",
+            "session_id": session_id,
+            "phase": "fetching",
+            "current": 0,
+            "total": max_results,
+            "message": f"正在从 Semantic Scholar 搜索 '{query}' 的后续论文..."
+        })
+
+        items = await tracker.fetch_followups(
+            query=query,
+            max_results=max_results,
+            days_back=days_back
+        )
+
+        if not items:
+            await broadcaster.send_event({
+                "type": "crawl_complete",
+                "module": "semantic-scholar-tracker",
+                "session_id": session_id,
+                "papers": [],
+                "count": 0,
+                "message": "未找到符合条件的后续论文"
+            })
+            _cleanup_crawl_session(session_id)
+            return {"papers": [], "count": 0}
+
+        # Process each paper
+        for i, item in enumerate(items):
+            if _should_cancel_crawl(session_id):
+                await broadcaster.send_event({
+                    "type": "crawl_cancelled",
+                    "module": "semantic-scholar-tracker",
+                    "session_id": session_id,
+                    "message": f"爬取已取消，已处理 {i}/{len(items)} 篇论文"
+                })
+                _cleanup_crawl_session(session_id)
+                return {"papers": results, "count": len(results), "cancelled": True}
+
+            paper_title = item.raw.get('title', '')
+            await broadcaster.send_event({
+                "type": "crawl_progress",
+                "module": "semantic-scholar-tracker",
+                "session_id": session_id,
+                "phase": "processing",
+                "current": i + 1,
+                "total": len(items),
+                "message": f"正在处理第 {i+1}/{len(items)} 篇: {paper_title[:50]}..."
+            })
+
+            try:
+                card_list = await asyncio.wait_for(
+                    tracker.process([item], prefs),
+                    timeout=60
+                )
+                if card_list:
+                    card = card_list[0]
+                    paper_data = {
+                        "id": card.id,
+                        "title": card.title,
+                        "summary": card.summary,
+                        "score": card.score,
+                        "tags": card.tags,
+                        "source_url": card.source_url,
+                        "metadata": card.metadata,
+                    }
+                    results.append(paper_data)
+
+                    await broadcaster.send_event({
+                        "type": "crawl_paper",
+                        "module": "semantic-scholar-tracker",
+                        "session_id": session_id,
+                        "paper": paper_data,
+                        "current": i + 1,
+                        "total": len(items)
+                    })
+            except asyncio.TimeoutError:
+                print(f"[s2-tracker] Timeout processing {item.id}, skipping")
+                continue
+            except Exception as e:
+                print(f"[s2-tracker] Error processing {item.id}: {e}")
+                continue
+
+        # Send completion
+        await broadcaster.send_event({
+            "type": "crawl_complete",
+            "module": "semantic-scholar-tracker",
+            "session_id": session_id,
+            "papers": results,
+            "count": len(results)
+        })
+
+        _cleanup_crawl_session(session_id)
+        return {"papers": results, "count": len(results)}
+
+    except Exception as e:
+        _cleanup_crawl_session(session_id)
+        error_msg = str(e)
+        await broadcaster.send_event({
+            "type": "crawl_error",
+            "module": "semantic-scholar-tracker",
+            "session_id": session_id,
+            "error": error_msg
+        })
+        raise HTTPException(500, f"Semantic Scholar crawl failed: {e}")
+
+
+@app.post("/api/modules/semantic-scholar-tracker/cancel")
+async def cancel_semantic_scholar_tracker_crawl(data: dict):
+    """Cancel an ongoing Semantic Scholar tracker crawl."""
+    session_id = data.get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id is required")
+
+    _cancel_crawl(session_id)
+    await broadcaster.send_event({
+        "type": "crawl_cancelling",
+        "module": "semantic-scholar-tracker",
+        "session_id": session_id,
+        "message": "正在取消爬取任务..."
+    })
+    return {"status": "ok", "message": "已发送取消信号"}
 
 
 @app.patch("/api/modules/{module_id}/toggle")
@@ -593,6 +1318,32 @@ async def browse_literature(path: str = ""):
     if not lit_path.exists():
         raise HTTPException(404, "Literature folder not found")
     return _browse_folder(lit_path, path)
+
+
+@app.get("/api/literature/file")
+async def serve_literature_file(path: str):
+    """Serve a file from the literature folder."""
+    from fastapi.responses import FileResponse
+    from .config import get_literature_path, get_vault_path
+
+    lit_path = get_literature_path()
+    if not lit_path:
+        lit_path = get_vault_path()
+    if not lit_path:
+        raise HTTPException(400, "Literature path not configured")
+
+    target = lit_path / path
+    # Security check: ensure file is within literature path
+    if not str(target.resolve()).startswith(str(lit_path.resolve())):
+        raise HTTPException(403, "Access denied")
+
+    if not target.exists():
+        raise HTTPException(404, "File not found")
+
+    if not target.is_file():
+        raise HTTPException(400, "Not a file")
+
+    return FileResponse(target)
 
 
 def _browse_folder(base_path: Path, sub_path: str = ""):

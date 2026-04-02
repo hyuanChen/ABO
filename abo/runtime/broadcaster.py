@@ -9,9 +9,11 @@ class Broadcaster:
 
     def register(self, ws: WebSocket):
         self._clients.append(ws)
+        print(f"[broadcaster] Client registered, total: {len(self._clients)}")
 
     def unregister(self, ws: WebSocket):
         self._clients = [c for c in self._clients if c is not ws]
+        print(f"[broadcaster] Client unregistered, total: {len(self._clients)}")
 
     async def send_card(self, card: Card):
         await self._broadcast(json.dumps({"type": "new_card", "card": card.to_dict()}))
@@ -20,11 +22,17 @@ class Broadcaster:
         await self._broadcast(json.dumps(event))
 
     async def _broadcast(self, payload: str):
+        if not self._clients:
+            print(f"[broadcaster] No clients connected, skipping broadcast")
+            return
         dead = []
+        print(f"[broadcaster] Broadcasting to {len(self._clients)} clients: {payload[:100]}...")
         for ws in self._clients:
             try:
                 await ws.send_text(payload)
-            except Exception:
+                print(f"[broadcaster] Sent to client successfully")
+            except Exception as e:
+                print(f"[broadcaster] Failed to send: {e}")
                 dead.append(ws)
         for ws in dead:
             self.unregister(ws)

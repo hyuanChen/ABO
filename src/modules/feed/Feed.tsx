@@ -405,32 +405,6 @@ export default function Feed() {
             unreadCounts={unreadCounts}
           />
 
-          <div
-            style={{
-              marginTop: "24px",
-              padding: "12px 16px",
-              borderRadius: "var(--radius-lg)",
-              background: isConnected ? "rgba(168, 230, 207, 0.1)" : "rgba(255, 183, 178, 0.1)",
-              border: `1px solid ${isConnected ? "rgba(168, 230, 207, 0.3)" : "rgba(255, 183, 178, 0.3)"}`,
-              display: "flex",
-              alignItems: "center",
-              gap: "10px",
-            }}
-          >
-            <div
-              style={{
-                width: "8px",
-                height: "8px",
-                borderRadius: "50%",
-                background: isConnected ? "#A8E6CF" : "#FFB7B2",
-                boxShadow: isConnected ? "0 0 8px rgba(168, 230, 207, 0.8)" : "0 0 8px rgba(255, 183, 178, 0.8)",
-              }}
-            />
-            <span style={{ fontSize: "0.8125rem", fontWeight: 600, color: isConnected ? "#5BA88C" : "#D48984" }}>
-              {isConnected ? "实时连接" : "已断开"}
-            </span>
-          </div>
-
           {!isMobile && (
             <div style={{ marginTop: "24px", padding: "16px", borderRadius: "var(--radius-lg)", background: "var(--bg-card)", border: "1px solid var(--border-light)" }}>
               <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "10px", fontWeight: 600 }}>快捷键</p>

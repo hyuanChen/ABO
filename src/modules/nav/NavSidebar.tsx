@@ -57,6 +57,7 @@ export default function NavSidebar() {
     activeTab, setActiveTab,
     unreadCounts, config, feedModules,
     profileEnergy, profileSan, profileMotto,
+    setModuleToConfigure,
   } = useStore();
   const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0);
   const vaultOk = Boolean(config?.vault_path);
@@ -143,12 +144,23 @@ export default function NavSidebar() {
     );
   }
 
-  function ModuleItem({ mod }: { mod: { id: string; name: string; enabled: boolean } }) {
+  function ModuleItem({ mod, isMobile, setIsOpen }: { mod: { id: string; name: string; enabled: boolean }; isMobile: boolean; setIsOpen: (v: boolean) => void }) {
     const unread = unreadCounts[mod.id] ?? 0;
+    const { setModuleToConfigure, setActiveTab } = useStore();
     return (
       <button
         onClick={() => {
-          setActiveTab("overview");
+          const current = useStore.getState().moduleToConfigure;
+          // If already on this module, force reset first to trigger change detection
+          if (current === mod.id) {
+            setModuleToConfigure(null);
+            requestAnimationFrame(() => {
+              setModuleToConfigure(mod.id);
+            });
+          } else {
+            setModuleToConfigure(mod.id);
+          }
+          setActiveTab("modules");
           if (isMobile) setIsOpen(false);
         }}
         style={{
@@ -382,31 +394,33 @@ export default function NavSidebar() {
         {/* Module Management Header */}
         <button
           onClick={() => {
-            setModulesExpanded(!modulesExpanded);
+            setModuleToConfigure(null);  // Reset to list view
+            setActiveTab("modules");
+            if (isMobile) setIsOpen(false);
           }}
           style={{
             width: "100%",
             padding: "clamp(10px, 1.5vw, 12px) clamp(14px, 2vw, 16px)",
             borderRadius: "var(--radius-full)",
-            background: modulesExpanded
-              ? "linear-gradient(135deg, rgba(168, 230, 207, 0.3), rgba(168, 230, 207, 0.2))"
+            background: activeTab === "modules"
+              ? "linear-gradient(135deg, rgba(168, 230, 207, 0.4), rgba(168, 230, 207, 0.3))"
               : "linear-gradient(135deg, rgba(168, 230, 207, 0.2), rgba(168, 230, 207, 0.1))",
             color: "#5BA88C",
             transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
             display: "flex",
             alignItems: "center",
             gap: "12px",
-            border: "1px solid rgba(168, 230, 207, 0.4)",
+            border: activeTab === "modules" ? "1px solid rgba(168, 230, 207, 0.6)" : "1px solid rgba(168, 230, 207, 0.4)",
             cursor: "pointer",
           }}
           onMouseEnter={(e) => {
-            if (!modulesExpanded) {
+            if (activeTab !== "modules") {
               e.currentTarget.style.background = "linear-gradient(135deg, rgba(168, 230, 207, 0.3), rgba(168, 230, 207, 0.2))";
             }
             e.currentTarget.style.transform = "scale(1.02)";
           }}
           onMouseLeave={(e) => {
-            if (!modulesExpanded) {
+            if (activeTab !== "modules") {
               e.currentTarget.style.background = "linear-gradient(135deg, rgba(168, 230, 207, 0.2), rgba(168, 230, 207, 0.1))";
             }
             e.currentTarget.style.transform = "scale(1)";
@@ -417,7 +431,7 @@ export default function NavSidebar() {
               width: "clamp(32px, 4vw, 36px)",
               height: "clamp(32px, 4vw, 36px)",
               borderRadius: "50%",
-              background: "rgba(168, 230, 207, 0.3)",
+              background: activeTab === "modules" ? "rgba(168, 230, 207, 0.4)" : "rgba(168, 230, 207, 0.3)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -429,8 +443,17 @@ export default function NavSidebar() {
           <span style={{ fontWeight: 600, fontSize: "clamp(0.875rem, 1.2vw, 0.9375rem)", flex: 1, textAlign: "left" }}>
             模块管理
           </span>
-          <div style={{ transition: "transform 0.3s ease", transform: modulesExpanded ? "rotate(180deg)" : "rotate(0deg)" }}>
-            <ChevronDown className="w-5 h-5" style={{ color: "#5BA88C" }} />
+          <div
+            style={{ cursor: "pointer" }}
+            onClick={(e) => {
+              e.stopPropagation();
+              setModulesExpanded(!modulesExpanded);
+            }}
+          >
+            <ChevronDown
+              className="w-5 h-5"
+              style={{ color: "#5BA88C", transition: "transform 0.3s ease", transform: modulesExpanded ? "rotate(180deg)" : "rotate(0deg)" }}
+            />
           </div>
         </button>
 
@@ -449,7 +472,7 @@ export default function NavSidebar() {
           }}
         >
           {feedModules.map((mod) => (
-            <ModuleItem key={mod.id} mod={mod} />
+            <ModuleItem key={mod.id} mod={mod} isMobile={isMobile} setIsOpen={setIsOpen} />
           ))}
         </div>
       </div>
@@ -597,7 +620,7 @@ export default function NavSidebar() {
             }}
           />
           <span style={{ fontSize: "0.8125rem", fontWeight: 600, color: vaultOk ? "#5BA88C" : "#D48984" }}>
-            {vaultOk ? "情报库已连接" : "请配置情报库"}
+            {vaultOk ? "库已连接" : "请配置情报库"}
           </span>
         </div>
 

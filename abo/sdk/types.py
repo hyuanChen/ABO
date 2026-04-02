@@ -46,3 +46,6 @@ class FeedbackAction(str, Enum):
     SKIP      = "skip"
     STAR      = "star"
     DEEP_DIVE = "deep_dive"
+    LIKE      = "like"
+    NEUTRAL   = "neutral"
+    DISLIKE   = "dislike"

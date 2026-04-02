@@ -11,7 +11,8 @@ export type ActiveTab =
   | "health"
   | "claude"
   | "vault"
-  | "settings";
+  | "settings"
+  | "modules";
 
 export type ToastKind = "info" | "error" | "success";
 
@@ -67,6 +68,25 @@ export interface ProfileStats {
   happiness: DimStat;
 }
 
+// ArXiv Tracker Crawl State
+export interface ArxivCrawlProgress {
+  current: number;
+  total: number;
+  phase: "fetching" | "processing" | "complete";
+  message?: string;
+  currentPaperTitle?: string;
+}
+
+export interface ArxivPaper {
+  id: string;
+  title: string;
+  summary: string;
+  score: number;
+  tags: string[];
+  source_url: string;
+  metadata: Record<string, unknown>;
+}
+
 // ── Store ─────────────────────────────────────────────────────────
 
 interface AboStore {
@@ -99,6 +119,30 @@ interface AboStore {
   setProfileMotto: (m: string) => void;
   setProfileStats: (s: ProfileStats) => void;
 
+  // Module configuration
+  moduleToConfigure: string | null;
+  setModuleToConfigure: (id: string | null) => void;
+
+  // ArXiv Tracker State (persisted across tab switches)
+  arxivAndPapers: ArxivPaper[];
+  arxivOrPapers: ArxivPaper[];
+  arxivAndCrawling: boolean;
+  arxivOrCrawling: boolean;
+  arxivAndProgress: ArxivCrawlProgress | null;
+  arxivOrProgress: ArxivCrawlProgress | null;
+  arxivAndKeywords: string;
+  arxivOrKeywords: string;
+  setArxivAndPapers: (papers: ArxivPaper[]) => void;
+  setArxivOrPapers: (papers: ArxivPaper[]) => void;
+  setArxivAndCrawling: (crawling: boolean) => void;
+  setArxivOrCrawling: (crawling: boolean) => void;
+  setArxivAndProgress: (progress: ArxivCrawlProgress | null) => void;
+  setArxivOrProgress: (progress: ArxivCrawlProgress | null) => void;
+  setArxivAndKeywords: (keywords: string) => void;
+  setArxivOrKeywords: (keywords: string) => void;
+  appendArxivAndPaper: (paper: ArxivPaper) => void;
+  appendArxivOrPaper: (paper: ArxivPaper) => void;
+
   // Toast
   toasts: Toast[];
   addToast: (t: Omit<Toast, "id">) => void;
@@ -130,6 +174,32 @@ export const useStore = create<AboStore>((set) => ({
   setProfileSan: (profileSan) => set({ profileSan }),
   setProfileMotto: (profileMotto) => set({ profileMotto }),
   setProfileStats: (profileStats) => set({ profileStats }),
+
+  // Module configuration
+  moduleToConfigure: null,
+  setModuleToConfigure: (moduleToConfigure) => set({ moduleToConfigure }),
+
+  // ArXiv Tracker State
+  arxivAndPapers: [],
+  arxivOrPapers: [],
+  arxivAndCrawling: false,
+  arxivOrCrawling: false,
+  arxivAndProgress: null,
+  arxivOrProgress: null,
+  arxivAndKeywords: "",
+  arxivOrKeywords: "",
+  setArxivAndPapers: (arxivAndPapers) => set({ arxivAndPapers }),
+  setArxivOrPapers: (arxivOrPapers) => set({ arxivOrPapers }),
+  setArxivAndCrawling: (arxivAndCrawling) => set({ arxivAndCrawling }),
+  setArxivOrCrawling: (arxivOrCrawling) => set({ arxivOrCrawling }),
+  setArxivAndProgress: (arxivAndProgress) => set({ arxivAndProgress }),
+  setArxivOrProgress: (arxivOrProgress) => set({ arxivOrProgress }),
+  setArxivAndKeywords: (arxivAndKeywords) => set({ arxivAndKeywords }),
+  setArxivOrKeywords: (arxivOrKeywords) => set({ arxivOrKeywords }),
+  appendArxivAndPaper: (paper) =>
+    set((s) => ({ arxivAndPapers: [...s.arxivAndPapers, paper] })),
+  appendArxivOrPaper: (paper) =>
+    set((s) => ({ arxivOrPapers: [...s.arxivOrPapers, paper] })),
 
   toasts: [],
   addToast: (t) =>

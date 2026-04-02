@@ -41,7 +41,9 @@ export default function HexagonRadar({ stats, size = 280 }: Props) {
 
   const dataPoints = DIMS.map(({ key }, i) => {
     const score = stats[key as DimKey]?.score ?? 0;
-    const r = (score / 100) * maxR;
+    // Ensure minimum radius so E-grade (0-20) is still visible
+    const minR = maxR * 0.15;
+    const r = minR + (score / 100) * (maxR - minR);
     return polarToXY(cx, cy, r, angles[i]);
   });
 

@@ -25,7 +25,7 @@ def _build_pref_block(prefs: dict) -> str:
     )
 
 
-async def claude(prompt: str, prefs: dict | None = None) -> str:
+async def claude(prompt: str, prefs: dict | None = None, timeout: int = 30) -> str:
     """调用本机 claude CLI，返回完整文本（批处理模式）"""
     full = f"{_build_pref_block(prefs)}\n\n{prompt}" if prefs else prompt
     proc = await asyncio.create_subprocess_exec(
@@ -33,8 +33,13 @@ async def claude(prompt: str, prefs: dict | None = None) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await proc.communicate()
-    return stdout.decode().strip()
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return stdout.decode().strip()
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise Exception(f"Claude CLI 调用超时（{timeout}秒）")
 
 
 async def claude_json(prompt: str, prefs: dict | None = None) -> dict:

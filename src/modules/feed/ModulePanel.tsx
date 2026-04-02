@@ -1,14 +1,23 @@
-import { useEffect } from "react";
-import { Play, Terminal } from "lucide-react";
+import { useEffect, useState, useRef } from "react";
+import { LayoutGrid, Play, Terminal, ArrowRight, Clock } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, FeedModule } from "../../core/store";
+import { PageContainer, PageHeader, PageContent, Grid } from "../../components/Layout";
+import ModuleDetail from "./ModuleDetail";
 
-interface Props {
-  filterModuleId?: string;
-}
+const MODULE_DESCRIPTIONS: Record<string, string> = {
+  "arxiv-tracker": "自动追踪 arXiv 上最新的学术论文",
+  "semantic-scholar-tracker": "追踪 Semantic Scholar 上的最新论文",
+  "xiaohongshu-tracker": "追踪小红书上的科研、读博相关笔记",
+  "bilibili-tracker": "追踪 B 站上的知识区、科技区视频",
+  "xiaoyuzhou-tracker": "追踪小宇宙科研、学术类播客",
+  "zhihu-tracker": "追踪知乎上的科研、学术话题",
+  "folder-monitor": "监控指定文件夹，自动导入新文件",
+};
 
-export default function ModulePanel({ filterModuleId }: Props) {
-  const { feedModules, setFeedModules, unreadCounts } = useStore();
+export default function ModulePanel() {
+  const { feedModules, setFeedModules, unreadCounts, moduleToConfigure } = useStore();
+  const [selectedModule, setSelectedModule] = useState<FeedModule | null>(null);
 
   useEffect(() => {
     api.get<{ modules: FeedModule[] }>("/api/modules")
@@ -16,79 +25,203 @@ export default function ModulePanel({ filterModuleId }: Props) {
       .catch(() => {});
   }, [setFeedModules]);
 
-  const modules = filterModuleId
-    ? feedModules.filter((m) => m.id === filterModuleId)
-    : feedModules;
+  // Track previous moduleToConfigure to detect actual changes
+  const prevModuleToConfigureRef = useRef<string | null>(null);
 
-  async function runNow(moduleId: string) {
+  useEffect(() => {
+    // Only process when moduleToConfigure actually changes to a new value
+    if (moduleToConfigure !== prevModuleToConfigureRef.current) {
+      prevModuleToConfigureRef.current = moduleToConfigure;
+
+      if (moduleToConfigure === null && selectedModule) {
+        // User clicked the header button - reset to list
+        setSelectedModule(null);
+      } else if (moduleToConfigure && feedModules.length > 0) {
+        const mod = feedModules.find(m => m.id === moduleToConfigure);
+        if (mod) {
+          setSelectedModule(mod);
+        }
+        // Don't reset moduleToConfigure here - let NavSidebar handle it
+      }
+    }
+  }, [moduleToConfigure, feedModules, selectedModule]);
+
+  async function runNow(moduleId: string, e: React.MouseEvent) {
+    e.stopPropagation();
     await api.post(`/api/modules/${moduleId}/run`, {}).catch(() => {});
   }
 
+  if (selectedModule) {
+    return <ModuleDetail module={selectedModule} onBack={() => setSelectedModule(null)} />;
+  }
+
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="max-w-2xl mx-auto px-6 py-6">
-        <div className="flex items-center justify-between mb-6">
-          <h2 className="text-xl text-slate-800 dark:text-slate-100 font-semibold">模块管理</h2>
+    <PageContainer>
+      <PageHeader
+        title="模块管理"
+        subtitle="配置自动化模块的参数与运行方式"
+        icon={LayoutGrid}
+        actions={
           <button
             onClick={() => alert(
               "在终端运行 Claude Code，告诉它：\n\n" +
-              "「帮我写一个 ABO 模块，放在 ~/.abo/modules/ 目录下，描述你想要的功能」\n\n" +
+              "「帮我写一个 ABO 模块，放在 ~/.abo/modules/ 目录下」\n\n" +
               "ABO 会自动检测并加载新模块。"
             )}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-500
-                       hover:bg-indigo-600 text-white text-sm font-medium transition-colors cursor-pointer"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "10px 16px",
+              borderRadius: "var(--radius-full)",
+              background: "linear-gradient(135deg, var(--color-primary), var(--color-secondary))",
+              color: "white",
+              fontSize: "0.875rem",
+              fontWeight: 600,
+              border: "none",
+              cursor: "pointer",
+              boxShadow: "0 4px 16px rgba(188, 164, 227, 0.35)",
+            }}
           >
-            <Terminal className="w-3.5 h-3.5" aria-hidden />
-            + 新建模块
+            <Terminal style={{ width: "16px", height: "16px" }} />
+            新建模块
           </button>
-        </div>
-
-        <div className="flex flex-col gap-2">
-          {modules.map((mod) => {
+        }
+      />
+      <PageContent maxWidth="1200px">
+        <Grid columns={2} gap="md">
+          {feedModules.map((mod) => {
             const unread = unreadCounts[mod.id] ?? 0;
             return (
               <div
                 key={mod.id}
-                className="flex items-center gap-4 p-4 rounded-2xl bg-white dark:bg-slate-800/60
-                           border border-slate-200 dark:border-slate-700/60"
+                onClick={() => setSelectedModule(mod)}
+                style={{
+                  background: "var(--bg-card)",
+                  backdropFilter: "blur(16px)",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--border-light)",
+                  boxShadow: "var(--shadow-soft)",
+                  padding: "clamp(16px, 2vw, 20px)",
+                  cursor: "pointer",
+                  transition: "all 0.3s ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = "translateY(-2px)";
+                  e.currentTarget.style.boxShadow = "var(--shadow-medium)";
+                  e.currentTarget.style.borderColor = "var(--color-primary)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = "translateY(0)";
+                  e.currentTarget.style.boxShadow = "var(--shadow-soft)";
+                  e.currentTarget.style.borderColor = "var(--border-light)";
+                }}
               >
-                <div className={`w-2 h-2 rounded-full shrink-0 ${mod.enabled ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600"}`} />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium text-slate-800 dark:text-slate-100">{mod.name}</p>
+                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: "12px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                    <div
+                      style={{
+                        width: "10px",
+                        height: "10px",
+                        borderRadius: "50%",
+                        background: mod.enabled ? "#10B981" : "var(--text-muted)",
+                        boxShadow: mod.enabled ? "0 0 8px rgba(16, 185, 129, 0.4)" : "none",
+                      }}
+                    />
+                    <h3
+                      style={{
+                        fontFamily: "'M PLUS Rounded 1c', sans-serif",
+                        fontSize: "clamp(1rem, 1.5vw, 1.125rem)",
+                        fontWeight: 700,
+                        color: "var(--text-main)",
+                      }}
+                    >
+                      {mod.name}
+                    </h3>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                     {unread > 0 && (
-                      <span className="text-xs px-1.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/30
-                                       text-indigo-600 dark:text-indigo-400">
-                        {unread}
+                      <span
+                        style={{
+                          fontSize: "0.75rem",
+                          fontWeight: 600,
+                          color: "var(--color-primary)",
+                          padding: "4px 10px",
+                          borderRadius: "var(--radius-full)",
+                          background: "rgba(188, 164, 227, 0.15)",
+                        }}
+                      >
+                        {unread} 未读
+                      </span>
+                    )}
+                    <ArrowRight style={{ width: "18px", height: "18px", color: "var(--text-muted)" }} />
+                  </div>
+                </div>
+
+                <p
+                  style={{
+                    fontSize: "0.9375rem",
+                    color: "var(--text-secondary)",
+                    marginBottom: "16px",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {MODULE_DESCRIPTIONS[mod.id] || "点击配置模块参数"}
+                </p>
+
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-muted)", fontSize: "0.8125rem" }}>
+                    <Clock style={{ width: "14px", height: "14px" }} />
+                    <span>{mod.schedule}</span>
+                    {mod.next_run && (
+                      <span style={{ color: "var(--text-muted)", opacity: 0.7 }}>
+                        · {new Date(mod.next_run).toLocaleString("zh-CN", {
+                          month: "short",
+                          day: "numeric",
+                          hour: "2-digit",
+                          minute: "2-digit"
+                        })}
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
-                    {mod.schedule}
-                    {mod.next_run && ` · 下次：${new Date(mod.next_run).toLocaleString("zh-CN", {
-                      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"
-                    })}`}
-                  </p>
+                  <button
+                    onClick={(e) => runNow(mod.id, e)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: "32px",
+                      height: "32px",
+                      borderRadius: "var(--radius-full)",
+                      background: "transparent",
+                      border: "none",
+                      color: "var(--text-muted)",
+                      cursor: "pointer",
+                      transition: "all 0.2s ease",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = "var(--bg-hover)";
+                      e.currentTarget.style.color = "var(--color-primary)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "transparent";
+                      e.currentTarget.style.color = "var(--text-muted)";
+                    }}
+                  >
+                    <Play style={{ width: "16px", height: "16px" }} />
+                  </button>
                 </div>
-                <button
-                  onClick={() => runNow(mod.id)}
-                  aria-label={`立即运行 ${mod.name}`}
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-500
-                             hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-colors cursor-pointer"
-                >
-                  <Play className="w-4 h-4" aria-hidden />
-                </button>
               </div>
             );
           })}
+        </Grid>
 
-          {modules.length === 0 && (
-            <p className="text-sm text-slate-400 dark:text-slate-500 py-8 text-center">
-              加载模块中…
-            </p>
-          )}
-        </div>
-      </div>
-    </div>
+        {feedModules.length === 0 && (
+          <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }}>
+            <p style={{ fontSize: "1rem" }}>加载模块中...</p>
+          </div>
+        )}
+      </PageContent>
+    </PageContainer>
   );
 }

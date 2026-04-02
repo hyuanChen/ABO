@@ -1,7 +1,10 @@
 import json
+import os
+from datetime import datetime
 from pathlib import Path
 
 _PREFS_PATH = Path.home() / ".abo" / "preferences.json"
+_LIKED_DIR = Path.home() / ".abo" / "liked"
 
 _DEFAULTS: dict = {
     "global": {
@@ -71,6 +74,85 @@ class PreferenceEngine:
             current = weights.get(tag, 1.0)
             weights[tag] = max(0.1, min(5.0, current * factor))
         self._save()
+
+    def save_liked_to_markdown(self, card: dict) -> Path | None:
+        """Save a liked card to category-specific markdown file in ~/.abo/liked/.
+
+        Args:
+            card: Dictionary with keys: title, summary, source_url, module_id, category, tags
+
+        Returns:
+            Path to the markdown file or None if not saved
+        """
+        # Map category to markdown file
+        category = card.get("category", "")
+        category_map = {
+            "paper": "papers.md",
+            "news": "news.md",
+            "idea": "ideas.md",
+            "todo": "todos.md",
+        }
+
+        # Default to ideas.md if category not recognized
+        filename = category_map.get(category, "ideas.md")
+
+        # Ensure liked directory exists
+        _LIKED_DIR.mkdir(parents=True, exist_ok=True)
+
+        file_path = _LIKED_DIR / filename
+
+        # Build frontmatter
+        title = card.get("title", "Untitled")
+        source_url = card.get("source_url", "")
+        module_id = card.get("module_id", "")
+        tags = card.get("tags", [])
+        date = datetime.now().strftime("%Y-%m-%d")
+
+        # Build markdown entry
+        frontmatter_lines = [
+            "---",
+            f'title: "{title}"',
+            f'source: "{module_id}"',
+        ]
+        if source_url:
+            frontmatter_lines.append(f'url: "{source_url}"')
+        frontmatter_lines.append(f'date: "{date}"')
+        if tags:
+            frontmatter_lines.append(f'tags: {tags}')
+        frontmatter_lines.append("---")
+        frontmatter_lines.append("")
+
+        # Add summary as content
+        summary = card.get("summary", "")
+        if summary:
+            frontmatter_lines.append(summary)
+            frontmatter_lines.append("")
+
+        # Add source link if available
+        if source_url:
+            frontmatter_lines.append(f"[Source]({source_url})")
+            frontmatter_lines.append("")
+
+        entry_text = "\n".join(frontmatter_lines)
+
+        # Atomic append: write to temp file, then append to target
+        try:
+            if file_path.exists():
+                # Append to existing file with separator
+                existing_content = file_path.read_text(encoding="utf-8")
+                new_content = existing_content + "\n" + entry_text
+            else:
+                # New file
+                new_content = entry_text
+
+            # Atomic write
+            tmp_path = file_path.with_suffix(".tmp")
+            tmp_path.write_text(new_content, encoding="utf-8")
+            os.replace(tmp_path, file_path)
+
+            return file_path
+        except Exception:
+            return None
 
     def all_data(self) -> dict:
         return self._data

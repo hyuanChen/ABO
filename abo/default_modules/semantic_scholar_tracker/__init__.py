@@ -1,0 +1,370 @@
+"""
+Semantic Scholar 论文追踪器 - 用于查找某篇论文的后续研究（引用该论文的论文）
+API Key: fxlcd3addOaOHGTwYCVLF1kmJBA0hYVy62KShAP4
+"""
+
+import json
+from datetime import datetime, timedelta
+from typing import Literal
+
+import httpx
+
+from abo.sdk import Module, Item, Card, claude_json
+
+
+class SemanticScholarTracker(Module):
+    id       = "semantic-scholar-tracker"
+    name     = "Semantic Scholar 后续论文"
+    schedule = "0 10 * * *"  # 每天早上10点
+    icon     = "git-branch"
+    output   = ["obsidian", "ui"]
+
+    # Semantic Scholar API Key
+    API_KEY = "fxlcd3addOaOHGTwYCVLF1kmJBA0hYVy62KShAP4"
+    BASE_URL = "https://api.semanticscholar.org/graph/v1"
+
+    # Rate limiting
+    _last_request_time = 0
+    _request_count = 0
+    _rate_limit_reset = None
+
+    async def _rate_limited_request(self, client: httpx.AsyncClient, url: str, params: dict = None) -> httpx.Response:
+        """Make a rate-limited request to Semantic Scholar API."""
+        import time
+        import asyncio
+
+        # Semantic Scholar 限制: 100 requests/5 minutes
+        # 使用保守的 1秒间隔
+        min_interval = 1.0
+        elapsed = time.time() - SemanticScholarTracker._last_request_time
+        if elapsed < min_interval:
+            await asyncio.sleep(min_interval - elapsed)
+
+        headers = {
+            "User-Agent": "ABO-SemanticScholar-Tracker/1.0",
+        }
+        if self.API_KEY:
+            headers["x-api-key"] = self.API_KEY
+
+        resp = await client.get(url, headers=headers, params=params, timeout=60)
+        SemanticScholarTracker._last_request_time = time.time()
+
+        # Check rate limit headers
+        remaining = resp.headers.get("x-ratelimit-remaining")
+        if remaining and int(remaining) < 10:
+            print(f"[s2] Rate limit low: {remaining} remaining, slowing down...")
+            await asyncio.sleep(3)
+
+        return resp
+
+    async def search_paper_by_title(self, client: httpx.AsyncClient, title: str) -> dict | None:
+        """通过标题搜索论文"""
+        url = f"{self.BASE_URL}/paper/search"
+        params = {
+            "query": title,
+            "fields": "paperId,title,authors,year,citationCount,referenceCount,abstract,fieldsOfStudy,publicationDate",
+            "limit": 5
+        }
+
+        resp = await self._rate_limited_request(client, url, params)
+
+        if resp.status_code != 200:
+            print(f"[s2] Search error: {resp.status_code} - {resp.text[:200]}")
+            return None
+
+        data = resp.json()
+        papers = data.get("data", [])
+
+        # 找到最匹配的（标题相似度最高）
+        if not papers:
+            return None
+
+        # 返回第一个结果（Semantic Scholar 的相关度排序通常很好）
+        return papers[0]
+
+    async def search_paper_by_arxiv_id(self, client: httpx.AsyncClient, arxiv_id: str) -> dict | None:
+        """通过 arXiv ID 搜索论文"""
+        # 移除版本号
+        arxiv_id_clean = arxiv_id.split("v")[0]
+
+        url = f"{self.BASE_URL}/paper/search"
+        params = {
+            "query": f"arxiv:{arxiv_id_clean}",
+            "fields": "paperId,title,authors,year,citationCount,referenceCount,abstract,fieldsOfStudy,publicationDate,externalIds",
+            "limit": 3
+        }
+
+        resp = await self._rate_limited_request(client, url, params)
+
+        if resp.status_code != 200:
+            print(f"[s2] Search by arxiv id error: {resp.status_code}")
+            return None
+
+        data = resp.json()
+        papers = data.get("data", [])
+
+        if papers:
+            return papers[0]
+
+        # 如果直接搜索没找到，尝试用 ArXiv 标题搜索
+        arxiv_url = f"https://export.arxiv.org/api/query?id_list={arxiv_id_clean}"
+        try:
+            arxiv_resp = await client.get(arxiv_url, timeout=30)
+            if arxiv_resp.status_code == 200:
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(arxiv_resp.text)
+                ns = {"a": "http://www.w3.org/2005/Atom"}
+                entry = root.find("a:entry", ns)
+                if entry is not None:
+                    title_elem = entry.find("a:title", ns)
+                    if title_elem is not None and title_elem.text:
+                        title = title_elem.text.strip().replace("\n", " ")
+                        return await self.search_paper_by_title(client, title)
+        except Exception as e:
+            print(f"[s2] Fallback to arxiv title search failed: {e}")
+
+        return None
+
+    async def get_citing_papers(self, client: httpx.AsyncClient, paper_id: str, limit: int = 20) -> list[dict]:
+        """获取引用该论文的论文列表"""
+        url = f"{self.BASE_URL}/paper/{paper_id}/citations"
+        params = {
+            "fields": "paperId,title,authors,year,citationCount,referenceCount,abstract,fieldsOfStudy,publicationDate,venue",
+            "limit": limit
+        }
+
+        resp = await self._rate_limited_request(client, url, params)
+
+        if resp.status_code != 200:
+            print(f"[s2] Get citations error: {resp.status_code} - {resp.text[:200]}")
+            return []
+
+        data = resp.json()
+        citing = data.get("data", [])
+
+        # 提取 citingPaper 字段
+        papers = []
+        for item in citing:
+            paper = item.get("citingPaper", {})
+            if paper:
+                papers.append(paper)
+
+        return papers
+
+    async def fetch_followups(
+        self,
+        query: str,  # arXiv ID 或论文标题
+        max_results: int = 20,
+        days_back: int = 7,
+        existing_ids: set[str] = None,
+    ) -> list[Item]:
+        """
+        查找某篇论文的后续研究（引用该论文的论文）
+
+        Args:
+            query: arXiv ID (如 "2501.12345") 或论文标题
+            max_results: 最大结果数
+            days_back: 只获取最近 N 天发表的论文
+            existing_ids: 已存在的论文 ID 集合（用于去重）
+        """
+        import asyncio
+
+        print(f"[s2] Searching for follow-ups of: {query}")
+
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            # Step 1: 找到源论文
+            if query.startswith("arxiv") or ":" in query or "/" in query:
+                # 提取 arXiv ID
+                arxiv_id = query.replace("arxiv:", "").replace("arxiv.org/abs/", "").strip("/")
+                source_paper = await self.search_paper_by_arxiv_id(client, arxiv_id)
+            elif len(query) < 15 and (query[0:4].isdigit() or "." in query):
+                # 看起来像是 arXiv ID 格式
+                source_paper = await self.search_paper_by_arxiv_id(client, query)
+            else:
+                # 按标题搜索
+                source_paper = await self.search_paper_by_title(client, query)
+
+            if not source_paper:
+                print(f"[s2] Source paper not found: {query}")
+                return []
+
+            paper_id = source_paper.get("paperId")
+            paper_title = source_paper.get("title", "Unknown")
+            print(f"[s2] Found source paper: {paper_title} (ID: {paper_id})")
+
+            # Step 2: 获取引用该论文的论文
+            citing_papers = await self.get_citing_papers(client, paper_id, limit=max_results * 2)
+            print(f"[s2] Found {len(citing_papers)} citing papers")
+
+            # Step 3: 过滤和转换
+            items = []
+            cutoff = datetime.utcnow() - timedelta(days=days_back)
+            existing_ids = existing_ids or set()
+
+            for paper in citing_papers:
+                # 去重
+                paper_id_new = paper.get("paperId", "")
+                if paper_id_new in existing_ids:
+                    continue
+
+                # 时间过滤
+                pub_date = paper.get("publicationDate", "")
+                if pub_date:
+                    try:
+                        pub_dt = datetime.fromisoformat(pub_date.replace("Z", "+00:00")).replace(tzinfo=None)
+                        if pub_dt < cutoff:
+                            continue
+                    except ValueError:
+                        # 如果日期解析失败，使用年份
+                        year = paper.get("year", 0)
+                        if year and year < datetime.now().year:
+                            continue
+
+                items.append(self._paper_to_item(paper, source_paper_title=paper_title))
+
+                if len(items) >= max_results:
+                    break
+
+            print(f"[s2] Filtered to {len(items)} recent follow-up papers")
+            return items
+
+    def _paper_to_item(self, paper: dict, source_paper_title: str = "") -> Item:
+        """将 Semantic Scholar 论文转换为 Item"""
+        paper_id = paper.get("paperId", "")
+        title = paper.get("title", "Untitled")
+        abstract = paper.get("abstract", "")
+
+        authors = []
+        for author in paper.get("authors", []):
+            name = author.get("name", "")
+            if name:
+                authors.append(name)
+
+        year = paper.get("year", "")
+        venue = paper.get("venue", "")
+        citation_count = paper.get("citationCount", 0)
+        reference_count = paper.get("referenceCount", 0)
+        pub_date = paper.get("publicationDate", "")
+        fields = paper.get("fieldsOfStudy", [])
+
+        # 构建 URL
+        s2_url = f"https://www.semanticscholar.org/paper/{paper_id}"
+
+        # 尝试获取 arXiv ID
+        arxiv_id = ""
+        external_ids = paper.get("externalIds", {})
+        if external_ids:
+            arxiv_id = external_ids.get("ArXiv", "")
+
+        arxiv_url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else ""
+
+        # 唯一 ID: 优先使用 arXiv ID，否则用 S2 ID
+        item_id = arxiv_id if arxiv_id else f"s2_{paper_id}"
+
+        return Item(
+            id=item_id,
+            raw={
+                "title": title,
+                "abstract": abstract,
+                "authors": authors,
+                "author_count": len(authors),
+                "year": year,
+                "venue": venue,
+                "published": pub_date,
+                "citation_count": citation_count,
+                "reference_count": reference_count,
+                "fields_of_study": fields,
+                "paper_id": paper_id,
+                "arxiv_id": arxiv_id,
+                "source_paper_title": source_paper_title,  # 被引用的源论文
+                "s2_url": s2_url,
+                "arxiv_url": arxiv_url,
+                "url": arxiv_url if arxiv_url else s2_url,
+                "external_ids": external_ids,
+            },
+        )
+
+    async def fetch(self, **kwargs) -> list[Item]:
+        """Module SDK 兼容的 fetch 方法"""
+        return await self.fetch_followups(**kwargs)
+
+    async def process(self, items: list[Item], prefs: dict) -> list[Card]:
+        """Process papers into Cards with Claude analysis"""
+        import asyncio
+        cards = []
+
+        for item in items:
+            p = item.raw
+
+            # Build prompt for follow-up papers (强调这是后续研究)
+            source_title = p.get("source_paper_title", "")
+            fields_str = ", ".join(p.get("fields_of_study", [])[:3])
+            citation_info = f"被引用 {p['citation_count']} 次" if p.get("citation_count") else ""
+
+            prompt = (
+                f'分析以下后续研究论文（引用了 "{source_title}"），返回 JSON（不要有其他文字）：\n'
+                f'{{"score":<1-10整数>,"summary":"<50字以内中文摘要>",'
+                f'"tags":["<tag1>","<tag2>","<tag3>"],"contribution":"<一句话核心创新>"}}\n\n'
+                f"标题：{p['title']}\n"
+                f"领域：{fields_str}\n"
+                f"{citation_info}\n"
+                f"摘要：{p['abstract'][:800] if p.get('abstract') else 'No abstract available'}"
+            )
+
+            try:
+                result = await asyncio.wait_for(claude_json(prompt, prefs=prefs), timeout=30)
+            except asyncio.TimeoutError:
+                print(f"[s2] Claude timeout for {item.id}, using fallback")
+                result = {}
+            except Exception as e:
+                print(f"[s2] Claude error for {item.id}: {e}")
+                result = {}
+
+            # Build metadata
+            first_author = p["authors"][0].split()[-1] if p["authors"] else "Unknown"
+            year = p.get("year", datetime.now().year)
+            slug = p["title"][:40].replace(" ", "-").replace("/", "-")
+            source_slug = source_title[:20].replace(" ", "-").replace("/", "-") if source_title else "unknown"
+
+            metadata = {
+                "abo-type": "semantic-scholar-paper",
+                "authors": p["authors"],
+                "author_count": p.get("author_count", len(p["authors"])),
+                "paper_id": p.get("paper_id", ""),
+                "arxiv_id": p.get("arxiv_id", ""),
+                "year": year,
+                "venue": p.get("venue", ""),
+                "published": p.get("published", ""),
+                "citation_count": p.get("citation_count", 0),
+                "reference_count": p.get("reference_count", 0),
+                "fields_of_study": p.get("fields_of_study", []),
+                "source_paper_title": source_title,
+                "contribution": result.get("contribution", ""),
+                "abstract": p.get("abstract", ""),
+                "keywords": result.get("tags", []),
+                "s2_url": p.get("s2_url", ""),
+                "arxiv_url": p.get("arxiv_url", ""),
+            }
+
+            cards.append(Card(
+                id=item.id,
+                title=p["title"],
+                summary=result.get("summary", p.get("abstract", "")[:150]),
+                score=min(result.get("score", 5), 10) / 10,
+                tags=result.get("tags", []) + ["follow-up"] + (p.get("fields_of_study", [])[:1]),
+                source_url=p.get("url", p.get("s2_url", "")),
+                obsidian_path=f"Literature/FollowUps/{source_slug}/{first_author}{year}-{slug}.md",
+                metadata=metadata,
+            ))
+
+        return cards
+
+
+# 导出供前端使用
+def get_default_queries() -> list[dict]:
+    """获取默认的 follow-up 查询列表"""
+    return [
+        {"name": "VGGT", "query": "VGGT", "description": "Visual Geometry Grounded Transformer 后续研究"},
+        {"name": "SAM", "query": "Segment Anything", "description": "Segment Anything Model 后续研究"},
+        {"name": "GPT-4", "query": "GPT-4", "description": "GPT-4 相关后续研究"},
+    ]

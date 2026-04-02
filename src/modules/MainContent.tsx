@@ -8,6 +8,7 @@ import ArxivTracker from "./arxiv/ArxivTracker";
 import HealthDashboard from "./health/HealthDashboard";
 import Settings from "./settings/Settings";
 import BubbleVault from "./vault/BubbleVault";
+import ModulePanel from "./feed/ModulePanel";
 
 export default function MainContent() {
   const activeTab = useStore((s) => s.activeTab);
@@ -48,6 +49,7 @@ export default function MainContent() {
       {activeTab === "arxiv"      && <ArxivTracker />}
       {activeTab === "health"     && <HealthDashboard />}
       {activeTab === "settings"   && <Settings />}
+      {activeTab === "modules"    && <ModulePanel />}
     </main>
   );
 }
