@@ -878,29 +878,35 @@ async def save_s2_to_literature(data: dict):
     if not lit_path:
         raise HTTPException(400, "Literature path not configured")
 
-    # Get source paper title for subfolder naming (first 5 letters)
+    # Get metadata
     meta = paper.get("metadata", {})
-    source_title = meta.get("source_paper_title", "unknown")
-    # Extract first 5 alphanumeric characters from source title
-    subfolder_prefix = "".join(c for c in source_title[:10] if c.isalnum())[:5].upper()
-    if not subfolder_prefix:
-        subfolder_prefix = "FOLLOWUP"
+    title = paper.get("title", "untitled")
+    paper_id = meta.get("paper_id", "unknown")
 
-    # Build target path with subfolder: {Prefix}_后续论文/{paper_id}/
-    target_dir = lit_path / "FollowUps" / f"{subfolder_prefix}_后续论文"
-    paper_folder = target_dir / paper.get("id", "unknown")
+    # Build source folder name: {SourceTitle}_FollowUp (first 8 chars of source title)
+    source_title = meta.get("source_paper_title", "Unknown")
+    source_slug = "".join(c for c in source_title[:8] if c.isalnum()).upper() or "FOLLOWUP"
+    base_folder_name = f"{source_slug}_FollowUp"
+
+    # Build paper folder name: {AuthorYear}-{ShortTitle}
+    authors = meta.get("authors", ["Unknown"])
+    first_author = authors[0].split()[-1].replace(",", "").replace(" ", "") if authors else "Unknown"
+    year = meta.get("year", datetime.now().year)
+    short_title = "".join(c for c in title[:20] if c.isalnum()).upper()
+    paper_folder_name = f"{first_author}{year}-{short_title}"
+
+    # Build target path: FollowUps/{Source}_FollowUp/{AuthorYear-Title}/
+    base_dir = lit_path / "FollowUps" / base_folder_name
+    paper_folder = base_dir / paper_folder_name
     paper_folder.mkdir(parents=True, exist_ok=True)
 
-    # Figures folder
+    # Figures folder inside paper folder
     figures_dir = paper_folder / "figures"
     figures_dir.mkdir(exist_ok=True)
 
-    # Build filename from title
-    title = paper.get("title", "untitled")
-    paper_id = meta.get("paper_id", "unknown")[:12]
-    safe_title = "".join(c for c in title[:40] if c.isalnum() or c in " -_").strip()
-    filename = f"{paper_id}-{safe_title}.md"
-    target_path = paper_folder / filename
+    # Markdown filename matches folder name
+    md_filename = f"{paper_folder_name}.md"
+    target_path = paper_folder / md_filename
 
     # Try to fetch figures from arXiv if arxiv_id exists
     local_figures = []
