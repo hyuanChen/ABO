@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import importlib.util
 from pathlib import Path
 from watchdog.observers import Observer
@@ -12,7 +10,7 @@ class ModuleRegistry:
     def __init__(self):
         self._modules: dict[str, Module] = {}
 
-    def load_all(self):
+    def load_all(self) -> None:
         # 内置模块
         builtin_dir = Path(__file__).parent.parent / "default_modules"
         if builtin_dir.exists():
@@ -67,12 +65,6 @@ class ModuleRegistry:
 
     def get(self, module_id: str) -> Module | None:
         return self._modules.get(module_id)
-
-    def apply_state(self, store: "ModuleStateStore") -> None:
-        from ..runtime.state import ModuleStateStore
-        if not isinstance(store, ModuleStateStore):
-            raise TypeError("store must be a ModuleStateStore instance")
-        store.apply_to_registry(self)
 
 
 def start_watcher(registry: ModuleRegistry, on_change):
