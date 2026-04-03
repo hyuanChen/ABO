@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Settings, Clock, Globe, RefreshCw, Hash } from "lucide-react";
 import { api } from "../core/api";
 import { useStore } from "../core/store";
+import ToggleSwitch from "./ToggleSwitch";
 
 interface ModuleConfig {
   id: string;
@@ -53,6 +54,18 @@ export default function ModuleConfigPanel() {
       addToast({ kind: "error", title: "加载模块配置失败" });
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function toggleModule(moduleId: string, currentEnabled: boolean) {
+    try {
+      await api.patch(`/api/modules/${moduleId}`, { enabled: !currentEnabled });
+      setModules((prev) =>
+        prev.map((m) => (m.id === moduleId ? { ...m, enabled: !currentEnabled } : m))
+      );
+      addToast({ kind: "success", title: currentEnabled ? "模块已禁用" : "模块已启用" });
+    } catch {
+      addToast({ kind: "error", title: "操作失败" });
     }
   }
 
@@ -142,6 +155,11 @@ export default function ModuleConfigPanel() {
               </div>
 
               <div className="flex items-center gap-2">
+                <ToggleSwitch
+                  enabled={module.enabled}
+                  onChange={() => toggleModule(module.id, module.enabled)}
+                  size="sm"
+                />
                 <span
                   className="text-xs px-2 py-1 rounded-md"
                   style={{

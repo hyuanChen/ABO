@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, Play, Save, Settings, BookOpen, Info, Clock, CheckCircle } from "lucide-react";
+import ToggleSwitch from "../../components/ToggleSwitch";
 import { api } from "../../core/api";
 import { useStore, FeedModule } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Card, Grid } from "../../components/Layout";
@@ -430,33 +431,15 @@ export default function ModuleDetail({ module, onBack }: Props) {
                     <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>启用模块</div>
                     <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)" }}>关闭后该模块将停止定时运行</div>
                   </div>
-                  <button
-                    onClick={() => setModuleEnabled((v) => !v)}
-                    style={{
-                      width: "44px",
-                      height: "24px",
-                      borderRadius: "9999px",
-                      border: "none",
-                      cursor: "pointer",
-                      background: moduleEnabled ? "var(--color-success)" : "var(--text-muted)",
-                      position: "relative",
-                      transition: "background 0.2s ease",
-                    }}
-                  >
-                    <span
-                      style={{
-                        position: "absolute",
-                        top: "2px",
-                        left: moduleEnabled ? "22px" : "2px",
-                        width: "20px",
-                        height: "20px",
-                        borderRadius: "50%",
-                        background: "white",
-                        transition: "left 0.2s ease",
-                      }}
-                    />
-                  </button>
+                  <ToggleSwitch enabled={moduleEnabled} onChange={() => setModuleEnabled((v) => !v)} />
                 </div>
+
+                {module.next_run && (
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+                    <Info style={{ width: "14px", height: "14px" }} />
+                    预计下次运行：{new Date(module.next_run).toLocaleString("zh-CN")}
+                  </div>
+                )}
 
                 {/* Schedule Selector */}
                 <div>
@@ -481,23 +464,28 @@ export default function ModuleDetail({ module, onBack }: Props) {
                     ))}
                   </select>
                   {scheduleMode === "custom" && (
-                    <input
-                      type="text"
-                      value={customSchedule}
-                      onChange={(e) => setCustomSchedule(e.target.value)}
-                      placeholder="例如：0 8 * * *"
-                      style={{
-                        width: "100%",
-                        marginTop: "12px",
-                        padding: "12px 16px",
-                        borderRadius: "var(--radius-full)",
-                        border: "1px solid var(--border-light)",
-                        background: "var(--bg-app)",
-                        color: "var(--text-main)",
-                        fontSize: "0.9375rem",
-                        outline: "none",
-                      }}
-                    />
+                    <>
+                      <input
+                        type="text"
+                        value={customSchedule}
+                        onChange={(e) => setCustomSchedule(e.target.value)}
+                        placeholder="例如：0 8 * * *"
+                        style={{
+                          width: "100%",
+                          marginTop: "12px",
+                          padding: "12px 16px",
+                          borderRadius: "var(--radius-full)",
+                          border: "1px solid var(--border-light)",
+                          background: "var(--bg-app)",
+                          color: "var(--text-main)",
+                          fontSize: "0.9375rem",
+                          outline: "none",
+                        }}
+                      />
+                      <div style={{ marginTop: "8px", fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                        格式：分 时 日 月 周（如 0 8 * * 1 表示每周一 8:00）
+                      </div>
+                    </>
                   )}
                 </div>
 
