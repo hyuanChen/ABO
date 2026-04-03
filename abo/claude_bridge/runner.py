@@ -12,7 +12,7 @@ class CliRunner:
 
     CLI_CONFIGS = {
         'claude': {
-            'command': ['claude', '--print', '--output-format', 'stream-json'],
+            'command': ['claude', '--print'],
             'env': {},
             'protocol': 'raw',
         },

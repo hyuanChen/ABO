@@ -2,7 +2,7 @@ import { useStore } from "../core/store";
 import Feed from "./feed/Feed";
 import Literature from "./literature/Literature";
 import Journal from "./journal/Journal";
-import ClaudePanel from "./claude-panel/ClaudePanel";
+import { ChatPanel } from "./claude-panel/ChatPanel";
 import Profile from "./profile/Profile";
 import ArxivTracker from "./arxiv/ArxivTracker";
 import HealthDashboard from "./health/HealthDashboard";
@@ -45,7 +45,7 @@ export default function MainContent() {
       {activeTab === "vault"      && <BubbleVault />}
       {activeTab === "literature" && <Literature />}
       {activeTab === "journal"    && <Journal />}
-      {activeTab === "claude"     && <ClaudePanel />}
+      {activeTab === "claude"     && <ChatPanel />}
       {activeTab === "arxiv"      && <ArxivTracker />}
       {activeTab === "health"     && <HealthDashboard />}
       {activeTab === "settings"   && <Settings />}
