@@ -1,22 +1,13 @@
-"""对话历史存储 - SQLite"""
+"""对话数据存储模块"""
+
 import sqlite3
 import json
 import os
-import uuid
+from typing import List, Optional
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, List
-
-
-@dataclass
-class Message:
-    id: str
-    conversation_id: str
-    role: str
-    content: str
-    msg_id: Optional[str] = None
-    metadata: Optional[str] = None
-    created_at: Optional[datetime] = None
+import threading
+import uuid
 
 
 @dataclass
@@ -25,141 +16,277 @@ class Conversation:
     cli_type: str
     session_id: str
     title: str
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    workspace: str
+    status: str
+    created_at: int
+    updated_at: int
+
+
+@dataclass
+class Message:
+    id: str
+    conversation_id: str
+    msg_id: Optional[str]
+    role: str
+    content: str
+    content_type: str
+    metadata: Optional[str]
+    status: str
+    created_at: int
 
 
 class ConversationStore:
+    """
+    对话存储管理器
+
+    功能：
+    - 对话 CRUD
+    - 消息 CRUD + 流式更新
+    - 历史记录查询
+    """
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self, db_path: str = "~/.abo/data/conversations.db"):
+        if hasattr(self, '_initialized'):
+            return
+
         self.db_path = os.path.expanduser(db_path)
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_db()
+        self._initialized = True
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """获取数据库连接"""
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
+        """初始化数据库表"""
+        with self._get_conn() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY,
                     cli_type TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    title TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    session_id TEXT NOT NULL UNIQUE,
+                    title TEXT DEFAULT '',
+                    workspace TEXT DEFAULT '',
+                    status TEXT DEFAULT 'active',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS messages (
                     id TEXT PRIMARY KEY,
                     conversation_id TEXT NOT NULL,
+                    msg_id TEXT,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    msg_id TEXT,
+                    content_type TEXT DEFAULT 'text',
                     metadata TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+                    status TEXT DEFAULT 'completed',
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
-                CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at);
+                CREATE INDEX IF NOT EXISTS idx_messages_conv_time
+                    ON messages(conversation_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_messages_msgid
+                    ON messages(msg_id);
+                CREATE INDEX IF NOT EXISTS idx_conversations_updated
+                    ON conversations(updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_conversations_session
+                    ON conversations(session_id);
             """)
 
-    def create_conversation(self, cli_type: str, session_id: str, title: str = "") -> str:
+    # === 对话操作 ===
+
+    def create_conversation(self, cli_type: str, session_id: str,
+                           title: str = "", workspace: str = "") -> str:
+        """创建新对话"""
         conv_id = str(uuid.uuid4())
-        with sqlite3.connect(self.db_path) as conn:
+        now = int(datetime.now().timestamp() * 1000)
+
+        with self._get_conn() as conn:
             conn.execute(
-                "INSERT INTO conversations (id, cli_type, session_id, title) VALUES (?, ?, ?, ?)",
-                (conv_id, cli_type, session_id, title or f"New {cli_type} chat")
+                """INSERT INTO conversations
+                   (id, cli_type, session_id, title, workspace, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'active', ?, ?)""",
+                (conv_id, cli_type, session_id, title, workspace, now, now)
             )
+
         return conv_id
 
-    def add_message(self, conv_id: str, role: str, content: str,
-                    msg_id: Optional[str] = None, metadata: Optional[dict] = None):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """INSERT INTO messages (id, conversation_id, role, content, msg_id, metadata)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (str(uuid.uuid4()), conv_id, role, content, msg_id,
-                 json.dumps(metadata) if metadata else None)
-            )
-            conn.execute(
-                "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (conv_id,)
-            )
-
-    def get_messages(self, conv_id: str, limit: int = 100) -> List[Message]:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """SELECT * FROM messages WHERE conversation_id = ?
-                   ORDER BY created_at ASC LIMIT ?""",
-                (conv_id, limit)
-            ).fetchall()
-            return [
-                Message(
-                    id=row['id'],
-                    conversation_id=row['conversation_id'],
-                    role=row['role'],
-                    content=row['content'],
-                    msg_id=row['msg_id'],
-                    metadata=row['metadata'],
-                    created_at=row['created_at']
-                )
-                for row in rows
-            ]
-
-    def list_conversations(self, cli_type: Optional[str] = None) -> List[Conversation]:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            if cli_type:
-                rows = conn.execute(
-                    """SELECT * FROM conversations WHERE cli_type = ?
-                       ORDER BY updated_at DESC""",
-                    (cli_type,)
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """SELECT * FROM conversations ORDER BY updated_at DESC"""
-                ).fetchall()
-            return [
-                Conversation(
-                    id=row['id'],
-                    cli_type=row['cli_type'],
-                    session_id=row['session_id'],
-                    title=row['title'],
-                    created_at=row['created_at'],
-                    updated_at=row['updated_at']
-                )
-                for row in rows
-            ]
-
     def get_conversation(self, conv_id: str) -> Optional[Conversation]:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        """获取对话信息"""
+        with self._get_conn() as conn:
             row = conn.execute(
                 "SELECT * FROM conversations WHERE id = ?",
                 (conv_id,)
             ).fetchone()
+
             if row:
-                return Conversation(
-                    id=row['id'],
-                    cli_type=row['cli_type'],
-                    session_id=row['session_id'],
-                    title=row['title'],
-                    created_at=row['created_at'],
-                    updated_at=row['updated_at']
-                )
+                return Conversation(**dict(row))
             return None
 
-    def delete_conversation(self, conv_id: str) -> bool:
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "DELETE FROM conversations WHERE id = ?",
+    def get_conversation_by_session(self, session_id: str) -> Optional[Conversation]:
+        """通过 session_id 获取对话"""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM conversations WHERE session_id = ?",
+                (session_id,)
+            ).fetchone()
+
+            if row:
+                return Conversation(**dict(row))
+            return None
+
+    def list_conversations(self, cli_type: Optional[str] = None,
+                          limit: int = 50, offset: int = 0) -> List[Conversation]:
+        """列出对话"""
+        with self._get_conn() as conn:
+            if cli_type:
+                rows = conn.execute(
+                    """SELECT * FROM conversations
+                       WHERE cli_type = ? AND status = 'active'
+                       ORDER BY updated_at DESC LIMIT ? OFFSET ?""",
+                    (cli_type, limit, offset)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM conversations
+                       WHERE status = 'active'
+                       ORDER BY updated_at DESC LIMIT ? OFFSET ?""",
+                    (limit, offset)
+                ).fetchall()
+
+            return [Conversation(**dict(row)) for row in rows]
+
+    def update_conversation_title(self, conv_id: str, title: str):
+        """更新对话标题"""
+        now = int(datetime.now().timestamp() * 1000)
+
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+                (title, now, conv_id)
+            )
+
+    def close_conversation(self, conv_id: str):
+        """关闭对话"""
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE conversations SET status = 'closed' WHERE id = ?",
                 (conv_id,)
             )
-            return cursor.rowcount > 0
 
-    def update_title(self, conv_id: str, title: str):
-        with sqlite3.connect(self.db_path) as conn:
+    def delete_conversation(self, conv_id: str):
+        """删除对话（级联删除消息）"""
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
+
+    # === 消息操作 ===
+
+    def add_message(self, conv_id: str, role: str, content: str,
+                   msg_id: Optional[str] = None,
+                   content_type: str = "text",
+                   metadata: Optional[dict] = None,
+                   status: str = "completed") -> str:
+        """添加消息"""
+        message_id = str(uuid.uuid4())
+        now = int(datetime.now().timestamp() * 1000)
+
+        with self._get_conn() as conn:
             conn.execute(
-                "UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (title, conv_id)
+                """INSERT INTO messages
+                   (id, conversation_id, msg_id, role, content,
+                    content_type, metadata, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (message_id, conv_id, msg_id, role, content,
+                 content_type, json.dumps(metadata) if metadata else None,
+                 status, now)
             )
+
+            # 更新对话时间
+            conn.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, conv_id)
+            )
+
+        return message_id
+
+    def update_message_content(self, msg_id: str, content: str):
+        """更新消息内容（流式更新）"""
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE messages SET content = ? WHERE msg_id = ?",
+                (content, msg_id)
+            )
+
+    def finalize_message(self, msg_id: str):
+        """完成流式消息"""
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE messages SET status = 'completed' WHERE msg_id = ?",
+                (msg_id,)
+            )
+
+    def get_messages(self, conv_id: str, limit: int = 100,
+                    before_id: Optional[str] = None) -> List[Message]:
+        """获取消息列表"""
+        with self._get_conn() as conn:
+            if before_id:
+                # 分页加载
+                before_time = conn.execute(
+                    "SELECT created_at FROM messages WHERE id = ?",
+                    (before_id,)
+                ).fetchone()
+
+                if before_time:
+                    rows = conn.execute(
+                        """SELECT * FROM messages
+                           WHERE conversation_id = ? AND created_at < ?
+                           ORDER BY created_at DESC LIMIT ?""",
+                        (conv_id, before_time[0], limit)
+                    ).fetchall()
+                else:
+                    rows = []
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM messages
+                       WHERE conversation_id = ?
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (conv_id, limit)
+                ).fetchall()
+
+            # 转为正序
+            messages = [Message(**dict(row)) for row in rows]
+            messages.reverse()
+            return messages
+
+    def search_messages(self, conv_id: str, query: str, limit: int = 20) -> List[Message]:
+        """搜索消息"""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM messages
+                   WHERE conversation_id = ? AND content LIKE ?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (conv_id, f"%{query}%", limit)
+            ).fetchall()
+
+            messages = [Message(**dict(row)) for row in rows]
+            messages.reverse()
+            return messages
+
+
+# 全局实例
+conversation_store = ConversationStore()

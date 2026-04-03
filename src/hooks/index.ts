@@ -1,1 +1,1 @@
-export { useCliChat, type StreamEvent } from './useCliChat';
+export { useChat, type UseChatReturn } from './useChat';

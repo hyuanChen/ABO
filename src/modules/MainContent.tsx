@@ -2,7 +2,7 @@ import { useStore } from "../core/store";
 import Feed from "./feed/Feed";
 import Literature from "./literature/Literature";
 import Journal from "./journal/Journal";
-import { ChatPanel } from "./claude-panel/ChatPanel";
+import { ChatPanel } from "./chat/ChatPanel";
 import Profile from "./profile/Profile";
 import ArxivTracker from "./arxiv/ArxivTracker";
 import HealthDashboard from "./health/HealthDashboard";
