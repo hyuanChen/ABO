@@ -19,32 +19,44 @@ function KeywordItem({ keyword, score, count, onRemove }: KeywordItemProps) {
 
   return (
     <div
-      className={`flex items-center justify-between px-3 py-2 rounded-lg border transition-all ${
-        isPositive
-          ? "bg-emerald-950/30 border-emerald-800/50 hover:border-emerald-700"
-          : "bg-rose-950/30 border-rose-800/50 hover:border-rose-700"
-      }`}
+      className="flex items-center justify-between px-3 py-2 rounded-lg border transition-all group"
+      style={{
+        background: isPositive
+          ? "rgba(168, 230, 207, 0.1)"
+          : "rgba(255, 183, 178, 0.1)",
+        borderColor: isPositive
+          ? "rgba(168, 230, 207, 0.3)"
+          : "rgba(255, 183, 178, 0.3)",
+      }}
     >
       <div className="flex items-center gap-2">
         {isPositive ? (
-          <ThumbsUp className="w-4 h-4 text-emerald-400" />
+          <ThumbsUp className="w-4 h-4" style={{ color: "var(--color-success)" }} />
         ) : (
-          <ThumbsDown className="w-4 h-4 text-rose-400" />
+          <ThumbsDown className="w-4 h-4" style={{ color: "var(--color-danger)" }} />
         )}
-        <span className="text-sm text-slate-200">{keyword}</span>
-        <span className="text-xs text-slate-500">({count}次)</span>
+        <span style={{ color: "var(--text-secondary)" }}>{keyword}</span>
+        <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
+          ({count}次)
+        </span>
       </div>
       <div className="flex items-center gap-2">
         <div
-          className={`h-1.5 rounded-full transition-all ${
-            isPositive ? "bg-emerald-500" : "bg-rose-500"
-          }`}
-          style={{ width: `${intensity}px` }}
+          className="h-1.5 rounded-full transition-all"
+          style={{
+            width: `${intensity}px`,
+            background: isPositive
+              ? "var(--color-success)"
+              : "var(--color-danger)",
+          }}
         />
         <span
-          className={`text-xs font-mono w-12 text-right ${
-            isPositive ? "text-emerald-400" : "text-rose-400"
-          }`}
+          className="text-xs font-mono w-12 text-right"
+          style={{
+            color: isPositive
+              ? "var(--color-success)"
+              : "var(--color-danger)",
+          }}
         >
           {score > 0 ? "+" : ""}
           {score.toFixed(2)}
@@ -52,9 +64,10 @@ function KeywordItem({ keyword, score, count, onRemove }: KeywordItemProps) {
         {onRemove && (
           <button
             onClick={onRemove}
-            className="p-1 hover:bg-slate-700 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+            className="p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+            style={{ background: "var(--bg-hover)" }}
           >
-            <X className="w-3 h-3 text-slate-500" />
+            <X className="w-3 h-3" style={{ color: "var(--text-muted)" }} />
           </button>
         )}
       </div>
@@ -93,7 +106,10 @@ export default function KeywordPreferences() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-40 text-slate-500">
+      <div
+        className="flex items-center justify-center h-40"
+        style={{ color: "var(--text-muted)" }}
+      >
         <TrendingUp className="w-5 h-5 animate-pulse mr-2" />
         加载偏好数据...
       </div>
@@ -105,12 +121,18 @@ export default function KeywordPreferences() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Hash className="w-5 h-5 text-indigo-400" />
-          <h3 className="text-lg font-semibold text-white">关键词偏好</h3>
+          <Hash className="w-5 h-5" style={{ color: "var(--color-primary)" }} />
+          <h3
+            className="text-lg font-semibold"
+            style={{ color: "var(--text-main)" }}
+          >
+            关键词偏好
+          </h3>
         </div>
         <button
           onClick={loadPreferences}
-          className="text-xs text-slate-400 hover:text-white transition-colors"
+          className="text-xs transition-colors hover:opacity-80"
+          style={{ color: "var(--text-muted)" }}
         >
           刷新
         </button>
@@ -118,40 +140,72 @@ export default function KeywordPreferences() {
 
       {/* Summary Stats */}
       <div className="grid grid-cols-3 gap-3">
-        <div className="bg-slate-800/50 rounded-lg p-3 text-center">
-          <div className="text-2xl font-bold text-emerald-400">
+        <div
+          className="rounded-lg p-3 text-center"
+          style={{ background: "var(--bg-hover)" }}
+        >
+          <div
+            className="text-2xl font-bold"
+            style={{ color: "var(--color-success)" }}
+          >
             {likedKeywords.length}
           </div>
-          <div className="text-xs text-slate-500">喜欢</div>
+          <div style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
+            喜欢
+          </div>
         </div>
-        <div className="bg-slate-800/50 rounded-lg p-3 text-center">
-          <div className="text-2xl font-bold text-rose-400">
+        <div
+          className="rounded-lg p-3 text-center"
+          style={{ background: "var(--bg-hover)" }}
+        >
+          <div
+            className="text-2xl font-bold"
+            style={{ color: "var(--color-danger)" }}
+          >
             {dislikedKeywords.length}
           </div>
-          <div className="text-xs text-slate-500">不喜欢</div>
+          <div style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
+            不喜欢
+          </div>
         </div>
-        <div className="bg-slate-800/50 rounded-lg p-3 text-center">
-          <div className="text-2xl font-bold text-indigo-400">
+        <div
+          className="rounded-lg p-3 text-center"
+          style={{ background: "var(--bg-hover)" }}
+        >
+          <div
+            className="text-2xl font-bold"
+            style={{ color: "var(--color-primary)" }}
+          >
             {Object.keys(keywordPrefs).length}
           </div>
-          <div className="text-xs text-slate-500">总计</div>
+          <div style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
+            总计
+          </div>
         </div>
       </div>
 
       {/* Top Keywords */}
       {topKeywords.length > 0 && (
         <div>
-          <h4 className="text-sm font-medium text-slate-300 mb-3">
+          <h4
+            className="text-sm font-medium mb-3"
+            style={{ color: "var(--text-secondary)" }}
+          >
             最喜欢的关键词
           </h4>
           <div className="flex flex-wrap gap-2">
             {topKeywords.slice(0, 8).map(([kw, score]) => (
               <span
                 key={kw}
-                className="px-3 py-1 bg-emerald-950/50 border border-emerald-800/50 rounded-full text-sm text-emerald-300"
+                className="px-3 py-1 rounded-full text-sm"
+                style={{
+                  background: "rgba(168, 230, 207, 0.15)",
+                  border: "1px solid rgba(168, 230, 207, 0.3)",
+                  color: "var(--color-success)",
+                }}
               >
                 {kw}
-                <span className="ml-1 text-emerald-500">
+                <span style={{ opacity: 0.7, marginLeft: "4px" }}>
                   +{score.toFixed(2)}
                 </span>
               </span>
@@ -163,7 +217,10 @@ export default function KeywordPreferences() {
       {/* Liked Keywords */}
       {likedKeywords.length > 0 && (
         <div>
-          <h4 className="text-sm font-medium text-emerald-400 mb-3 flex items-center gap-2">
+          <h4
+            className="text-sm font-medium mb-3 flex items-center gap-2"
+            style={{ color: "var(--color-success)" }}
+          >
             <ThumbsUp className="w-4 h-4" />
             喜欢 ({likedKeywords.length})
           </h4>
@@ -186,7 +243,10 @@ export default function KeywordPreferences() {
       {/* Disliked Keywords */}
       {dislikedKeywords.length > 0 && (
         <div>
-          <h4 className="text-sm font-medium text-rose-400 mb-3 flex items-center gap-2">
+          <h4
+            className="text-sm font-medium mb-3 flex items-center gap-2"
+            style={{ color: "var(--color-danger)" }}
+          >
             <ThumbsDown className="w-4 h-4" />
             不喜欢 ({dislikedKeywords.length})
           </h4>
@@ -207,8 +267,8 @@ export default function KeywordPreferences() {
 
       {/* Empty State */}
       {Object.keys(keywordPrefs).length === 0 && (
-        <div className="text-center py-8 text-slate-500">
-          <Hash className="w-12 h-12 mx-auto mb-3 opacity-30" />
+        <div className="text-center py-8" style={{ color: "var(--text-muted)" }}>
+          <Hash className="w-12 h-12 mx-auto mb-3" style={{ opacity: 0.3 }} />
           <p>还没有关键词偏好</p>
           <p className="text-sm mt-1">
             在Feed中点赞或点踩内容来学习你的偏好

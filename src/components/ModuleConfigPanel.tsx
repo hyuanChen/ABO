@@ -83,10 +83,13 @@ export default function ModuleConfigPanel() {
   }
 
   function getScheduleDescription(schedule: string): string {
+    if (schedule === "0 8 * * *") return "每天 8:00";
     if (schedule === "0 9 * * *") return "每天 9:00";
     if (schedule === "0 10 * * *") return "每天 10:00";
     if (schedule === "0 11 * * *") return "每天 11:00";
     if (schedule === "0 12 * * *") return "每天 12:00";
+    if (schedule === "0 13 * * *") return "每天 13:00";
+    if (schedule.startsWith("*/5")) return "每5分钟";
     return schedule;
   }
 
@@ -106,7 +109,7 @@ export default function ModuleConfigPanel() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-40 text-slate-500">
+      <div className="flex items-center justify-center h-40" style={{ color: "var(--text-muted)" }}>
         <RefreshCw className="w-5 h-5 animate-spin mr-2" />
         加载模块配置...
       </div>
@@ -116,13 +119,14 @@ export default function ModuleConfigPanel() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-          <Settings className="w-5 h-5 text-indigo-400" />
+        <h3 className="text-lg font-semibold flex items-center gap-2" style={{ color: "var(--text-main)" }}>
+          <Settings className="w-5 h-5" style={{ color: "var(--color-primary)" }} />
           爬虫模块配置
         </h3>
         <button
           onClick={loadModules}
-          className="text-xs text-slate-400 hover:text-white flex items-center gap-1"
+          className="text-xs flex items-center gap-1 transition-colors hover:opacity-80"
+          style={{ color: "var(--text-muted)" }}
         >
           <RefreshCw className="w-3 h-3" />
           刷新
@@ -133,18 +137,19 @@ export default function ModuleConfigPanel() {
         {modules.map((module) => (
           <div
             key={module.id}
-            className={`bg-slate-800/50 rounded-lg p-4 border transition-all ${
-              module.enabled
-                ? "border-emerald-800/50 hover:border-emerald-700"
-                : "border-slate-700/50 opacity-60"
-            }`}
+            className="rounded-lg p-4 border transition-all"
+            style={{
+              background: module.enabled ? "var(--bg-card)" : "var(--bg-hover)",
+              borderColor: module.enabled ? "var(--color-success)" : "var(--border-light)",
+              opacity: module.enabled ? 1 : 0.7,
+            }}
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <span className="text-2xl">{getModuleIcon(module.id)}</span>
                 <div>
-                  <div className="font-medium text-white">{module.name}</div>
-                  <div className="flex items-center gap-3 text-xs text-slate-400 mt-1">
+                  <div className="font-medium" style={{ color: "var(--text-main)" }}>{module.name}</div>
+                  <div className="flex items-center gap-3 text-xs mt-1" style={{ color: "var(--text-muted)" }}>
                     <span className="flex items-center gap-1">
                       <Clock className="w-3 h-3" />
                       {getScheduleDescription(module.schedule)}
@@ -163,11 +168,10 @@ export default function ModuleConfigPanel() {
               <button
                 onClick={() => toggleModule(module.id, module.enabled)}
                 disabled={saving === module.id}
-                className={`p-2 rounded-lg transition-colors ${
-                  module.enabled
-                    ? "text-emerald-400 hover:bg-emerald-950/30"
-                    : "text-slate-500 hover:bg-slate-700/50"
-                }`}
+                className="p-2 rounded-lg transition-colors"
+                style={{
+                  color: module.enabled ? "var(--color-success)" : "var(--text-light)",
+                }}
               >
                 {saving === module.id ? (
                   <RefreshCw className="w-5 h-5 animate-spin" />
@@ -181,12 +185,16 @@ export default function ModuleConfigPanel() {
 
             {/* Keywords display */}
             {module.enabled && module.keywords && module.keywords.length > 0 && (
-              <div className="mt-3 pt-3 border-t border-slate-700/50">
+              <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--border-light)" }}>
                 <div className="flex flex-wrap gap-2">
                   {module.keywords.map((kw) => (
                     <span
                       key={kw}
-                      className="px-2 py-1 bg-slate-700/50 rounded text-xs text-slate-300"
+                      className="px-2 py-1 rounded text-xs"
+                      style={{
+                        background: "var(--bg-hover)",
+                        color: "var(--text-secondary)",
+                      }}
                     >
                       {kw}
                     </span>
@@ -200,17 +208,17 @@ export default function ModuleConfigPanel() {
 
       {/* Summary */}
       <div className="grid grid-cols-2 gap-3 mt-4">
-        <div className="bg-slate-800/30 rounded-lg p-3 text-center">
-          <div className="text-2xl font-bold text-emerald-400">
+        <div className="rounded-lg p-3 text-center" style={{ background: "var(--bg-hover)" }}>
+          <div className="text-2xl font-bold" style={{ color: "var(--color-success)" }}>
             {modules.filter((m) => m.enabled).length}
           </div>
-          <div className="text-xs text-slate-500">已启用</div>
+          <div className="text-xs" style={{ color: "var(--text-muted)" }}>已启用</div>
         </div>
-        <div className="bg-slate-800/30 rounded-lg p-3 text-center">
-          <div className="text-2xl font-bold text-slate-400">
+        <div className="rounded-lg p-3 text-center" style={{ background: "var(--bg-hover)" }}>
+          <div className="text-2xl font-bold" style={{ color: "var(--text-light)" }}>
             {modules.filter((m) => !m.enabled).length}
           </div>
-          <div className="text-xs text-slate-500">已禁用</div>
+          <div className="text-xs" style={{ color: "var(--text-muted)" }}>已禁用</div>
         </div>
       </div>
     </div>

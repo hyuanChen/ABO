@@ -50,49 +50,67 @@ function RewardToast({
   };
 
   return (
-    <div className="relative overflow-hidden bg-gradient-to-r from-indigo-600 to-violet-600 text-white rounded-xl p-4 shadow-2xl border border-indigo-400/30 animate-in slide-in-from-right-full">
+    <div
+      className="relative overflow-hidden rounded-xl p-4 shadow-2xl border animate-in slide-in-from-right-full"
+      style={{
+        background: `linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))`,
+        borderColor: "var(--color-primary-light)",
+        color: "white",
+      }}
+    >
       {/* Sparkle background effect */}
       <div className="absolute inset-0 opacity-20">
-        <div className="absolute top-0 right-0 w-32 h-32 bg-white/20 rounded-full blur-3xl" />
+        <div
+          className="absolute top-0 right-0 w-32 h-32 rounded-full blur-3xl"
+          style={{ background: "var(--bg-hover)" }}
+        />
       </div>
 
       <div className="relative flex items-start gap-3">
-        <div className="p-2 bg-white/20 rounded-lg">
-          <Sparkles className="w-6 h-6 text-yellow-300" />
+        <div
+          className="p-2 rounded-lg"
+          style={{ background: "rgba(255,255,255,0.2)" }}
+        >
+          <Sparkles className="w-6 h-6" style={{ color: "var(--color-warning)" }} />
         </div>
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="font-bold">{actionNames[action] || action}</span>
-            <span className="px-2 py-0.5 bg-yellow-400/20 rounded text-yellow-300 text-sm font-bold">
+            <span
+              className="px-2 py-0.5 rounded text-sm font-bold"
+              style={{ background: "rgba(255,255,255,0.2)", color: "var(--color-warning)" }}
+            >
               +{xp} XP
             </span>
           </div>
 
           {message && (
-            <p className="text-sm text-indigo-100 mt-1 truncate">{message}</p>
+            <p className="text-sm mt-1 truncate" style={{ opacity: 0.9 }}>
+              {message}
+            </p>
           )}
 
           {/* Stats deltas */}
           <div className="flex items-center gap-3 mt-2 text-xs">
             {happiness_delta > 0 && (
-              <span className="flex items-center gap-1 text-rose-300">
+              <span className="flex items-center gap-1" style={{ color: "var(--color-secondary)" }}>
                 <Heart className="w-3 h-3" />+{happiness_delta} 幸福
               </span>
             )}
             {happiness_delta < 0 && (
-              <span className="flex items-center gap-1 text-slate-400">
+              <span className="flex items-center gap-1" style={{ opacity: 0.7 }}>
                 <Heart className="w-3 h-3" />
                 {happiness_delta} 幸福
               </span>
             )}
             {san_delta > 0 && (
-              <span className="flex items-center gap-1 text-cyan-300">
+              <span className="flex items-center gap-1" style={{ color: "var(--color-accent)" }}>
                 <Brain className="w-3 h-3" />+{san_delta} SAN
               </span>
             )}
             {san_delta < 0 && (
-              <span className="flex items-center gap-1 text-slate-400">
+              <span className="flex items-center gap-1" style={{ opacity: 0.7 }}>
                 <Brain className="w-3 h-3" />
                 {san_delta} SAN
               </span>
@@ -102,7 +120,8 @@ function RewardToast({
 
         <button
           onClick={() => dismissReward(id)}
-          className="p-1 hover:bg-white/20 rounded transition-colors"
+          className="p-1 rounded transition-colors hover:opacity-80"
+          style={{ background: "rgba(255,255,255,0.1)" }}
         >
           <X className="w-4 h-4" />
         </button>
