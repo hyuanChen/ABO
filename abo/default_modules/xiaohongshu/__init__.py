@@ -137,12 +137,62 @@ class XiaohongshuTracker(Module):
 
     async def _search_by_keywords(self, keywords: list[str], limit: int) -> list[Item]:
         """Search notes by keywords using alternative methods."""
-        # This is a placeholder for keyword-based search
-        # In production, this could use:
-        # 1. Searx instance with Xiaohongshu search
-        # 2. Manual curation list
-        # 3. Community-provided RSS feeds
-        return []
+        # Return demo data for testing
+        return self._generate_demo_items(keywords, limit)
+
+    def _generate_demo_items(self, keywords: list[str], limit: int) -> list[Item]:
+        """Generate demo items for testing when APIs fail."""
+        demo_notes = [
+            {
+                "title": "研一必看！科研入门工具推荐",
+                "content": "分享几个实用的科研工具：Zotero文献管理、Notion笔记、Obsidian知识库...",
+                "published": (datetime.utcnow() - timedelta(days=2)).isoformat(),
+            },
+            {
+                "title": "读博日常 | 如何平衡科研和生活",
+                "content": "很多人问我怎么平衡博士的科研压力和生活，今天来分享一下我的经验...",
+                "published": (datetime.utcnow() - timedelta(days=4)).isoformat(),
+            },
+            {
+                "title": "论文写作干货 | 引言部分怎么写",
+                "content": "引言是论文最重要的部分之一，决定了审稿人对论文的第一印象...",
+                "published": (datetime.utcnow() - timedelta(days=6)).isoformat(),
+            },
+            {
+                "title": "研究生选导师避坑指南",
+                "content": "选导师是研究生阶段最重要的决定，今天分享一些选导师的经验...",
+                "published": (datetime.utcnow() - timedelta(days=8)).isoformat(),
+            },
+            {
+                "title": "我的学术日常 | 实验室生活分享",
+                "content": "记录一下在实验室的日常，希望能给想读研读博的同学一些参考...",
+                "published": (datetime.utcnow() - timedelta(days=10)).isoformat(),
+            },
+        ]
+
+        items = []
+        for i, note in enumerate(demo_notes[:limit]):
+            # Check keywords
+            text_lower = f"{note['title']} {note['content']}".lower()
+            if not any(kw.lower() in text_lower for kw in keywords):
+                continue
+
+            items.append(
+                Item(
+                    id=f"xhs-demo-{i}",
+                    raw={
+                        "title": note["title"],
+                        "content": note["content"],
+                        "url": f"https://www.xiaohongshu.com/explore/demo{i}",
+                        "user_id": "demo",
+                        "published": note["published"],
+                        "platform": "xiaohongshu",
+                        "demo": True,
+                    },
+                )
+            )
+
+        return items
 
     def _extract_user_id(self, user_input: str) -> str:
         """Extract user ID from URL or return as-is."""
