@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from .activity import ActivityTracker, ActivityType
 from .config import get_vault_path, get_literature_path, load as load_config, save as save_config
 from .preferences.engine import PreferenceEngine
 from .profile.routes import router as profile_router, init_routes as init_profile_routes
@@ -28,6 +29,7 @@ _registry = ModuleRegistry()
 _card_store = CardStore()
 _prefs = PreferenceEngine()
 _scheduler: ModuleScheduler | None = None
+_activity_tracker: ActivityTracker | None = None
 
 # ── 爬取任务取消控制 ────────────────────────────────────────────
 _crawl_cancel_flags: dict[str, bool] = {}  # session_id -> should_cancel
@@ -95,7 +97,7 @@ def _write_sdk_readme():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _scheduler
+    global _scheduler, _activity_tracker
     vault_path = get_vault_path()
     _registry.load_all()
     runner = ModuleRunner(_card_store, _prefs, broadcaster, vault_path)
@@ -103,6 +105,7 @@ async def lifespan(app: FastAPI):
     _scheduler.start(_registry.enabled())
     start_watcher(_registry, lambda reg: _scheduler.reschedule(reg.enabled()))
     _write_sdk_readme()
+    _activity_tracker = ActivityTracker()
     yield
     if _scheduler:
         _scheduler.shutdown()
@@ -275,6 +278,25 @@ async def feedback(card_id: str, body: FeedbackReq):
     module = _registry.get(card.module_id)
     if module:
         await module.on_feedback(card_id, body.action)
+
+    # Record activity for timeline generation
+    global _activity_tracker
+    if _activity_tracker:
+        action_map_activity = {
+            "like": ActivityType.CARD_LIKE,
+            "dislike": ActivityType.CARD_DISLIKE,
+            "save": ActivityType.CARD_SAVE,
+            "skip": ActivityType.CARD_VIEW,
+            "star": ActivityType.CARD_SAVE,
+        }
+        activity_type = action_map_activity.get(body.action.value, ActivityType.CARD_VIEW)
+        _activity_tracker.record_activity(
+            activity_type=activity_type,
+            card_id=card_id,
+            card_title=card.title,
+            module_id=card.module_id,
+            metadata={"action": body.action.value, "tags": card.tags}
+        )
 
     return {"ok": True, "rewards": rewards.get("rewards", {})}
 
@@ -1906,6 +1928,82 @@ async def simulate_day(data: dict = None):
             "energy": profile_store.get_energy_today(),
         }
     }
+
+
+# ── Activity Tracking ────────────────────────────────────────────
+
+@app.post("/api/activity/chat")
+async def record_chat(data: dict):
+    """Record a chat/conversation activity."""
+    global _activity_tracker
+    if _activity_tracker:
+        activity = _activity_tracker.record_activity(
+            activity_type=ActivityType.CHAT_MESSAGE,
+            chat_topic=data.get("topic"),
+            metadata={
+                "context": data.get("context", ""),
+                "message_count": data.get("message_count", 1)
+            }
+        )
+        return {"ok": True, "activity_id": activity.id}
+    return {"ok": False, "error": "Tracker not initialized"}
+
+
+@app.get("/api/timeline/{date}")
+async def get_timeline(date: str):
+    """Get timeline for a specific date."""
+    global _activity_tracker
+    if _activity_tracker:
+        timeline = _activity_tracker.get_timeline(date)
+        return {
+            "date": timeline.date,
+            "activities": [a.to_dict() for a in timeline.activities],
+            "summary": timeline.summary,
+            "summary_generated_at": timeline.summary_generated_at,
+            "chat_path": timeline.get_chat_path(),
+            "interaction_summary": timeline.get_interaction_summary()
+        }
+    return {"error": "Tracker not initialized"}
+
+
+@app.get("/api/timeline/today")
+async def get_today_timeline():
+    """Get today's timeline."""
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    return await get_timeline(today)
+
+
+@app.get("/api/timeline/recent/{days}")
+async def get_recent_timelines(days: int = 7):
+    """Get timelines for recent days."""
+    global _activity_tracker
+    if _activity_tracker:
+        timelines = _activity_tracker.get_recent_timelines(days)
+        return {
+            "timelines": [
+                {
+                    "date": t.date,
+                    "activities": [a.to_dict() for a in t.activities],
+                    "summary": t.summary,
+                    "summary_generated_at": t.summary_generated_at,
+                    "chat_path": t.get_chat_path(),
+                    "interaction_summary": t.get_interaction_summary()
+                }
+                for t in timelines
+            ]
+        }
+    return {"error": "Tracker not initialized"}
+
+
+@app.post("/api/timeline/{date}/summary")
+async def update_timeline_summary(date: str, data: dict):
+    """Update the AI-generated summary for a day."""
+    global _activity_tracker
+    if _activity_tracker:
+        _activity_tracker.update_summary(date, data.get("summary", ""))
+        return {"ok": True}
+    return {"ok": False, "error": "Tracker not initialized"}
 
 
 if __name__ == "__main__":
