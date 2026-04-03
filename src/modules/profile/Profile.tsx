@@ -12,6 +12,7 @@ import AchievementGallery from "./AchievementGallery";
 import DailyCheckInModal from "./DailyCheckInModal";
 import GamePanel from "../../components/GamePanel";
 import KeywordPreferences from "../../components/KeywordPreferences";
+import ModuleConfigPanel from "../../components/ModuleConfigPanel";
 
 interface Todo {
   id: string;
@@ -124,6 +125,15 @@ export default function Profile() {
           style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
         >
           <KeywordPreferences />
+        </Card>
+
+        {/* Module Configuration */}
+        <Card
+          title="爬虫模块管理"
+          icon={<span style={{ fontSize: "1rem" }}>🔧</span>}
+          style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
+        >
+          <ModuleConfigPanel />
         </Card>
 
         {/* Hexagon Radar */}
