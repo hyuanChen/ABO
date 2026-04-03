@@ -1219,12 +1219,12 @@ async def save_s2_to_literature(data: dict):
     title = paper.get("title", "untitled")
     paper_id = meta.get("paper_id", "unknown")
 
-    # Build source folder name: {SourceTitle}_FollowUp (first 8 chars of source title)
-    source_title = meta.get("source_paper_title", "Unknown")
-    source_slug = "".join(c for c in source_title[:8] if c.isalnum()).upper() or "FOLLOWUP"
-    base_folder_name = f"{source_slug}_FollowUp"
+    # Get source paper info for naming (from top-level data, not metadata)
+    source_paper = data.get("source_paper", "Unknown")
+    source_short = re.sub(r'[^\w\s-]', '', source_paper)[:20].strip()
+    folder_name = f"{source_short}_FollowUp"
 
-    # Build paper folder name: {AuthorYear}-{ShortTitle}
+    # Build paper folder name: AuthorYear-ShortTitle
     authors = meta.get("authors", ["Unknown"])
     first_author = authors[0].split()[-1].replace(",", "").replace(" ", "") if authors else "Unknown"
     year = meta.get("year", datetime.now().year)
@@ -1232,7 +1232,7 @@ async def save_s2_to_literature(data: dict):
     paper_folder_name = f"{first_author}{year}-{short_title}"
 
     # Build target path: FollowUps/{Source}_FollowUp/{AuthorYear-Title}/
-    base_dir = lit_path / "FollowUps" / base_folder_name
+    base_dir = lit_path / "FollowUps" / folder_name
     paper_folder = base_dir / paper_folder_name
     paper_folder.mkdir(parents=True, exist_ok=True)
 
@@ -1258,13 +1258,12 @@ async def save_s2_to_literature(data: dict):
     # Try to download PDF if arxiv_id exists
     pdf_path = None
     if arxiv_id and save_pdf:
-        pdf_filename = f"{paper_id}.pdf"
-        pdf_full_path = paper_folder / pdf_filename
+        pdf_full_path = paper_folder / "paper.pdf"
         try:
             result = await download_arxiv_pdf(arxiv_id, pdf_full_path)
             if result:
-                pdf_path = pdf_filename
-                print(f"[s2-save] Saved PDF: {pdf_filename}")
+                pdf_path = "paper.pdf"
+                print(f"[s2-save] Saved PDF: paper.pdf")
         except Exception as e:
             print(f"[s2-save] Failed to download PDF: {e}")
 
@@ -1324,7 +1323,7 @@ async def save_s2_to_literature(data: dict):
         "venue": meta.get("venue", ""),
         "citation-count": meta.get("citation_count", 0),
         "keywords": meta.get("keywords", []),
-        "source-paper-title": source_title,
+        "source-paper-title": source_paper,
         "figures": local_figures,
         "figures-dir": str(figures_dir.relative_to(paper_folder)) if local_figures else None,
         "pdf-path": pdf_path,
