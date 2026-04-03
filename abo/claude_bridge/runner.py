@@ -31,10 +31,8 @@ class CliRunner:
 
     async def stream_call(self, message: str, on_chunk: Callable[[dict], Awaitable[None]], timeout: float = 300.0):
         protocol = self.config.get('protocol', 'raw')
-        if protocol == 'acp':
-            await self._stream_acp(message, on_chunk)
-        else:
-            await self._stream_raw(message, on_chunk)
+        coro = self._stream_acp(message, on_chunk) if protocol == 'acp' else self._stream_raw(message, on_chunk)
+        await asyncio.wait_for(coro, timeout=timeout)
 
     async def _stream_acp(self, message: str, on_chunk: Callable[[dict], Awaitable[None]]):
         self.process = await asyncio.create_subprocess_exec(
