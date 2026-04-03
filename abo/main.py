@@ -22,12 +22,14 @@ from .runtime.broadcaster import broadcaster
 from .runtime.discovery import ModuleRegistry, start_watcher
 from .runtime.runner import ModuleRunner
 from .runtime.scheduler import ModuleScheduler
+from .runtime.state import ModuleStateStore
 from .sdk.types import FeedbackAction
 from .store.cards import CardStore
 from .summary import DailySummaryGenerator, SummaryScheduler
 
 # ── 全局单例 ────────────────────────────────────────────────────
 _registry = ModuleRegistry()
+_state_store = ModuleStateStore()
 _card_store = CardStore()
 _prefs = PreferenceEngine()
 _scheduler: ModuleScheduler | None = None
@@ -104,6 +106,7 @@ async def lifespan(app: FastAPI):
     global _scheduler, _activity_tracker, _summary_generator, _summary_scheduler
     vault_path = get_vault_path()
     _registry.load_all()
+    _state_store.apply_to_registry(_registry)
     runner = ModuleRunner(_card_store, _prefs, broadcaster, vault_path)
     _scheduler = ModuleScheduler(runner)
     _scheduler.start(_registry.enabled())
