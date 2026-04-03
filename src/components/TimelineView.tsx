@@ -22,14 +22,14 @@ interface TimelineData {
 }
 
 const activityIcons: Record<string, React.ReactNode> = {
-  card_view: <Eye className="w-4 h-4" />,
-  card_like: <Heart className="w-4 h-4 text-rose-500" />,
-  card_save: <Bookmark className="w-4 h-4 text-amber-500" />,
-  card_dislike: <Heart className="w-4 h-4 text-slate-500" />,
-  chat_message: <MessageCircle className="w-4 h-4 text-blue-500" />,
-  chat_start: <MessageCircle className="w-4 h-4 text-indigo-500" />,
-  module_run: <RefreshCw className="w-4 h-4 text-emerald-500" />,
-  checkin: <Sparkles className="w-4 h-4 text-purple-500" />,
+  card_view: <Eye className="w-4 h-4" style={{ color: "var(--text-muted)" }} />,
+  card_like: <Heart className="w-4 h-4" style={{ color: "var(--color-secondary)" }} />,
+  card_save: <Bookmark className="w-4 h-4" style={{ color: "var(--color-accent)" }} />,
+  card_dislike: <Heart className="w-4 h-4" style={{ color: "var(--text-light)" }} />,
+  chat_message: <MessageCircle className="w-4 h-4" style={{ color: "var(--color-primary)" }} />,
+  chat_start: <MessageCircle className="w-4 h-4" style={{ color: "var(--color-primary-dark)" }} />,
+  module_run: <RefreshCw className="w-4 h-4" style={{ color: "var(--color-success)" }} />,
+  checkin: <Sparkles className="w-4 h-4" style={{ color: "var(--color-warning)" }} />,
 };
 
 const activityLabels: Record<string, string> = {
@@ -78,7 +78,7 @@ export default function TimelineView() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-40 text-slate-500">
+      <div className="flex items-center justify-center h-40" style={{ color: "var(--text-muted)" }}>
         <Clock className="w-5 h-5 animate-spin mr-2" />
         加载今日时间线...
       </div>
@@ -87,10 +87,10 @@ export default function TimelineView() {
 
   if (!timeline || timeline.activities.length === 0) {
     return (
-      <div className="text-center py-8 text-slate-500">
-        <Clock className="w-12 h-12 mx-auto mb-3 opacity-30" />
+      <div className="text-center py-8" style={{ color: "var(--text-muted)" }}>
+        <Clock className="w-12 h-12 mx-auto mb-3" style={{ opacity: 0.3 }} />
         <p>今日暂无活动记录</p>
-        <p className="text-sm mt-1">开始浏览内容或对话吧！</p>
+        <p className="text-sm mt-1" style={{ color: "var(--text-light)" }}>开始浏览内容或对话吧！</p>
       </div>
     );
   }
@@ -99,15 +99,21 @@ export default function TimelineView() {
     <div className="space-y-6">
       {/* Summary Section */}
       {timeline.summary ? (
-        <div className="bg-gradient-to-r from-indigo-900/50 to-violet-900/50 rounded-xl p-4 border border-indigo-500/30">
+        <div
+          className="rounded-xl p-4"
+          style={{
+            background: `linear-gradient(135deg, rgba(188, 164, 227, 0.15), rgba(157, 123, 219, 0.1))`,
+            border: "1px solid var(--border-color)",
+          }}
+        >
           <div className="flex items-center gap-2 mb-2">
-            <Sparkles className="w-5 h-5 text-indigo-400" />
-            <h4 className="font-semibold text-indigo-200">今日总结</h4>
-            <span className="text-xs text-indigo-400/60 ml-auto">
+            <Sparkles className="w-5 h-5" style={{ color: "var(--color-primary)" }} />
+            <h4 className="font-semibold" style={{ color: "var(--color-primary-dark)" }}>今日总结</h4>
+            <span className="text-xs ml-auto" style={{ color: "var(--text-muted)" }}>
               {timeline.summary_generated_at?.slice(11, 16)}
             </span>
           </div>
-          <p className="text-sm text-indigo-100/80 leading-relaxed whitespace-pre-line">
+          <p className="text-sm leading-relaxed whitespace-pre-line" style={{ color: "var(--text-secondary)" }}>
             {timeline.summary}
           </p>
         </div>
@@ -115,18 +121,21 @@ export default function TimelineView() {
         <button
           onClick={generateSummary}
           disabled={generating}
-          className="w-full py-3 rounded-xl bg-slate-800/50 border border-slate-700/50
-                     hover:bg-slate-800 transition-colors flex items-center justify-center gap-2
-                     text-slate-300 text-sm disabled:opacity-50"
+          className="w-full py-3 rounded-xl text-sm disabled:opacity-50 transition-all hover:scale-[1.02] active:scale-[0.98]"
+          style={{
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-light)",
+            color: "var(--text-secondary)",
+          }}
         >
           {generating ? (
             <>
-              <Clock className="w-4 h-4 animate-spin" />
+              <Clock className="w-4 h-4 animate-spin inline mr-2" />
               正在生成总结...
             </>
           ) : (
             <>
-              <Sparkles className="w-4 h-4" />
+              <Sparkles className="w-4 h-4 inline mr-2" style={{ color: "var(--color-primary)" }} />
               生成今日总结
             </>
           )}
@@ -136,17 +145,17 @@ export default function TimelineView() {
       {/* Chat Path */}
       {timeline.chat_path.length > 0 && (
         <div>
-          <h4 className="text-sm font-medium text-slate-400 mb-3">今日对话路径</h4>
+          <h4 className="text-sm font-medium mb-3" style={{ color: "var(--text-muted)" }}>今日对话路径</h4>
           <div className="space-y-2">
             {timeline.chat_path.map((chat, i) => (
               <div key={i} className="flex items-start gap-3 text-sm">
-                <span className="text-slate-600 font-mono text-xs pt-0.5">
-                  {chat.time.slice(0, 5)}
+                <span className="font-mono text-xs pt-0.5" style={{ color: "var(--text-light)" }}>
+                  {chat.time.slice(11, 16)}
                 </span>
                 <div className="flex-1">
-                  <span className="text-slate-300">{chat.topic || "未命名话题"}</span>
+                  <span style={{ color: "var(--text-secondary)" }}>{chat.topic || "未命名话题"}</span>
                   {chat.context && (
-                    <p className="text-slate-500 text-xs mt-0.5 line-clamp-1">
+                    <p className="text-xs mt-0.5 line-clamp-1" style={{ color: "var(--text-muted)" }}>
                       {chat.context}
                     </p>
                   )}
@@ -159,31 +168,36 @@ export default function TimelineView() {
 
       {/* Activity Timeline */}
       <div>
-        <h4 className="text-sm font-medium text-slate-400 mb-3">
+        <h4 className="text-sm font-medium mb-3" style={{ color: "var(--text-muted)" }}>
           活动记录 ({timeline.activities.length})
         </h4>
-        <div className="space-y-2 max-h-60 overflow-y-auto">
+        <div
+          className="space-y-2 max-h-60 overflow-y-auto rounded-lg p-2"
+          style={{ background: "var(--bg-hover)" }}
+        >
           {timeline.activities.slice().reverse().map((activity) => (
             <div
               key={activity.id}
-              className="flex items-center gap-3 p-2 rounded-lg bg-slate-800/30 hover:bg-slate-800/50 transition-colors"
+              className="flex items-center gap-3 p-2 rounded-lg transition-all hover:scale-[1.01]"
+              style={{
+                background: "var(--bg-card)",
+                border: "1px solid var(--border-light)",
+              }}
             >
-              <span className="text-slate-500">
-                {activityIcons[activity.type] || <Clock className="w-4 h-4" />}
-              </span>
-              <span className="text-xs text-slate-600 font-mono">
+              <span>{activityIcons[activity.type] || <Clock className="w-4 h-4" style={{ color: "var(--text-muted)" }} />}</span>
+              <span className="text-xs font-mono" style={{ color: "var(--text-light)" }}>
                 {activity.timestamp.slice(11, 16)}
               </span>
-              <span className="text-xs text-slate-500">
+              <span className="text-xs" style={{ color: "var(--text-muted)" }}>
                 {activityLabels[activity.type] || activity.type}
               </span>
               {activity.card_title && (
-                <span className="text-sm text-slate-300 truncate flex-1">
+                <span className="text-sm truncate flex-1" style={{ color: "var(--text-main)" }}>
                   {activity.card_title}
                 </span>
               )}
               {activity.chat_topic && (
-                <span className="text-sm text-slate-300 truncate flex-1">
+                <span className="text-sm truncate flex-1" style={{ color: "var(--text-main)" }}>
                   {activity.chat_topic}
                 </span>
               )}
@@ -193,14 +207,17 @@ export default function TimelineView() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-3 gap-3 pt-4 border-t border-slate-800">
+      <div
+        className="grid grid-cols-3 gap-3 pt-4"
+        style={{ borderTop: "1px solid var(--border-light)" }}
+      >
         {Object.entries(timeline.interaction_summary)
           .filter(([_, count]) => count > 0)
           .slice(0, 3)
           .map(([type, count]) => (
             <div key={type} className="text-center">
-              <div className="text-xl font-bold text-indigo-400">{count}</div>
-              <div className="text-xs text-slate-500">
+              <div className="text-xl font-bold" style={{ color: "var(--color-primary)" }}>{count}</div>
+              <div className="text-xs" style={{ color: "var(--text-muted)" }}>
                 {activityLabels[type] || type}
               </div>
             </div>
