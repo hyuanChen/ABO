@@ -132,7 +132,7 @@ async def test_update_schedule_preserves_other_fields():
         scheduler.start([test_module])
 
         original_job = scheduler._scheduler.get_job("test-sched")
-        original_misfire = original_job.trigger.misfire_grace_time
+        original_misfire = original_job.misfire_grace_time
 
         # Update schedule
         test_module.schedule = "30 14 * * *"
@@ -148,8 +148,9 @@ async def test_update_schedule_preserves_other_fields():
         assert updated_job.misfire_grace_time == original_misfire
 
         # Verify minute and hour are updated correctly
-        assert str(updated_job.trigger.fields[5]) == "14"  # hour
-        assert str(updated_job.trigger.fields[4]) == "30"  # minute
+        # CronTrigger fields: [year, month, day, week, day_of_week, hour, minute, second]
+        assert str(updated_job.trigger.fields[5]) == "14"  # hour at index 5
+        assert str(updated_job.trigger.fields[6]) == "30"  # minute at index 6
 
     finally:
         scheduler.shutdown()
