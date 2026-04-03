@@ -10,6 +10,24 @@ interface Props {
   userRating?: "like" | "neutral" | "dislike" | null;
 }
 
+// Source icons mapping for all crawler types
+const SOURCE_ICONS: Record<string, string> = {
+  arxiv: "📄",
+  "semantic-scholar": "🔬",
+  "semantic_scholar": "🔬",
+  "semantic_scholar_tracker": "🔬",
+  bilibili: "📺",
+  xiaohongshu: "📕",
+  xiaoyuzhou: "🎧",
+  zhihu: "❓",
+  rss: "📰",
+  "rss-aggregator": "📰",
+  podcast: "🎙️",
+  folder_monitor: "📁",
+  "folder-monitor": "📁",
+  folder: "📁",
+};
+
 // 三级打分操作
 const RATING_ACTIONS = [
   {
@@ -185,7 +203,7 @@ export default function CardView({ card, focused, onClick, onFeedback, onRating,
           {scorePercent}%
         </span>
 
-        {/* Module tag */}
+        {/* Source icon + Module tag */}
         <span
           style={{
             fontSize: "0.75rem",
@@ -195,9 +213,14 @@ export default function CardView({ card, focused, onClick, onFeedback, onRating,
             background: "rgba(188, 164, 227, 0.12)",
             color: "var(--color-primary-dark)",
             border: "1px solid var(--border-light)",
+            display: "flex",
+            alignItems: "center",
+            gap: "4px",
           }}
+          title={card.module_id}
         >
-          {card.module_id}
+          <span>{SOURCE_ICONS[card.module_id] || "📎"}</span>
+          <span>{card.module_id}</span>
         </span>
 
         {/* External link */}
