@@ -957,22 +957,34 @@ async def fetch_semantic_scholar_follow_ups(data: dict):
 
 # ── Multi-source figure fetching helpers ─────────────────────────
 
+# Constants for figure fetching
+DEFAULT_MAX_FIGURES = 5
+HTML_TIMEOUT = 30
+PDF_TIMEOUT = 60
+MIN_PDF_SIZE = 10 * 1024  # 10KB
+PDF_DPI = 150
+
+
 async def fetch_figures_from_arxiv_html(
     arxiv_id: str,
     figures_dir: Path,
     client: httpx.AsyncClient,
-    max_figures: int = 5
+    max_figures: int = DEFAULT_MAX_FIGURES
 ) -> list[dict]:
     """Fetch figures from arXiv HTML page with smart prioritization."""
     import re
     import asyncio
     figures = []
 
+    # Ensure figures directory exists
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
     try:
         html_url = f"https://arxiv.org/html/{arxiv_id}"
-        resp = await client.get(html_url, headers={"User-Agent": "ABO/1.0"}, timeout=30)
+        resp = await client.get(html_url, headers={"User-Agent": "ABO/1.0"}, timeout=HTML_TIMEOUT)
 
         if resp.status_code != 200:
+            print(f"[figures] HTTP error {resp.status_code} when fetching HTML for {arxiv_id}")
             return figures
 
         html = resp.text
@@ -1029,7 +1041,7 @@ async def fetch_figures_from_arxiv_html(
         # Download figures
         for idx, fig in enumerate(selected_figures):
             try:
-                fig_resp = await client.get(fig['url'], headers={"User-Agent": "ABO/1.0"}, timeout=30)
+                fig_resp = await client.get(fig['url'], headers={"User-Agent": "ABO/1.0"}, timeout=HTML_TIMEOUT)
                 if fig_resp.status_code == 200:
                     content_type = fig_resp.headers.get('content-type', '')
                     if 'png' in content_type:
@@ -1044,6 +1056,15 @@ async def fetch_figures_from_arxiv_html(
                     fig_filename = f"figure_{idx+1:02d}.{ext}"
                     fig_path = figures_dir / fig_filename
                     fig_path.write_bytes(fig_resp.content)
+
+                    # Validate downloaded image
+                    try:
+                        from PIL import Image
+                        Image.open(fig_path).verify()
+                    except Exception:
+                        print(f"[figures] Invalid image downloaded from {fig['url']}, removing")
+                        fig_path.unlink()
+                        continue
 
                     figures.append({
                         'filename': fig_filename,
@@ -1066,10 +1087,13 @@ async def extract_figures_from_arxiv_pdf(
     arxiv_id: str,
     figures_dir: Path,
     client: httpx.AsyncClient,
-    max_figures: int = 5
+    max_figures: int = DEFAULT_MAX_FIGURES
 ) -> list[dict]:
     """Download arXiv PDF and extract first few pages as figure candidates."""
     figures = []
+
+    # Ensure figures directory exists
+    figures_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         from pdf2image import convert_from_path
@@ -1081,9 +1105,14 @@ async def extract_figures_from_arxiv_pdf(
     temp_pdf = None
     try:
         pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-        resp = await client.get(pdf_url, headers={"User-Agent": "ABO/1.0"}, timeout=60)
+        resp = await client.get(pdf_url, headers={"User-Agent": "ABO/1.0"}, timeout=PDF_TIMEOUT)
 
-        if resp.status_code != 200 or len(resp.content) < 10000:
+        if resp.status_code != 200:
+            print(f"[figures] HTTP error {resp.status_code} when fetching PDF for {arxiv_id}")
+            return figures
+
+        if len(resp.content) < MIN_PDF_SIZE:
+            print(f"[figures] PDF too small ({len(resp.content)} bytes), skipping extraction for {arxiv_id}")
             return figures
 
         # Save to temp file
@@ -1093,7 +1122,7 @@ async def extract_figures_from_arxiv_pdf(
             temp_pdf = f.name
 
         # Convert first 5 pages to images
-        images = convert_from_path(temp_pdf, first_page=1, last_page=5, dpi=150)
+        images = convert_from_path(temp_pdf, first_page=1, last_page=5, dpi=PDF_DPI)
 
         for i, image in enumerate(images[:max_figures]):
             width, height = image.size
@@ -1125,7 +1154,7 @@ async def extract_figures_from_arxiv_pdf(
 async def fetch_paper_figures(
     arxiv_id: str,
     figures_dir: Path,
-    max_figures: int = 5
+    max_figures: int = DEFAULT_MAX_FIGURES
 ) -> list[dict]:
     """Fetch paper figures using multiple strategies."""
     import httpx
