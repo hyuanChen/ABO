@@ -2,90 +2,19 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  Bot, Send, Zap, BookOpen, Target,
-  RotateCcw, Wifi, WifiOff, ChevronDown, Copy, Check,
-  Cpu, Sparkles,
+  Bot, Send, Wifi, WifiOff, Plus, MessageSquare, Trash2, Edit2, Check, X,
 } from "lucide-react";
-import { useStore } from "../../core/store";
+import { useCliChat, type StreamEvent } from "../../hooks/useCliChat";
+import {
+  detectClis, createConversation, listConversations,
+  getMessages, deleteConversation, updateConversationTitle,
+  type CliConfig, type Conversation, type Message,
+} from "../../core/api";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
+interface ChatMessage extends Message {
   streaming?: boolean;
-  ts: number;
-}
-
-interface StreamChunk {
-  type: string;
-  delta?: { type: string; text?: string };
-  content?: string;
-  result?: string;
-}
-
-// ── Quick actions ─────────────────────────────────────────────────────────────
-
-const QUICK_ACTIONS = [
-  {
-    id: "summarize-diary",
-    label: "总结日记",
-    desc: "分析日记内容，提取关键思考",
-    prompt: "请帮我总结最近的日记内容，提取关键思考、情绪变化和成长轨迹。",
-    Icon: BookOpen,
-    color: "var(--color-primary)",
-    bg: "rgba(188, 164, 227, 0.15)",
-    border: "rgba(188, 164, 227, 0.3)",
-  },
-  {
-    id: "generate-todo",
-    label: "生成todo",
-    desc: "基于当前状态生成待办",
-    prompt: "根据我的研究进展和当前精力状态，帮我生成3个优先级最高的待办事项。",
-    Icon: Target,
-    color: "#10B981",
-    bg: "rgba(168, 230, 207, 0.15)",
-    border: "rgba(168, 230, 207, 0.3)",
-  },
-  {
-    id: "energy",
-    label: "精力引导",
-    desc: "低能量状态的高效任务",
-    prompt: "我现在精力较低，请给我一个高效率、短时间（30分钟内）可完成的科研任务建议。",
-    Icon: Zap,
-    color: "#8B5CF6",
-    bg: "rgba(139, 92, 246, 0.15)",
-    border: "rgba(139, 92, 246, 0.3)",
-  },
-];
-
-// ── Stream chunk parser ───────────────────────────────────────────────────────
-
-function extractText(raw: string): string {
-  const lines = raw.split("\n").filter(Boolean);
-  let text = "";
-  for (const line of lines) {
-    try {
-      const chunk: StreamChunk = JSON.parse(line);
-      if (chunk.type === "content_block_delta" && chunk.delta?.type === "text_delta") {
-        text += chunk.delta.text ?? "";
-      } else if (chunk.type === "result" && chunk.result) {
-        text = chunk.result;
-      } else if (chunk.content) {
-        text += chunk.content;
-      }
-    } catch {
-      if (line && !line.startsWith("{")) text += line;
-    }
-  }
-  return text;
-}
-
-// ── Timestamp helper ─────────────────────────────────────────────────────────
-
-function formatTime(ts: number) {
-  return new Date(ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
 // ── Copy button ───────────────────────────────────────────────────────────────
@@ -100,24 +29,14 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={handleCopy}
-      aria-label="复制消息"
       style={{
         opacity: 0, padding: "4px", borderRadius: "6px",
         color: "var(--text-muted)", background: "transparent", border: "none", cursor: "pointer"
       }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.opacity = "1";
-        e.currentTarget.style.background = "var(--bg-hover)";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.opacity = "0";
-        e.currentTarget.style.background = "transparent";
-      }}
+      onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.opacity = "0"; e.currentTarget.style.background = "transparent"; }}
     >
-      {copied
-        ? <Check style={{ width: "14px", height: "14px", color: "#10B981" }} />
-        : <Copy style={{ width: "14px", height: "14px" }} />
-      }
+      {copied ? <Check style={{ width: "14px", height: "14px", color: "#10B981" }} /> : <span style={{ fontSize: "12px" }}>复制</span>}
     </button>
   );
 }
@@ -130,68 +49,25 @@ function MdContent({ content }: { content: string }) {
       remarkPlugins={[remarkGfm]}
       components={{
         p: ({ children }) => <p style={{ marginBottom: "8px", lineHeight: 1.6 }}>{children}</p>,
-        h1: ({ children }) => <h1 style={{ fontSize: "18px", fontWeight: 700, marginTop: "12px", marginBottom: "6px", color: "var(--text-main)" }}>{children}</h1>,
-        h2: ({ children }) => <h2 style={{ fontSize: "16px", fontWeight: 600, marginTop: "12px", marginBottom: "4px", color: "var(--text-main)" }}>{children}</h2>,
-        h3: ({ children }) => <h3 style={{ fontSize: "14px", fontWeight: 600, marginTop: "8px", marginBottom: "4px", color: "var(--text-secondary)" }}>{children}</h3>,
-        ul: ({ children }) => <ul style={{ listStyle: "disc", paddingLeft: "16px", marginBottom: "8px" }}>{children}</ul>,
-        ol: ({ children }) => <ol style={{ listStyle: "decimal", paddingLeft: "16px", marginBottom: "8px" }}>{children}</ol>,
-        li: ({ children }) => <li style={{ fontSize: "14px", lineHeight: 1.6 }}>{children}</li>,
-        code: ({ className, children, ...props }) => {
+        code: ({ className, children }) => {
           const isBlock = className?.startsWith("language-");
           if (isBlock) {
-            const lang = className?.replace("language-", "") ?? "";
             return (
-              <div style={{ margin: "8px 0", borderRadius: "12px", overflow: "hidden", border: "1px solid var(--border-light)" }}>
-                {lang && (
-                  <div style={{
-                    padding: "6px 12px", background: "var(--bg-hover)",
-                    borderBottom: "1px solid var(--border-light)", display: "flex", alignItems: "center", justifyContent: "space-between"
-                  }}>
-                    <span style={{ fontSize: "12px", color: "var(--text-muted)", fontFamily: "monospace" }}>{lang}</span>
-                    <CopyButton text={String(children).replace(/\n$/, "")} />
-                  </div>
-                )}
-                <pre style={{
-                  padding: "12px", overflowX: "auto", background: "var(--bg-hover)",
-                  fontSize: "12px", fontFamily: "monospace", color: "var(--text-main)", lineHeight: 1.6, margin: 0
-                }}>
-                  <code>{children}</code>
-                </pre>
-              </div>
+              <pre style={{
+                padding: "12px", overflowX: "auto", background: "var(--bg-hover)",
+                fontSize: "12px", fontFamily: "monospace", borderRadius: "8px", margin: "8px 0"
+              }}>
+                <code>{children}</code>
+              </pre>
             );
           }
           return (
             <code style={{
               padding: "2px 6px", borderRadius: "6px", background: "var(--bg-hover)",
               fontSize: "12px", fontFamily: "monospace", color: "var(--color-primary)"
-            }} {...props}>
-              {children}
-            </code>
+            }}>{children}</code>
           );
         },
-        blockquote: ({ children }) => (
-          <blockquote style={{
-            borderLeft: "2px solid var(--color-primary)", paddingLeft: "12px",
-            margin: "8px 0", color: "var(--text-secondary)", fontStyle: "italic"
-          }}>
-            {children}
-          </blockquote>
-        ),
-        strong: ({ children }) => <strong style={{ fontWeight: 600, color: "var(--text-main)" }}>{children}</strong>,
-        a: ({ href, children }) => (
-          <a href={href} target="_blank" rel="noopener noreferrer"
-            style={{ color: "var(--color-primary)", textDecoration: "underline" }}>
-            {children}
-          </a>
-        ),
-        hr: () => <hr style={{ margin: "12px 0", border: "none", borderTop: "1px solid var(--border-light)" }} />,
-        table: ({ children }) => (
-          <div style={{ margin: "8px 0", overflowX: "auto", borderRadius: "12px", border: "1px solid var(--border-light)" }}>
-            <table style={{ width: "100%", fontSize: "14px", borderCollapse: "collapse" }}>{children}</table>
-          </div>
-        ),
-        th: ({ children }) => <th style={{ padding: "10px 12px", background: "var(--bg-hover)", textAlign: "left", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", borderBottom: "1px solid var(--border-light)" }}>{children}</th>,
-        td: ({ children }) => <td style={{ padding: "10px 12px", fontSize: "12px", color: "var(--text-main)", borderBottom: "1px solid var(--border-light)" }}>{children}</td>,
       }}
     >
       {content}
@@ -201,15 +77,13 @@ function MdContent({ content }: { content: string }) {
 
 // ── Message bubble ────────────────────────────────────────────────────────────
 
-function MessageBubble({ msg }: { msg: Message }) {
+function MessageBubble({ msg }: { msg: ChatMessage }) {
   const isUser = msg.role === "user";
-
   return (
     <div style={{
       display: "flex", gap: "12px", padding: "4px 0",
       flexDirection: isUser ? "row-reverse" : "row"
     }}>
-      {/* Avatar */}
       <div style={{
         width: "28px", height: "28px", borderRadius: "50%", flexShrink: 0, marginTop: "4px",
         display: "flex", alignItems: "center", justifyContent: "center",
@@ -221,135 +95,18 @@ function MessageBubble({ msg }: { msg: Message }) {
         }
       </div>
 
-      <div style={{
-        display: "flex", flexDirection: "column", gap: "4px", maxWidth: "82%",
-        alignItems: isUser ? "flex-end" : "flex-start"
-      }}>
-        {/* Role label + timestamp */}
-        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexDirection: isUser ? "row-reverse" : "row" }}>
-          <span style={{
-            fontSize: "12px", fontWeight: 500,
-            color: isUser ? "var(--color-primary)" : "#8B5CF6"
-          }}>
-            {isUser ? "我" : "Claude"}
-          </span>
-          <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>{formatTime(msg.ts)}</span>
-        </div>
-
-        {/* Bubble */}
+      <div style={{ maxWidth: "82%", display: "flex", flexDirection: "column", gap: "4px", alignItems: isUser ? "flex-end" : "flex-start" }}>
         <div style={{
           padding: "10px 16px", borderRadius: "16px", fontSize: "14px", lineHeight: 1.6,
           background: isUser ? "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))" : "var(--bg-card)",
           color: isUser ? "white" : "var(--text-main)",
           border: isUser ? "none" : "1px solid var(--border-light)",
-          borderTopRightRadius: isUser ? "4px" : "16px",
-          borderTopLeftRadius: isUser ? "16px" : "4px"
         }}>
-          {isUser ? (
-            <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>{msg.content}</p>
-          ) : (
-            <MdContent content={msg.content} />
-          )}
-          {msg.streaming && (
-            <span style={{ display: "inline-flex", marginLeft: "4px", gap: "2px" }}>
-              {[0, 1, 2].map((i) => (
-                <span key={i} style={{
-                  width: "4px", height: "4px", borderRadius: "50%", background: "currentColor", opacity: 0.6,
-                  animation: "bounce 1s infinite", animationDelay: `${i * 150}ms`
-                }} />
-              ))}
-            </span>
-          )}
+          {isUser ? <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>{msg.content}</p> : <MdContent content={msg.content} />}
+          {msg.streaming && <span className="animate-pulse">▋</span>}
         </div>
-
-        {/* Copy button (assistant only) */}
-        {!isUser && !msg.streaming && (
-          <div style={{ display: "flex" }}>
-            <CopyButton text={msg.content} />
-          </div>
-        )}
+        {!isUser && !msg.streaming && <CopyButton text={msg.content} />}
       </div>
-    </div>
-  );
-}
-
-// ── Welcome hero ──────────────────────────────────────────────────────────────
-
-function WelcomeHero({
-  connected, onSend,
-}: {
-  connected: boolean;
-  onSend: (text: string) => void;
-}) {
-  const config = useStore((s) => s.config);
-
-  return (
-    <div style={{
-      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-      height: "100%", gap: "24px", padding: "32px 24px", textAlign: "center"
-    }}>
-      {/* Logo */}
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "12px" }}>
-        <div style={{
-          width: "64px", height: "64px", borderRadius: "16px",
-          background: "linear-gradient(135deg, #8B5CF6, var(--color-primary))",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          boxShadow: "0 4px 20px rgba(139, 92, 246, 0.3)"
-        }}>
-          <Sparkles style={{ width: "32px", height: "32px", color: "white" }} />
-        </div>
-        <div>
-          <h2 style={{ fontSize: "24px", fontWeight: 700, color: "var(--text-main)" }}>Claude 科研助手</h2>
-          <p style={{ fontSize: "14px", color: "var(--text-muted)", marginTop: "4px" }}>
-            {connected
-              ? `${config?.vault_path ? "Vault 已连接" : ""} · 本地 Claude CLI 已连接`
-              : "正在连接本地 Claude CLI…"}
-          </p>
-        </div>
-      </div>
-
-      {/* Connection badge */}
-      {!connected && (
-        <div style={{
-          display: "flex", alignItems: "center", gap: "8px", padding: "10px 16px", borderRadius: "12px",
-          background: "rgba(251, 191, 36, 0.1)", border: "1px solid rgba(251, 191, 36, 0.3)",
-          fontSize: "14px", color: "#D97706"
-        }}>
-          <WifiOff style={{ width: "16px", height: "16px" }} />
-          <span>等待 Claude CLI 连接，请确保后端已启动</span>
-        </div>
-      )}
-
-      {/* Quick action grid */}
-      <div style={{ width: "100%", maxWidth: "500px" }}>
-        <p style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "12px" }}>快捷指令</p>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "10px" }}>
-          {QUICK_ACTIONS.map(({ id, label, desc, prompt, Icon, color, bg, border }) => (
-            <button key={id} onClick={() => onSend(prompt)} disabled={!connected}
-              style={{
-                display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "8px",
-                padding: "14px", borderRadius: "16px", background: bg, border: `1px solid ${border}`,
-                cursor: connected ? "pointer" : "not-allowed", opacity: connected ? 1 : 0.4,
-                transition: "all 0.2s ease", textAlign: "left"
-              }}>
-              <div style={{
-                width: "28px", height: "28px", borderRadius: "10px", background: bg,
-                display: "flex", alignItems: "center", justifyContent: "center", border: `1px solid ${border}`
-              }}>
-                <Icon style={{ width: "14px", height: "14px", color }} />
-              </div>
-              <div>
-                <p style={{ fontSize: "12px", fontWeight: 600, color }}>{label}</p>
-                <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px", lineHeight: 1.4 }}>{desc}</p>
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-        直接在下方输入问题，或选择快捷指令开始
-      </p>
     </div>
   );
 }
@@ -357,266 +114,205 @@ function WelcomeHero({
 // ── Main panel ────────────────────────────────────────────────────────────────
 
 export default function ClaudePanel() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [clis, setClis] = useState<CliConfig[]>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConv, setActiveConv] = useState<Conversation | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [connected, setConnected] = useState(false);
-  const [connecting, setConnecting] = useState(false);
-  const [streaming, setStreaming] = useState(false);
-  const [showScrollBtn, setShowScrollBtn] = useState(false);
-  const [currentFile] = useState<string | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const scrollAreaRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-  const pendingIdRef = useRef<string | null>(null);
+  const [showConvList, setShowConvList] = useState(false);
+  const [editingTitle, setEditingTitle] = useState<string | null>(null);
+  const [newTitle, setNewTitle] = useState("");
 
-  // ── WebSocket lifecycle ──────────────────────────────────────────────────
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-    setConnecting(true);
-    const url = currentFile
-      ? `ws://127.0.0.1:8765/ws/claude?current_file=${encodeURIComponent(currentFile)}`
-      : "ws://127.0.0.1:8765/ws/claude";
-    const ws = new WebSocket(url);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-    ws.onopen = () => { setConnected(true); setConnecting(false); };
-    ws.onclose = () => { setConnected(false); setConnecting(false); setStreaming(false); };
-    ws.onerror = () => { setConnected(false); setConnecting(false); setStreaming(false); };
+  // 加载 CLI 列表
+  useEffect(() => { detectClis().then(setClis); }, []);
 
-    ws.onmessage = (e: MessageEvent) => {
-      const raw: string = e.data;
-      if (raw.trim() === '{"type":"done"}') {
-        setMessages((prev) => prev.map((m) =>
-          m.id === pendingIdRef.current ? { ...m, streaming: false } : m
-        ));
-        pendingIdRef.current = null;
-        setStreaming(false);
-        return;
+  // 加载对话列表
+  const loadConversations = useCallback(async () => {
+    setConversations(await listConversations());
+  }, []);
+  useEffect(() => { loadConversations(); }, [loadConversations]);
+
+  // 创建新对话
+  const createNewChat = async (cliType: string) => {
+    const conv = await createConversation(cliType);
+    await loadConversations();
+    setActiveConv(conv);
+    setMessages([]);
+    setShowConvList(false);
+  };
+
+  // 加载对话消息
+  const loadMessages = async (conv: Conversation) => {
+    const msgs = await getMessages(conv.id);
+    setMessages(msgs.map(m => ({ ...m, streaming: false })));
+    setActiveConv(conv);
+    setShowConvList(false);
+  };
+
+  // WebSocket 连接
+  const { isConnected, isStreaming, sendMessage } = useCliChat({
+    cliType: activeConv?.cli_type || '',
+    sessionId: activeConv?.session_id || '',
+    conversationId: activeConv?.id || '',
+    onEvent: (event: StreamEvent) => {
+      switch (event.type) {
+        case 'start':
+          pendingMsgIdRef.current = event.msg_id;
+          setMessages(prev => [...prev, { id: event.msg_id, role: 'assistant', content: '', streaming: true }]);
+          break;
+        case 'content':
+          setMessages(prev => prev.map(m => m.id === pendingMsgIdRef.current ? { ...m, content: m.content + event.data } : m));
+          break;
+        case 'finish':
+          setMessages(prev => prev.map(m => m.id === pendingMsgIdRef.current ? { ...m, streaming: false } : m));
+          pendingMsgIdRef.current = null;
+          break;
+        case 'error':
+          setMessages(prev => prev.map(m => m.id === pendingMsgIdRef.current ? { ...m, streaming: false, content: m.content + '\n[Error]' } : m));
+          pendingMsgIdRef.current = null;
+          break;
       }
-      const text = extractText(raw);
-      if (!text) return;
+    },
+  });
+  const pendingMsgIdRef = useRef<string | null>(null);
 
-      setMessages((prev) => {
-        const last = prev[prev.length - 1];
-        if (last && last.id === pendingIdRef.current && last.role === "assistant") {
-          return prev.map((m) =>
-            m.id === pendingIdRef.current ? { ...m, content: m.content + text } : m
-          );
-        }
-        const id = crypto.randomUUID();
-        pendingIdRef.current = id;
-        return [...prev, { id, role: "assistant", content: text, streaming: true, ts: Date.now() }];
-      });
-    };
+  // 自动滚动
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
-    wsRef.current = ws;
-  }, [currentFile]);
-
-  useEffect(() => {
-    connect();
-    return () => { wsRef.current?.close(); };
-  }, [connect]);
-
-  // Scroll management
-  useEffect(() => {
-    const el = scrollAreaRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    if (atBottom || streaming) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [messages, streaming]);
-
-  function handleScroll() {
-    const el = scrollAreaRef.current;
-    if (!el) return;
-    setShowScrollBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 200);
-  }
-
-  function scrollToBottom() {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-    setShowScrollBtn(false);
-  }
-
-  // ── Send ─────────────────────────────────────────────────────────────────
-  const send = useCallback((text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || streaming) return;
-    const id = crypto.randomUUID();
-    setMessages((prev) => [...prev, { id, role: "user", content: trimmed, ts: Date.now() }]);
-    wsRef.current.send(trimmed);
+  // 发送消息
+  const handleSend = useCallback(() => {
+    const trimmed = input.trim();
+    if (!trimmed || isStreaming || !activeConv) return;
+    const userMsgId = crypto.randomUUID();
+    setMessages(prev => [...prev, { id: userMsgId, role: 'user', content: trimmed }]);
+    sendMessage(trimmed);
     setInput("");
-    setStreaming(true);
-    if (inputRef.current) {
-      inputRef.current.style.height = "auto";
-    }
-  }, [streaming]);
+  }, [input, isStreaming, activeConv, sendMessage]);
 
-  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      send(input);
-    }
-  }
+  // 删除对话
+  const handleDeleteConv = async (convId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    await deleteConversation(convId);
+    await loadConversations();
+    if (activeConv?.id === convId) { setActiveConv(null); setMessages([]); }
+  };
 
-  // ── Render ────────────────────────────────────────────────────────────────
-  return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-app)" }}>
-      {/* Header */}
-      <div style={{
-        padding: "14px 24px", borderBottom: "1px solid var(--border-light)", background: "var(--bg-card)",
-        display: "flex", alignItems: "center", gap: "12px", flexShrink: 0
-      }}>
-        <div style={{
-          width: "36px", height: "36px", borderRadius: "10px",
-          background: "linear-gradient(135deg, #8B5CF6, var(--color-primary))",
-          display: "flex", alignItems: "center", justifyContent: "center"
-        }}>
-          <Bot style={{ width: "18px", height: "18px", color: "white" }} />
-        </div>
-        <div style={{ flex: 1 }}>
-          <h2 style={{ fontSize: "16px", fontWeight: 600, color: "var(--text-main)", lineHeight: 1.3 }}>Claude 面板</h2>
-          <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>本地 Claude CLI · 上下文自动注入</p>
-        </div>
+  // 更新标题
+  const handleUpdateTitle = async (convId: string) => {
+    if (!newTitle.trim()) { setEditingTitle(null); return; }
+    await updateConversationTitle(convId, newTitle.trim());
+    await loadConversations();
+    setEditingTitle(null);
+  };
 
-        {/* Status */}
-        <div style={{
-          display: "flex", alignItems: "center", gap: "6px", padding: "6px 12px", borderRadius: "8px",
-          fontSize: "12px", fontWeight: 500,
-          background: connected ? "rgba(168, 230, 207, 0.15)" : connecting ? "rgba(251, 191, 36, 0.15)" : "var(--bg-hover)",
-          color: connected ? "#059669" : connecting ? "#D97706" : "var(--text-muted)"
-        }}>
-          {connected
-            ? <><span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#10B981", animation: "pulse 2s infinite" }} /><Wifi style={{ width: "14px", height: "14px" }} />已连接</>
-            : connecting
-            ? <><span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#FBBF24", animation: "pulse 2s infinite" }} />连接中…</>
-            : <><WifiOff style={{ width: "14px", height: "14px" }} />未连接</>
-          }
-        </div>
-
-        {!connected && !connecting && (
-          <button onClick={connect} aria-label="重连"
-            style={{
-              padding: "6px", borderRadius: "8px", color: "var(--text-muted)",
-              background: "transparent", border: "none", cursor: "pointer"
-            }}>
-            <Cpu style={{ width: "16px", height: "16px" }} />
-          </button>
-        )}
-
-        {messages.length > 0 && (
-          <button onClick={() => setMessages([])} aria-label="清空对话"
-            style={{
-              padding: "6px", borderRadius: "8px", color: "var(--text-muted)",
-              background: "transparent", border: "none", cursor: "pointer"
-            }}>
-            <RotateCcw style={{ width: "16px", height: "16px" }} />
-          </button>
-        )}
-      </div>
-
-      {/* Messages + scroll area */}
-      <div
-        ref={scrollAreaRef}
-        onScroll={handleScroll}
-        style={{ flex: 1, overflowY: "auto", position: "relative" }}
-      >
-        {messages.length === 0 ? (
-          <WelcomeHero connected={connected} onSend={send} />
-        ) : (
-          <div style={{ maxWidth: "720px", margin: "0 auto", padding: "16px 24px 16px", display: "flex", flexDirection: "column", gap: "8px" }}>
-            {messages.map((msg) => <MessageBubble key={msg.id} msg={msg} />)}
-            <div ref={bottomRef} />
-          </div>
-        )}
-
-        {/* Scroll-to-bottom button */}
-        {showScrollBtn && (
-          <button
-            onClick={scrollToBottom}
-            aria-label="滚动到底部"
-            style={{
-              position: "absolute", bottom: "16px", right: "24px",
-              width: "32px", height: "32px", borderRadius: "50%",
-              background: "var(--bg-card)", border: "1px solid var(--border-light)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              color: "var(--text-muted)", cursor: "pointer", boxShadow: "var(--shadow-soft)", zIndex: 10
-            }}
-          >
-            <ChevronDown style={{ width: "16px", height: "16px" }} />
-          </button>
-        )}
-      </div>
-
-      {/* Quick actions compact bar (when conversation active) */}
-      {messages.length > 0 && (
-        <div style={{
-          padding: "8px 16px", borderTop: "1px solid var(--border-light)", background: "var(--bg-card)",
-          display: "flex", alignItems: "center", gap: "6px", overflowX: "auto", flexShrink: 0
-        }}>
-          <span style={{ fontSize: "12px", color: "var(--text-muted)", flexShrink: 0, marginRight: "4px" }}>快捷：</span>
-          {QUICK_ACTIONS.map(({ id, label, prompt, Icon, color }) => (
-            <button key={id} onClick={() => send(prompt)} disabled={!connected || streaming}
-              style={{
-                display: "flex", alignItems: "center", gap: "6px",
-                padding: "6px 12px", borderRadius: "8px", fontSize: "12px", fontWeight: 500,
-                color: "var(--text-secondary)", background: "var(--bg-hover)", border: "1px solid var(--border-light)",
-                cursor: connected && !streaming ? "pointer" : "not-allowed", opacity: connected && !streaming ? 1 : 0.4,
-                flexShrink: 0
-              }}>
-              <Icon style={{ width: "14px", height: "14px", color }} />
-              {label}
+  // 未选择对话 - 显示 CLI 选择
+  if (!activeConv) {
+    return (
+      <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "24px", background: "var(--bg-app)" }}>
+        <h2 style={{ fontSize: "24px", fontWeight: 700, color: "var(--text-main)" }}>CLI 对话助手</h2>
+        <div style={{ display: "flex", gap: "16px", flexWrap: "wrap", justifyContent: "center" }}>
+          {clis.map(cli => (
+            <button key={cli.id} onClick={() => createNewChat(cli.id)}
+              style={{ padding: "24px 32px", borderRadius: "16px", background: "var(--bg-card)", border: "1px solid var(--border-light)", cursor: "pointer" }}
+            >
+              <Bot style={{ width: "32px", height: "32px", color: "var(--color-primary)" }} />
+              <p style={{ fontSize: "16px", fontWeight: 600 }}>{cli.name}</p>
             </button>
           ))}
         </div>
+      </div>
+    );
+  }
+
+  // 对话界面
+  return (
+    <div style={{ height: "100%", display: "flex", background: "var(--bg-app)" }}>
+      {/* Sidebar */}
+      {showConvList && (
+        <div style={{ width: "260px", borderRight: "1px solid var(--border-light)", background: "var(--bg-card)" }}>
+          <div style={{ padding: "16px", borderBottom: "1px solid var(--border-light)", display: "flex", justifyContent: "space-between" }}>
+            <h3 style={{ fontSize: "14px", fontWeight: 600 }}>对话历史</h3>
+            <button onClick={() => setShowConvList(false)}><X style={{ width: "16px", height: "16px" }} /></button>
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: "8px" }}>
+            {conversations.map(conv => (
+              <div key={conv.id} onClick={() => loadMessages(conv)}
+                style={{
+                  padding: "12px", borderRadius: "8px", marginBottom: "4px",
+                  background: activeConv?.id === conv.id ? "var(--bg-hover)" : "transparent",
+                  cursor: "pointer"
+                }}
+              >
+                {editingTitle === conv.id ? (
+                  <input
+                    value={newTitle} onChange={(e) => setNewTitle(e.target.value)}
+                    onBlur={() => handleUpdateTitle(conv.id)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleUpdateTitle(conv.id); if (e.key === 'Escape') setEditingTitle(null); }}
+                    autoFocus
+                    style={{ fontSize: "13px", padding: "4px 8px", width: "100%" }}
+                  />
+                ) : (
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span>{conv.title}</span>
+                    <div>
+                      <button onClick={(e) => { e.stopPropagation(); setEditingTitle(conv.id); setNewTitle(conv.title); }}><Edit2 style={{ width: "12px" }} /></button>
+                      <button onClick={(e) => handleDeleteConv(conv.id, e)}><Trash2 style={{ width: "12px" }} /></button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
       )}
 
-      {/* Input bar */}
-      <div style={{
-        padding: "12px 16px", borderTop: "1px solid var(--border-light)", background: "var(--bg-card)", flexShrink: 0
-      }}>
+      {/* Main Chat */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        {/* Header */}
         <div style={{
-          display: "flex", alignItems: "flex-end", gap: "8px",
-          padding: "10px 14px", borderRadius: "16px",
-          border: "1px solid var(--border-light)", background: "var(--bg-hover)"
+          padding: "14px 24px", borderBottom: "1px solid var(--border-light)",
+          background: "var(--bg-card)", display: "flex", alignItems: "center", gap: "12px"
         }}>
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={connected ? "输入问题… (Enter 发送，Shift+Enter 换行)" : "等待 Claude CLI 连接…"}
-            disabled={!connected}
-            rows={1}
-            style={{
-              flex: 1, background: "transparent", fontSize: "14px",
-              color: "var(--text-main)", border: "none", outline: "none", resize: "none",
-              minHeight: "22px", maxHeight: "160px", padding: "2px 0"
-            }}
-            onInput={(e) => {
-              const el = e.currentTarget;
-              el.style.height = "auto";
-              el.style.height = Math.min(el.scrollHeight, 160) + "px";
-            }}
-          />
-          <button
-            onClick={() => send(input)}
-            disabled={!connected || !input.trim() || streaming}
-            aria-label="发送"
-            style={{
-              width: "32px", height: "32px", borderRadius: "10px",
-              background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
-              color: "white", display: "flex", alignItems: "center", justifyContent: "center",
-              border: "none", cursor: connected && input.trim() && !streaming ? "pointer" : "not-allowed",
-              opacity: connected && input.trim() && !streaming ? 1 : 0.4, flexShrink: 0
-            }}
-          >
-            <Send style={{ width: "14px", height: "14px" }} />
-          </button>
+          <button onClick={() => setShowConvList(!showConvList)}><MessageSquare style={{ width: "16px" }} /></button>
+          <div style={{ flex: 1 }}>
+            <h2 style={{ fontSize: "16px", fontWeight: 600 }}>{activeConv.title}</h2>
+            <p style={{ fontSize: "12px", color: "var(--text-muted)" }}>{activeConv.cli_type} · {isConnected ? '已连接' : '未连接'}</p>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: isConnected ? "#059669" : "var(--text-muted)" }}>
+            {isConnected ? <Wifi style={{ width: "14px" }} /> : <WifiOff style={{ width: "14px" }} />}
+            {isConnected ? '在线' : '离线'}
+          </div>
+          <button onClick={() => { setActiveConv(null); setMessages([]); }}><Plus style={{ width: "14px" }} /> 新对话</button>
         </div>
-        <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "6px", paddingLeft: "4px" }}>
-          Enter 发送 · Shift+Enter 换行 · 上下文自动注入
-        </p>
+
+        {/* Messages */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "24px" }}>
+          <div style={{ maxWidth: "720px", margin: "0 auto", display: "flex", flexDirection: "column", gap: "8px" }}>
+            {messages.map((msg) => <MessageBubble key={msg.id} msg={msg} />)}
+            <div ref={messagesEndRef} />
+          </div>
+        </div>
+
+        {/* Input */}
+        <div style={{ padding: "16px 24px", borderTop: "1px solid var(--border-light)", background: "var(--bg-card)" }}>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: "12px", padding: "12px 16px", borderRadius: "16px", border: "1px solid var(--border-light)", background: "var(--bg-hover)" }}>
+            <textarea
+              value={input} onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+              placeholder={isConnected ? "输入消息..." : "等待连接..."}
+              disabled={!isConnected || isStreaming}
+              style={{ flex: 1, background: "transparent", fontSize: "14px", color: "var(--text-main)", border: "none", outline: "none", resize: "none", minHeight: "24px", maxHeight: "160px" }}
+              onInput={(e) => { const el = e.currentTarget; el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 160) + "px"; }}
+            />
+            <button onClick={handleSend} disabled={!isConnected || !input.trim() || isStreaming}
+              style={{ width: "36px", height: "36px", borderRadius: "10px", background: "var(--color-primary)", color: "white", display: "flex", alignItems: "center", justifyContent: "center", border: "none" }}
+            >
+              <Send style={{ width: "16px", height: "16px" }} />
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
