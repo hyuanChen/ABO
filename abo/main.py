@@ -1,6 +1,7 @@
 """
 ABO Backend — FastAPI 入口
 """
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from .runtime.runner import ModuleRunner
 from .runtime.scheduler import ModuleScheduler
 from .sdk.types import FeedbackAction
 from .store.cards import CardStore
+from .summary import DailySummaryGenerator, SummaryScheduler
 
 # ── 全局单例 ────────────────────────────────────────────────────
 _registry = ModuleRegistry()
@@ -30,6 +32,8 @@ _card_store = CardStore()
 _prefs = PreferenceEngine()
 _scheduler: ModuleScheduler | None = None
 _activity_tracker: ActivityTracker | None = None
+_summary_generator: DailySummaryGenerator | None = None
+_summary_scheduler: SummaryScheduler | None = None
 
 # ── 爬取任务取消控制 ────────────────────────────────────────────
 _crawl_cancel_flags: dict[str, bool] = {}  # session_id -> should_cancel
@@ -97,7 +101,7 @@ def _write_sdk_readme():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _scheduler, _activity_tracker
+    global _scheduler, _activity_tracker, _summary_generator, _summary_scheduler
     vault_path = get_vault_path()
     _registry.load_all()
     runner = ModuleRunner(_card_store, _prefs, broadcaster, vault_path)
@@ -106,9 +110,15 @@ async def lifespan(app: FastAPI):
     start_watcher(_registry, lambda reg: _scheduler.reschedule(reg.enabled()))
     _write_sdk_readme()
     _activity_tracker = ActivityTracker()
+    _summary_generator = DailySummaryGenerator(_activity_tracker)
+    _summary_scheduler = SummaryScheduler(_summary_generator)
+    _summary_scheduler.start()
+    print("[startup] Activity tracker and summary scheduler initialized")
     yield
     if _scheduler:
         _scheduler.shutdown()
+    if _summary_scheduler:
+        _summary_scheduler.shutdown()
 
 
 app = FastAPI(title="ABO Backend", version="1.0.0", lifespan=lifespan)
@@ -2004,6 +2014,52 @@ async def update_timeline_summary(date: str, data: dict):
         _activity_tracker.update_summary(date, data.get("summary", ""))
         return {"ok": True}
     return {"ok": False, "error": "Tracker not initialized"}
+
+
+# ── Daily Summary Generator ─────────────────────────────────────
+
+@app.post("/api/summary/generate")
+async def generate_summary_manually(data: dict = None):
+    """Manually trigger summary generation."""
+    global _summary_scheduler
+    date = data.get("date") if data else None
+    if _summary_scheduler:
+        summary = await asyncio.to_thread(_summary_scheduler.generate_now, date)
+        return {"ok": True, "summary": summary}
+    return {"ok": False, "error": "Generator not initialized"}
+
+
+@app.get("/api/summary/{date}")
+async def get_summary(date: str):
+    """Get generated summary for a date."""
+    global _activity_tracker
+    if _activity_tracker:
+        timeline = _activity_tracker.get_timeline(date)
+        return {
+            "date": date,
+            "summary": timeline.summary,
+            "generated_at": timeline.summary_generated_at,
+            "activity_count": len(timeline.activities)
+        }
+    return {"error": "Tracker not initialized"}
+
+
+@app.get("/api/summary/today/status")
+async def get_today_summary_status():
+    """Check if today's summary has been generated."""
+    from datetime import datetime
+    global _activity_tracker
+    today = datetime.now().strftime("%Y-%m-%d")
+    if _activity_tracker:
+        timeline = _activity_tracker.get_timeline(today)
+        return {
+            "date": today,
+            "has_summary": timeline.summary is not None,
+            "summary": timeline.summary,
+            "generated_at": timeline.summary_generated_at,
+            "activity_count": len(timeline.activities)
+        }
+    return {"error": "Tracker not initialized"}
 
 
 if __name__ == "__main__":
