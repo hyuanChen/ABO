@@ -346,6 +346,7 @@ async def list_modules():
         "output": ["rss"],
         "is_virtual": True,
         "description": "聚合所有模块内容为 RSS feed",
+        "next_run": None,  # Virtual module has no scheduled next run
     }
     modules.append(rss_module)
 
