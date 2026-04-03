@@ -1959,6 +1959,14 @@ async def record_chat(data: dict):
     return {"ok": False, "error": "Tracker not initialized"}
 
 
+@app.get("/api/timeline/today")
+async def get_today_timeline():
+    """Get today's timeline."""
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    return await get_timeline(today)
+
+
 @app.get("/api/timeline/{date}")
 async def get_timeline(date: str):
     """Get timeline for a specific date."""
@@ -1974,14 +1982,6 @@ async def get_timeline(date: str):
             "interaction_summary": timeline.get_interaction_summary()
         }
     return {"error": "Tracker not initialized"}
-
-
-@app.get("/api/timeline/today")
-async def get_today_timeline():
-    """Get today's timeline."""
-    from datetime import datetime
-    today = datetime.now().strftime("%Y-%m-%d")
-    return await get_timeline(today)
 
 
 @app.get("/api/timeline/recent/{days}")
