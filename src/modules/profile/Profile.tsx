@@ -1,6 +1,6 @@
 // src/modules/profile/Profile.tsx
 import { useEffect, useState } from "react";
-import { User, Sparkles } from "lucide-react";
+import { User, Sparkles, Clock } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, ProfileStats } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Card, Grid } from "../../components/Layout";
@@ -13,6 +13,7 @@ import DailyCheckInModal from "./DailyCheckInModal";
 import GamePanel from "../../components/GamePanel";
 import KeywordPreferences from "../../components/KeywordPreferences";
 import ModuleConfigPanel from "../../components/ModuleConfigPanel";
+import TimelineView from "../../components/TimelineView";
 
 interface Todo {
   id: string;
@@ -116,6 +117,15 @@ export default function Profile() {
           style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
         >
           <GamePanel />
+        </Card>
+
+        {/* Today's Timeline */}
+        <Card
+          title="今日时间线"
+          icon={<Clock style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
+          style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
+        >
+          <TimelineView />
         </Card>
 
         {/* Phase 2: Keyword Preferences */}
