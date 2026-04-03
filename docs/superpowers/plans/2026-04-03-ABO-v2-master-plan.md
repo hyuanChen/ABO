@@ -1484,10 +1484,85 @@ Record actual time spent on each phase:
 
 ---
 
-**Plan complete. Two execution options:**
+**Plan Updated with Phase 6: Timeline & Daily Summary**
 
-**1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
+---
 
-**2. Inline Execution** - Execute tasks in this session using executing-plans, batch execution with checkpoints
+## Phase 6: Today's Timeline & Daily Summary
 
-Which approach would you like?
+### P6-Task 1: Activity Tracking System (Backend)
+
+**Files:**
+- Create: `abo/activity/timeline.py`
+- Create: `abo/activity/models.py`
+- Modify: `abo/main.py` (add activity tracking to feedback endpoints)
+
+**Goal:** Track user activities (clicks, likes, saves) with timestamps for timeline generation.
+
+- [ ] **Step 1:** Create activity models (ActivityType, Activity, DailyTimeline)
+- [ ] **Step 2:** Create ActivityTracker class with record/get/save methods
+- [ ] **Step 3:** Integrate into feedback endpoints in main.py
+- [ ] **Step 4:** Add API endpoints for /api/timeline/today and /api/activity/chat
+- [ ] **Step 5:** Commit
+
+---
+
+### P6-Task 2: Daily Summary Generator (Claude Integration)
+
+**Files:**
+- Create: `abo/summary/generator.py`
+- Create: `abo/summary/scheduler.py`
+- Modify: `abo/main.py` (add summary endpoints)
+
+**Goal:** Generate daily summary at 11 AM using Claude CLI based on today's activities.
+
+- [ ] **Step 1:** Create DailySummaryGenerator class with prompt builder
+- [ ] **Step 2:** Create SummaryScheduler with APScheduler cron job at 11:00 AM
+- [ ] **Step 3:** Integrate into main.py startup/shutdown
+- [ ] **Step 4:** Add API endpoints for /api/summary/generate and /api/summary/{date}
+- [ ] **Step 5:** Commit
+
+---
+
+### P6-Task 3: Today's Timeline UI Component
+
+**Files:**
+- Create: `src/components/TimelineView.tsx`
+- Modify: `src/modules/profile/Profile.tsx` (add timeline section)
+
+**Goal:** Create UI to display today's timeline and chat path.
+
+- [ ] **Step 1:** Create TimelineView component with activity list, chat path, summary display
+- [ ] **Step 2:** Add "Generate Summary" button with loading state
+- [ ] **Step 3:** Integrate into Profile page
+- [ ] **Step 4:** Commit
+
+---
+
+### P6-Task 4: Integration & Testing
+
+**Goal:** Test complete flow: activity tracking → timeline UI → daily summary.
+
+- [ ] **Step 1:** Test activity tracking via API
+- [ ] **Step 2:** Test summary generation manually
+- [ ] **Step 3:** Test frontend timeline display
+- [ ] **Step 4:** Test scheduled summary at 11 AM
+- [ ] **Step 5:** Final commit
+
+---
+
+## Complete Summary Checklist (All Phases)
+
+| Phase | Tasks | Status |
+|-------|-------|--------|
+| P0 | Bug Fixes (4 tasks) | ✅ Done |
+| P1 | Crawlers (4 tasks) | ✅ Done |
+| P2 | Feed Integration (2 tasks) | ✅ Done |
+| P3 | Gamification (2 tasks) | ✅ Done |
+| P4 | Config Panel (2 tasks) | ✅ Done |
+| P5 | Testing & Polish (2 tasks) | ✅ Done |
+| P6 | Timeline & Summary (4 tasks) | 🔄 Ready |
+
+---
+
+**Plan complete. Ready for Phase 6 execution with subagent-driven development.**
