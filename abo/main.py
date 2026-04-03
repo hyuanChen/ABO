@@ -4,7 +4,11 @@ ABO Backend — FastAPI 入口
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+import hashlib
+import os
+import re
 
+import frontmatter
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -1197,12 +1201,6 @@ async def download_arxiv_pdf(
 @app.post("/api/modules/semantic-scholar/save-to-literature")
 async def save_s2_to_literature(data: dict):
     """Save a Semantic Scholar paper to the literature library with figures and PDF."""
-    import frontmatter
-    import os
-    import httpx
-    import re
-    import asyncio
-
     paper = data.get("paper", {})
     save_pdf = data.get("save_pdf", True)
     max_figures = data.get("max_figures", 5)
@@ -1221,15 +1219,16 @@ async def save_s2_to_literature(data: dict):
 
     # Get source paper info for naming (from top-level data, not metadata)
     source_paper = data.get("source_paper", "Unknown")
-    source_short = re.sub(r'[^\w\s-]', '', source_paper)[:20].strip()
+    source_short = re.sub(r'[^\w\s-]', '', source_paper)[:20].strip() or "Unknown"
     folder_name = f"{source_short}_FollowUp"
 
-    # Build paper folder name: AuthorYear-ShortTitle
+    # Build paper folder name: AuthorYear-ShortTitle-Hash
     authors = meta.get("authors", ["Unknown"])
     first_author = authors[0].split()[-1].replace(",", "").replace(" ", "") if authors else "Unknown"
     year = meta.get("year", datetime.now().year)
-    short_title = "".join(c for c in title[:20] if c.isalnum()).upper()
-    paper_folder_name = f"{first_author}{year}-{short_title}"
+    short_title = "".join(c for c in title[:20] if c.isalnum()).upper() or "UNTITLED"
+    title_hash = hashlib.md5(title.encode()).hexdigest()[:6]
+    paper_folder_name = f"{first_author}{year}-{short_title}-{title_hash}"
 
     # Build target path: FollowUps/{Source}_FollowUp/{AuthorYear-Title}/
     base_dir = lit_path / "FollowUps" / folder_name
