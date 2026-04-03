@@ -3,7 +3,7 @@ import asyncio
 import json
 import os
 import uuid
-from typing import Callable, Optional
+from typing import Callable, Optional, Awaitable
 from asyncio.subprocess import PIPE
 
 
@@ -29,14 +29,14 @@ class CliRunner:
         self.session_id = session_id
         self.process: Optional[asyncio.subprocess.Process] = None
 
-    async def stream_call(self, message: str, on_chunk: Callable[[dict], None]):
+    async def stream_call(self, message: str, on_chunk: Callable[[dict], Awaitable[None]], timeout: float = 300.0):
         protocol = self.config.get('protocol', 'raw')
         if protocol == 'acp':
             await self._stream_acp(message, on_chunk)
         else:
             await self._stream_raw(message, on_chunk)
 
-    async def _stream_acp(self, message: str, on_chunk: Callable):
+    async def _stream_acp(self, message: str, on_chunk: Callable[[dict], Awaitable[None]]):
         self.process = await asyncio.create_subprocess_exec(
             *self.config['command'],
             stdin=PIPE, stdout=PIPE, stderr=PIPE,
@@ -48,58 +48,70 @@ class CliRunner:
             "params": {"sessionId": self.session_id, "text": message},
             "id": str(uuid.uuid4())
         }
-        assert self.process.stdin
+        if self.process.stdin is None:
+            raise RuntimeError("Process stdin is not available")
         self.process.stdin.write(json.dumps(acp_msg).encode() + b'\n')
         await self.process.stdin.drain()
 
-        assert self.process.stdout
+        if self.process.stdout is None:
+            raise RuntimeError("Process stdout is not available")
         reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(reader)
         loop = asyncio.get_event_loop()
         await loop.connect_read_pipe(lambda: protocol, self.process.stdout)
 
-        while True:
-            line = await reader.readline()
-            if not line:
-                break
-            try:
-                data = json.loads(line.decode())
-                event_type = self._parse_acp_event(data)
-                if event_type == 'content':
-                    await on_chunk({'type': 'content', 'data': data['params']['content']['text'], 'msg_id': data.get('id', '')})
-                elif event_type == 'finish':
-                    await on_chunk({'type': 'finish', 'data': '', 'msg_id': ''})
+        try:
+            while True:
+                line = await reader.readline()
+                if not line:
                     break
-                elif event_type == 'tool_call':
-                    await on_chunk({'type': 'tool_call', 'data': json.dumps(data['params']), 'msg_id': data.get('id', '')})
-            except json.JSONDecodeError:
-                continue
+                try:
+                    data = json.loads(line.decode())
+                    event_type = self._parse_acp_event(data)
+                    if event_type == 'content':
+                        await on_chunk({'type': 'content', 'data': data['params']['content']['text'], 'msg_id': data.get('id', '')})
+                    elif event_type == 'finish':
+                        await on_chunk({'type': 'finish', 'data': '', 'msg_id': ''})
+                        break
+                    elif event_type == 'tool_call':
+                        await on_chunk({'type': 'tool_call', 'data': json.dumps(data['params']), 'msg_id': data.get('id', '')})
+                except json.JSONDecodeError:
+                    continue
+        finally:
+            if self.process:
+                await self.process.wait()
 
-    async def _stream_raw(self, message: str, on_chunk: Callable):
+    async def _stream_raw(self, message: str, on_chunk: Callable[[dict], Awaitable[None]]):
         self.process = await asyncio.create_subprocess_exec(
             *self.config['command'],
             stdin=PIPE, stdout=PIPE, stderr=PIPE,
         )
-        assert self.process.stdin
+        if self.process.stdin is None:
+            raise RuntimeError("Process stdin is not available")
         self.process.stdin.write(message.encode() + b'\n')
         await self.process.stdin.drain()
         self.process.stdin.close()
 
-        assert self.process.stdout
-        buffer = b''
-        while True:
-            chunk = await self.process.stdout.read(4096)
-            if not chunk:
-                break
-            buffer += chunk
-            lines = buffer.split(b'\n')
-            buffer = lines.pop() if lines else b''
-            for line in lines:
-                if line:
-                    await on_chunk({'type': 'content', 'data': line.decode('utf-8', errors='replace'), 'msg_id': ''})
-        if buffer:
-            await on_chunk({'type': 'content', 'data': buffer.decode('utf-8', errors='replace'), 'msg_id': ''})
-        await on_chunk({'type': 'finish', 'data': '', 'msg_id': ''})
+        if self.process.stdout is None:
+            raise RuntimeError("Process stdout is not available")
+        try:
+            buffer = b''
+            while True:
+                chunk = await self.process.stdout.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                lines = buffer.split(b'\n')
+                buffer = lines.pop() if lines else b''
+                for line in lines:
+                    if line:
+                        await on_chunk({'type': 'content', 'data': line.decode('utf-8', errors='replace'), 'msg_id': ''})
+            if buffer:
+                await on_chunk({'type': 'content', 'data': buffer.decode('utf-8', errors='replace'), 'msg_id': ''})
+            await on_chunk({'type': 'finish', 'data': '', 'msg_id': ''})
+        finally:
+            if self.process:
+                await self.process.wait()
 
     def _parse_acp_event(self, data: dict) -> str:
         method = data.get('method', '')
@@ -141,4 +153,6 @@ async def batch_call(prompt: str, context: str = "") -> str:
         await runner.stream_call(full_prompt, on_chunk)
     finally:
         runner.cleanup()
+    if runner.process and runner.process.returncode != 0:
+        raise RuntimeError(f"CLI process exited with code {runner.process.returncode}")
     return ''.join(chunks)
