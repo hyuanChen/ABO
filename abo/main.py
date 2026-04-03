@@ -1292,17 +1292,17 @@ async def save_s2_to_literature(data: dict):
     title_hash = hashlib.md5(title.encode()).hexdigest()[:6]
     paper_folder_name = f"{first_author}{year}-{short_title}-{title_hash}"
 
-    # Build target path: FollowUps/{Source}_FollowUp/{AuthorYear-Title}/
-    base_dir = lit_path / "FollowUps" / folder_name
-    paper_folder = base_dir / paper_folder_name
+    # Build target path: Literature/{Source}_FollowUp/{AuthorYear-ShortTitle}/
+    base_dir = lit_path / folder_name
+    paper_folder = base_dir / f"{first_author}{year}-{short_title}"
     paper_folder.mkdir(parents=True, exist_ok=True)
 
     # Figures folder inside paper folder
     figures_dir = paper_folder / "figures"
     figures_dir.mkdir(exist_ok=True)
 
-    # Markdown filename matches folder name
-    md_filename = f"{paper_folder_name}.md"
+    # Markdown filename: {AuthorYear}-{ShortTitle}.md
+    md_filename = f"{first_author}{year}-{short_title}.md"
     target_path = paper_folder / md_filename
 
     # Try to fetch figures from arXiv if arxiv_id exists
