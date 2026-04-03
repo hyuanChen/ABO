@@ -104,12 +104,26 @@ def _check_action_achievements(action: str, metadata: dict):
         "first_like": ("card_like", lambda m: True, "初次点赞", "给第一条内容点了赞"),
         "first_save": ("save_to_literature", lambda m: True, "文献收集者", "保存了第一篇文献"),
         "first_paper": ("save_paper", lambda m: True, "学术起步", "保存了第一篇论文"),
+        "daily_checkin_7d": ("daily_checkin", lambda m: _get_checkin_streak() >= 7, "坚持一周", "连续签到7天"),
+        "keyword_master": ("card_like", lambda m: _get_liked_count() >= 10, "关键词大师", "点赞了10条内容"),
     }
 
     for ach_id, (required_action, condition, name, desc) in achievement_checks.items():
         if action == required_action and condition(metadata):
             if profile_store.unlock_achievement(ach_id, name):
                 print(f"[achievement] Unlocked: {name}")
+
+
+def _get_checkin_streak() -> int:
+    """Get consecutive check-in days (simplified)."""
+    # TODO: Implement proper streak tracking
+    return 1
+
+
+def _get_liked_count() -> int:
+    """Get total liked count."""
+    # TODO: Implement proper liked count tracking
+    return 0
 
 
 def get_daily_stats() -> dict:
