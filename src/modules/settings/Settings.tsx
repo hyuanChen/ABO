@@ -8,8 +8,13 @@ import {
   Palette,
   Zap,
   ChevronRight,
+  Rss,
+  Copy,
+  Check,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
+import { api } from "../../core/api";
+import { useStore } from "../../core/store";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -161,6 +166,226 @@ function TabButton({
 
 // ── Sections ──────────────────────────────────────────────────────────────────
 
+interface RSSConfig {
+  enabled: boolean;
+  title: string;
+  description: string;
+  max_items: number;
+  feed_url: string;
+}
+
+function RSSSection() {
+  const [config, setConfig] = useState<RSSConfig>({
+    enabled: false,
+    title: "ABO Intelligence Feed",
+    description: "Aggregated intelligence from ABO modules",
+    max_items: 50,
+    feed_url: "",
+  });
+  const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const { addToast } = useStore();
+
+  useEffect(() => {
+    loadConfig();
+  }, []);
+
+  async function loadConfig() {
+    try {
+      setLoading(true);
+      const data = await api.get<RSSConfig>("/api/rss/config");
+      setConfig(data);
+    } catch (e) {
+      console.error("Failed to load RSS config:", e);
+      addToast({ kind: "error", title: "加载 RSS 配置失败" });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveConfig(updates: Partial<RSSConfig>) {
+    try {
+      const newConfig = { ...config, ...updates };
+      const data = await api.post<RSSConfig>("/api/rss/config", newConfig);
+      setConfig(data);
+      addToast({ kind: "success", title: "RSS 配置已保存" });
+    } catch (e) {
+      console.error("Failed to save RSS config:", e);
+      addToast({ kind: "error", title: "保存 RSS 配置失败" });
+    }
+  }
+
+  function copyFeedUrl() {
+    if (config.feed_url) {
+      navigator.clipboard.writeText(config.feed_url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+      addToast({ kind: "success", title: "订阅链接已复制" });
+    }
+  }
+
+  if (loading) {
+    return (
+      <Card title="RSS 订阅" icon={<Rss style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ padding: "20px", textAlign: "center", color: "var(--text-muted)" }}>
+          加载中...
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <Card title="RSS 订阅" icon={<Rss style={{ width: "18px", height: "18px" }} />}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+        {/* Enable Toggle */}
+        <SettingItem
+          icon={<Rss style={{ width: "20px", height: "20px" }} />}
+          title="启用 RSS Feed"
+          description={config.enabled ? "外部可以通过 RSS 订阅你的情报" : "RSS feed 当前未启用"}
+        >
+          <Toggle
+            enabled={config.enabled}
+            onToggle={() => saveConfig({ enabled: !config.enabled })}
+          />
+        </SettingItem>
+
+        {config.enabled && (
+          <>
+            {/* Feed URL */}
+            <SettingItem
+              icon={<Copy style={{ width: "20px", height: "20px" }} />}
+              title="订阅链接"
+              description="复制此链接到 RSS 阅读器"
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <code
+                  style={{
+                    padding: "6px 12px",
+                    background: "var(--bg-hover)",
+                    borderRadius: "var(--radius-sm)",
+                    fontSize: "0.75rem",
+                    fontFamily: "monospace",
+                    color: "var(--text-secondary)",
+                    maxWidth: "200px",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {config.feed_url || "未启用"}
+                </code>
+                <button
+                  onClick={copyFeedUrl}
+                  disabled={!config.feed_url}
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid var(--border-light)",
+                    background: "var(--bg-card)",
+                    cursor: config.feed_url ? "pointer" : "not-allowed",
+                    opacity: config.feed_url ? 1 : 0.5,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "4px",
+                    fontSize: "0.75rem",
+                    color: "var(--text-secondary)",
+                  }}
+                >
+                  {copied ? (
+                    <>
+                      <Check style={{ width: "14px", height: "14px" }} />
+                      已复制
+                    </>
+                  ) : (
+                    <>
+                      <Copy style={{ width: "14px", height: "14px" }} />
+                      复制
+                    </>
+                  )}
+                </button>
+              </div>
+            </SettingItem>
+
+            {/* Title Input */}
+            <SettingItem
+              icon={<span style={{ fontSize: "16px" }}>T</span>}
+              title="Feed 标题"
+              description="RSS feed 的标题"
+            >
+              <input
+                type="text"
+                value={config.title}
+                onChange={(e) => setConfig({ ...config, title: e.target.value })}
+                onBlur={() => saveConfig({ title: config.title })}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: "var(--text-main)",
+                  fontSize: "0.875rem",
+                  width: "200px",
+                }}
+              />
+            </SettingItem>
+
+            {/* Description Input */}
+            <SettingItem
+              icon={<span style={{ fontSize: "16px" }}>D</span>}
+              title="Feed 描述"
+              description="RSS feed 的描述"
+            >
+              <input
+                type="text"
+                value={config.description}
+                onChange={(e) => setConfig({ ...config, description: e.target.value })}
+                onBlur={() => saveConfig({ description: config.description })}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: "var(--text-main)",
+                  fontSize: "0.875rem",
+                  width: "280px",
+                }}
+              />
+            </SettingItem>
+
+            {/* Max Items */}
+            <SettingItem
+              icon={<span style={{ fontSize: "16px" }}>#</span>}
+              title="最大条目数"
+              description="Feed 中最多显示的条目数量 (10-200)"
+            >
+              <input
+                type="number"
+                min={10}
+                max={200}
+                value={config.max_items}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value) || 50;
+                  setConfig({ ...config, max_items: val });
+                }}
+                onBlur={() => saveConfig({ max_items: config.max_items })}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: "var(--text-main)",
+                  fontSize: "0.875rem",
+                  width: "80px",
+                }}
+              />
+            </SettingItem>
+          </>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 function GeneralSection() {
   const [darkMode, setDarkMode] = useState(() =>
     document.documentElement.classList.contains("dark")
@@ -194,6 +419,9 @@ function GeneralSection() {
           </SettingItem>
         </div>
       </Card>
+
+      {/* RSS Feed */}
+      <RSSSection />
 
       {/* Keyboard Shortcuts */}
       <Card title="键盘快捷键" icon={<Keyboard style={{ width: "18px", height: "18px" }} />}>

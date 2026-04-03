@@ -18,6 +18,7 @@ from .activity import ActivityTracker, ActivityType
 from .config import get_vault_path, get_literature_path, load as load_config, save as save_config
 from .preferences.engine import PreferenceEngine
 from .profile.routes import router as profile_router, init_routes as init_profile_routes
+from .rss import rss_router
 from .runtime.broadcaster import broadcaster
 from .runtime.discovery import ModuleRegistry, start_watcher
 from .runtime.runner import ModuleRunner
@@ -141,6 +142,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(profile_router)
+app.include_router(rss_router)
 
 
 # ── Health ───────────────────────────────────────────────────────
@@ -328,12 +330,26 @@ async def feedback(card_id: str, body: FeedbackReq):
 @app.get("/api/modules")
 async def list_modules():
     job_map = {j["id"]: j for j in (_scheduler.job_info() if _scheduler else [])}
-    return {
-        "modules": [
-            {**m.get_status(), "next_run": job_map.get(m.id, {}).get("next_run")}
-            for m in _registry.all()
-        ]
+    modules = [
+        {**m.get_status(), "next_run": job_map.get(m.id, {}).get("next_run")}
+        for m in _registry.all()
+    ]
+
+    # Add RSS as virtual module
+    config = load_config()
+    rss_module = {
+        "id": "rss-aggregator",
+        "name": "RSS 聚合",
+        "schedule": "on-demand",
+        "icon": "rss",
+        "enabled": config.get("rss_enabled", False),
+        "output": ["rss"],
+        "is_virtual": True,
+        "description": "聚合所有模块内容为 RSS feed",
     }
+    modules.append(rss_module)
+
+    return {"modules": modules}
 
 
 @app.post("/api/modules/{module_id}/run")
