@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS cards (
 );
 CREATE INDEX IF NOT EXISTS idx_module ON cards(module_id);
 CREATE INDEX IF NOT EXISTS idx_unread ON cards(read, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_created_at ON cards(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_score ON cards(score DESC);
 """
 
 
