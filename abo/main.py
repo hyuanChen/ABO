@@ -2251,8 +2251,10 @@ async def get_today_summary_status():
 
 # ── 注册 CLI 和 Chat 路由 ─────────────────────────────────────────
 from .routes.cli import cli_router
+from .routes.chat import chat_router
 
 app.include_router(cli_router)
+app.include_router(chat_router)
 
 if __name__ == "__main__":
     import uvicorn
