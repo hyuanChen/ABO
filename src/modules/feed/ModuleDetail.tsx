@@ -1,9 +1,18 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, Play, Save, Settings, BookOpen, Info, Clock, CheckCircle } from "lucide-react";
 import { api } from "../../core/api";
-import { FeedModule } from "../../core/store";
+import { useStore, FeedModule } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Card, Grid } from "../../components/Layout";
 import { useToast } from "../../components/Toast";
+
+const SCHEDULE_PRESETS: { label: string; value: string }[] = [
+  { label: "每天 8:00", value: "0 8 * * *" },
+  { label: "每天 10:00", value: "0 10 * * *" },
+  { label: "每天 11:00", value: "0 11 * * *" },
+  { label: "每天 13:00", value: "0 13 * * *" },
+  { label: "每 5 分钟", value: "*/5 * * * *" },
+  { label: "自定义", value: "custom" },
+];
 
 interface Props {
   module: FeedModule;
@@ -249,9 +258,18 @@ const MODULE_CONFIGS: Record<string, {
 
 export default function ModuleDetail({ module, onBack }: Props) {
   const toast = useToast();
+  const { setFeedModules } = useStore();
   const [moduleConfig, setModuleConfig] = useState<ModuleConfig>({});
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
+  const [moduleEnabled, setModuleEnabled] = useState(module.enabled);
+  const [scheduleMode, setScheduleMode] = useState(
+    SCHEDULE_PRESETS.some((p) => p.value === module.schedule) ? module.schedule : "custom"
+  );
+  const [customSchedule, setCustomSchedule] = useState(
+    SCHEDULE_PRESETS.some((p) => p.value === module.schedule) ? "" : module.schedule
+  );
+  const [updatingRuntime, setUpdatingRuntime] = useState(false);
 
   const configSchema = MODULE_CONFIGS[module.id];
 
@@ -277,6 +295,31 @@ export default function ModuleDetail({ module, onBack }: Props) {
       toast.error("保存失败", "请稍后重试");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveRuntimeSettings() {
+    const scheduleToSave = scheduleMode === "custom" ? customSchedule.trim() : scheduleMode;
+    if (!scheduleToSave) {
+      toast.error("请输入定时表达式");
+      return;
+    }
+    setUpdatingRuntime(true);
+    try {
+      await api.patch(`/api/modules/${module.id}`, {
+        enabled: moduleEnabled,
+        schedule: scheduleToSave,
+      });
+      toast.success("保存成功", "模块运行设置已更新");
+      // Refresh feed modules list in store so parent views stay consistent
+      const modulesRes = await api.get<{ modules: FeedModule[] }>("/api/modules");
+      if (modulesRes && modulesRes.modules) {
+        setFeedModules(modulesRes.modules);
+      }
+    } catch (err) {
+      toast.error("保存失败", "请检查定时表达式是否正确");
+    } finally {
+      setUpdatingRuntime(false);
     }
   }
 
@@ -379,6 +422,109 @@ export default function ModuleDetail({ module, onBack }: Props) {
         <Grid columns={2} gap="lg">
           {/* Left: Configuration */}
           <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+            <Card title="运行设置" icon={<Clock style={{ width: "20px", height: "20px", color: "var(--color-primary)" }} />}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+                {/* Enabled Toggle */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div>
+                    <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>启用模块</div>
+                    <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)" }}>关闭后该模块将停止定时运行</div>
+                  </div>
+                  <button
+                    onClick={() => setModuleEnabled((v) => !v)}
+                    style={{
+                      width: "44px",
+                      height: "24px",
+                      borderRadius: "9999px",
+                      border: "none",
+                      cursor: "pointer",
+                      background: moduleEnabled ? "var(--color-success)" : "var(--text-muted)",
+                      position: "relative",
+                      transition: "background 0.2s ease",
+                    }}
+                  >
+                    <span
+                      style={{
+                        position: "absolute",
+                        top: "2px",
+                        left: moduleEnabled ? "22px" : "2px",
+                        width: "20px",
+                        height: "20px",
+                        borderRadius: "50%",
+                        background: "white",
+                        transition: "left 0.2s ease",
+                      }}
+                    />
+                  </button>
+                </div>
+
+                {/* Schedule Selector */}
+                <div>
+                  <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)", marginBottom: "8px" }}>运行计划</div>
+                  <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", marginBottom: "12px" }}>选择模块自动执行的时间</div>
+                  <select
+                    value={scheduleMode}
+                    onChange={(e) => setScheduleMode(e.target.value)}
+                    style={{
+                      width: "100%",
+                      padding: "12px 16px",
+                      borderRadius: "var(--radius-full)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-app)",
+                      color: "var(--text-main)",
+                      fontSize: "0.9375rem",
+                      outline: "none",
+                    }}
+                  >
+                    {SCHEDULE_PRESETS.map((p) => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
+                  {scheduleMode === "custom" && (
+                    <input
+                      type="text"
+                      value={customSchedule}
+                      onChange={(e) => setCustomSchedule(e.target.value)}
+                      placeholder="例如：0 8 * * *"
+                      style={{
+                        width: "100%",
+                        marginTop: "12px",
+                        padding: "12px 16px",
+                        borderRadius: "var(--radius-full)",
+                        border: "1px solid var(--border-light)",
+                        background: "var(--bg-app)",
+                        color: "var(--text-main)",
+                        fontSize: "0.9375rem",
+                        outline: "none",
+                      }}
+                    />
+                  )}
+                </div>
+
+                <button
+                  onClick={saveRuntimeSettings}
+                  disabled={updatingRuntime}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "8px",
+                    padding: "12px 24px",
+                    borderRadius: "var(--radius-full)",
+                    background: "linear-gradient(135deg, var(--color-primary), var(--color-secondary))",
+                    color: "white",
+                    fontSize: "0.9375rem",
+                    fontWeight: 600,
+                    border: "none",
+                    cursor: "pointer",
+                  }}
+                >
+                  <Save style={{ width: "18px", height: "18px" }} />
+                  {updatingRuntime ? "保存中..." : "保存运行设置"}
+                </button>
+              </div>
+            </Card>
+
             <Card title="配置参数" icon={<Settings style={{ width: "20px", height: "20px", color: "var(--color-primary)" }} />}>
               <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
                 {configSchema.fields.map((field) => (
