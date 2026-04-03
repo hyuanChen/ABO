@@ -20,7 +20,7 @@ class FakeRunner:
         pass
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_update_schedule_changes_job():
     runner = FakeRunner()
     scheduler = ModuleScheduler(runner)
@@ -36,7 +36,7 @@ async def test_update_schedule_changes_job():
     scheduler.shutdown()
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_update_enabled_removes_and_re_adds_job():
     runner = FakeRunner()
     scheduler = ModuleScheduler(runner)

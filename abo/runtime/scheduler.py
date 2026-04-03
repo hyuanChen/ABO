@@ -48,5 +48,18 @@ class ModuleScheduler:
             for job in self._scheduler.get_jobs()
         ]
 
+    def update_schedule(self, module: Module):
+        existing = self._scheduler.get_job(module.id)
+        if existing:
+            self._scheduler.remove_job(module.id)
+        self._add_job(module)
+
+    def update_enabled(self, module: Module, enabled: bool):
+        existing = self._scheduler.get_job(module.id)
+        if enabled and not existing:
+            self._add_job(module)
+        elif not enabled and existing:
+            self._scheduler.remove_job(module.id)
+
     def shutdown(self):
         self._scheduler.shutdown(wait=False)
