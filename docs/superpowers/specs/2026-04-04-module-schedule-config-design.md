@@ -50,6 +50,12 @@
 - 修改时：`PATCH /api/modules/{id}` 更新内存并原子写入文件。
 - 缺失时：若文件不存在，用各模块默认值初始化并创建文件。
 
+**可维护性（方便后续加新模块）：**
+- `apply_to_registry()` 遍历的是已加载的 `registry.all()`，而不是硬编码的模块列表。新模块只要类上声明了 `id`/`enabled`/`schedule`，就会自动被识别。
+- 如果 `module-runtime.json` 中缺少某个新模块的条目，不会报错，直接使用该模块类上的默认值（`Module.enabled` / `Module.schedule`）。
+- 如果 JSON 中存在但当前未加载的模块（比如已被删除的旧模块），静默清理并回写文件，避免脏数据累积。
+- 所有默认值来源单一：**`Module` 基类 / 子类属性**是唯一的默认 truth。
+
 ---
 
 ## Backend Design

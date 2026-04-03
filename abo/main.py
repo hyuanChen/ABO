@@ -2246,6 +2246,11 @@ async def get_today_summary_status():
     return {"error": "Tracker not initialized"}
 
 
+# ── 注册 CLI 和 Chat 路由 ─────────────────────────────────────────
+from .routes.cli import cli_router
+
+app.include_router(cli_router)
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("abo.main:app", host="127.0.0.1", port=8765, log_level="info")

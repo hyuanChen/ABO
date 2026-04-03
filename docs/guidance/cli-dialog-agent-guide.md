@@ -30,27 +30,29 @@
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 与 AionUi 的关键差异
+### 实现策略
 
-| AionUi (Electron) | ABO (Tauri + Python) |
-|-------------------|---------------------|
-| Rust 直接 spawn CLI | Python subprocess CLI |
-| Rust IPC → 前端 | Python WebSocket → 前端 |
-| 每个对话 Rust Agent | 每个对话 Python runner |
-| SQLite 在 Rust | SQLite 在 Python (cards.db) |
+基于已有 `claude_bridge/runner.py`，采用**扩展模式**：
+
+- **后端**: Python subprocess 调用 CLI → WebSocket 推送前端
+- **前端**: React Hook 管理 WebSocket + 复用 ABO 设计系统
+- **存储**: 新建 `conversations.db` 或使用现有 `cards.db`
 
 ---
 
-## 实现策略
+## 后端实现
 
-基于你已有 `claude_bridge/runner.py`，采用**扩展模式**而非重写：
+### 1. 扩展 CliRunner 支持多 CLI
 
-### 方案 A：统一 Runner（推荐）
-
-扩展 `claude_bridge/runner.py` 支持多 CLI：
+**文件**: `abo/claude_bridge/runner.py`
 
 ```python
-# abo/claude_bridge/runner.py 扩展
+import asyncio
+import json
+import os
+import uuid
+from typing import Callable, Optional
+from asyncio.subprocess import PIPE
 
 class CliRunner:
     """通用 CLI 运行器 - 支持 Claude/Gemini/OpenClaw"""
@@ -59,44 +61,32 @@ class CliRunner:
         'claude': {
             'command': ['claude', '--print'],
             'env': {},
-            'json_mode': False,  # Claude 输出原始文本
+            'protocol': 'raw',  # 直接文本输出
         },
         'gemini': {
             'command': ['gemini', '--experimental-acp'],
             'env': {},
-            'json_mode': True,   # ACP 协议
-            'protocol': 'acp',
+            'protocol': 'acp',  # ACP JSON-RPC 协议
         },
-        'openclaw': {
-            'command': ['openclaw', 'gateway'],
-            'env': {},
-            'json_mode': True,
-            'protocol': 'websocket',  # OpenClaw 用 WebSocket
-        }
     }
 
     def __init__(self, cli_type: str, session_id: str):
         self.cli_type = cli_type
-        self.config = self.CLI_CONFIGS[cli_type]
+        self.config = self.CLI_CONFIGS.get(cli_type, self.CLI_CONFIGS['claude'])
         self.session_id = session_id
-        self.process = None
+        self.process: Optional[asyncio.subprocess.Process] = None
 
-    async def stream_call(self, message: str, on_chunk: Callable):
-        """流式调用 - 适配不同 CLI 协议"""
+    async def stream_call(self, message: str, on_chunk: Callable[[dict], None]):
+        """流式调用 CLI"""
+        protocol = self.config.get('protocol', 'raw')
 
-        if self.config.get('protocol') == 'acp':
+        if protocol == 'acp':
             await self._stream_acp(message, on_chunk)
-        elif self.config.get('protocol') == 'websocket':
-            await self._stream_websocket(message, on_chunk)
         else:
-            await self._stream_raw(message, on_chunk)  # Claude 现有模式
+            await self._stream_raw(message, on_chunk)
 
     async def _stream_acp(self, message: str, on_chunk: Callable):
-        """ACP JSON-RPC 协议处理"""
-        import asyncio
-        from asyncio.subprocess import PIPE
-
-        # 启动 ACP 模式
+        """ACP 协议处理 (Gemini 等)"""
         self.process = await asyncio.create_subprocess_exec(
             *self.config['command'],
             stdin=PIPE,
@@ -113,15 +103,16 @@ class CliRunner:
             "id": str(uuid.uuid4())
         }
 
+        assert self.process.stdin
         self.process.stdin.write(json.dumps(acp_msg).encode() + b'\n')
         await self.process.stdin.drain()
 
-        # 解析 JSON Lines 流
+        # 读取响应
+        assert self.process.stdout
         reader = asyncio.StreamReader()
         protocol = asyncio.StreamReaderProtocol(reader)
-        await asyncio.get_event_loop().connect_read_pipe(
-            lambda: protocol, self.process.stdout
-        )
+        loop = asyncio.get_event_loop()
+        await loop.connect_read_pipe(lambda: protocol, self.process.stdout)
 
         while True:
             line = await reader.readline()
@@ -144,15 +135,37 @@ class CliRunner:
                 elif event_type == 'tool_call':
                     await on_chunk({
                         'type': 'tool_call',
-                        'data': data['params'],
+                        'data': json.dumps(data['params']),
                         'msg_id': data.get('id', '')
                     })
-
             except json.JSONDecodeError:
                 continue
 
+    async def _stream_raw(self, message: str, on_chunk: Callable):
+        """原始文本协议 (Claude --print)"""
+        # 复用现有实现或保持简单
+        self.process = await asyncio.create_subprocess_exec(
+            *self.config['command'],
+            stdin=PIPE,
+            stdout=PIPE,
+            stderr=PIPE,
+        )
+
+        assert self.process.stdin
+        self.process.stdin.write(message.encode() + b'\n')
+        await self.process.stdin.drain()
+        self.process.stdin.close()
+
+        assert self.process.stdout
+        while True:
+            chunk = await self.process.stdout.read(1024)
+            if not chunk:
+                break
+            await on_chunk({'type': 'content', 'data': chunk.decode(), 'msg_id': ''})
+
+        await on_chunk({'type': 'finish', 'data': '', 'msg_id': ''})
+
     def _parse_acp_event(self, data: dict) -> str:
-        """解析 ACP 事件类型"""
         method = data.get('method', '')
         if method == 'conversation/update':
             status = data.get('params', {}).get('status', '')
@@ -160,29 +173,27 @@ class CliRunner:
         elif method == 'tool_call':
             return 'tool_call'
         return 'unknown'
+
+    def cleanup(self):
+        if self.process:
+            self.process.kill()
+            self.process = None
 ```
 
----
+### 2. CLI 检测
 
-## 后端实现
-
-### 1. CLI 检测 Endpoint
-
-在 `abo/main.py` 添加：
+**文件**: `abo/routes/cli.py`
 
 ```python
-# abo/main.py
-
-from fastapi import APIRouter
-import subprocess
 import shutil
+import subprocess
+from fastapi import APIRouter
 
 cli_router = APIRouter(prefix="/api/cli")
 
 CLI_REGISTRY = {
     'claude': {'name': 'Claude Code', 'check': 'claude --version'},
     'gemini': {'name': 'Gemini CLI', 'check': 'gemini --version'},
-    'openclaw': {'name': 'OpenClaw', 'check': 'openclaw --version'},
 }
 
 @cli_router.get("/detect")
@@ -192,64 +203,83 @@ async def detect_clis() -> list[dict]:
 
     for cli_id, config in CLI_REGISTRY.items():
         cmd = config['check'].split()[0]
-        if shutil.which(cmd):
-            # 验证实际可运行
-            try:
-                result = subprocess.run(
-                    config['check'].split(),
-                    capture_output=True,
-                    timeout=5
-                )
-                if result.returncode == 0:
-                    available.append({
-                        'id': cli_id,
-                        'name': config['name'],
-                        'version': result.stdout.decode().strip()[:50]
-                    })
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                pass
+        if not shutil.which(cmd):
+            continue
+
+        try:
+            result = subprocess.run(
+                config['check'].split(),
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                available.append({
+                    'id': cli_id,
+                    'name': config['name'],
+                    'version': result.stdout.decode().strip()[:50]
+                })
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     return available
 
-# 注册路由
-app.include_router(cli_router)
+
+@cli_router.get("/debug/{cli_type}")
+async def debug_cli(cli_type: str) -> dict:
+    """诊断 CLI 连接"""
+    config = CLI_REGISTRY.get(cli_type, {})
+    cmd = config.get('check', '').split()[0] if config else cli_type
+
+    result = {
+        "cli_type": cli_type,
+        "in_path": shutil.which(cmd) is not None,
+        "path_location": shutil.which(cmd),
+    }
+
+    if result["in_path"]:
+        try:
+            proc = subprocess.run(
+                config.get('check', f'{cmd} --version').split(),
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            result["version_check"] = {
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[:200],
+                "stderr": proc.stderr[:200],
+            }
+        except Exception as e:
+            result["error"] = str(e)
+
+    return result
 ```
 
-### 2. 对话管理扩展
+### 3. 对话存储
 
-复用现有的 `cards.db` 或新建 `conversations.db`：
+**文件**: `abo/store/conversations.py`
 
 ```python
-# abo/store/conversations.py
-
 import sqlite3
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-@dataclass
-class Conversation:
-    id: str
-    cli_type: str  # 'claude' | 'gemini' | 'openclaw'
-    session_id: str
-    title: str
-    created_at: datetime
-    updated_at: datetime
 
 @dataclass
 class Message:
     id: str
     conversation_id: str
-    role: str  # 'user' | 'assistant' | 'system'
+    role: str
     content: str
-    msg_id: Optional[str]  # 流式消息 ID
-    metadata: Optional[str]  # JSON: tool_calls, etc.
-    created_at: datetime
+    msg_id: Optional[str] = None
+    metadata: Optional[str] = None
+    created_at: Optional[datetime] = None
+
 
 class ConversationStore:
-    """对话存储 - 使用现有 cards.db 或独立数据库"""
-
     def __init__(self, db_path: str = "~/.abo/data/conversations.db"):
         self.db_path = os.path.expanduser(db_path)
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
@@ -282,22 +312,16 @@ class ConversationStore:
             """)
 
     def create_conversation(self, cli_type: str, session_id: str, title: str = "") -> str:
-        import uuid
         conv_id = str(uuid.uuid4())
-
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                """INSERT INTO conversations (id, cli_type, session_id, title)
-                   VALUES (?, ?, ?, ?)""",
+                "INSERT INTO conversations (id, cli_type, session_id, title) VALUES (?, ?, ?, ?)",
                 (conv_id, cli_type, session_id, title or f"New {cli_type} chat")
             )
-
         return conv_id
 
     def add_message(self, conv_id: str, role: str, content: str,
                     msg_id: Optional[str] = None, metadata: Optional[dict] = None):
-        import uuid
-
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """INSERT INTO messages (id, conversation_id, role, content, msg_id, metadata)
@@ -314,10 +338,8 @@ class ConversationStore:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                """SELECT * FROM messages
-                   WHERE conversation_id = ?
-                   ORDER BY created_at ASC
-                   LIMIT ?""",
+                """SELECT * FROM messages WHERE conversation_id = ?
+                   ORDER BY created_at ASC LIMIT ?""",
                 (conv_id, limit)
             ).fetchall()
 
@@ -328,31 +350,34 @@ class ConversationStore:
                 content=r['content'],
                 msg_id=r['msg_id'],
                 metadata=r['metadata'],
-                created_at=datetime.fromisoformat(r['created_at'])
+                created_at=datetime.fromisoformat(r['created_at']) if r['created_at'] else None
             ) for r in rows]
 
-    def update_message_content(self, msg_id: str, content: str):
-        """流式更新消息内容"""
+    def list_conversations(self) -> list[dict]:
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE messages SET content = ? WHERE msg_id = ?",
-                (content, msg_id)
-            )
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM conversations ORDER BY updated_at DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
 ```
 
-### 3. WebSocket 扩展
+### 4. WebSocket 与 HTTP API
 
-扩展现有 WebSocket 支持多 CLI：
+**文件**: `abo/routes/chat.py`
 
 ```python
-# abo/routes/websocket.py
-
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from typing import Dict
-import asyncio
+import uuid
 import json
+from ..claude_bridge.runner import CliRunner
+from ..store.conversations import ConversationStore
 
-# 存储活跃连接
+chat_router = APIRouter(prefix="/api/chat")
+store = ConversationStore()
+
+# WebSocket 连接管理
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
@@ -374,99 +399,94 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-@router.websocket("/ws/chat/{cli_type}/{session_id}")
+
+@chat_router.websocket("/ws/{cli_type}/{session_id}")
 async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
     """通用 CLI 对话 WebSocket"""
     client_id = f"{cli_type}:{session_id}"
     await manager.connect(websocket, client_id)
 
-    # 初始化 Runner
     runner = CliRunner(cli_type, session_id)
     manager.cli_runners[client_id] = runner
 
     try:
         while True:
-            # 接收前端消息
             data = await websocket.receive_json()
             message = data.get('message', '')
             conv_id = data.get('conversation_id', '')
 
             # 保存用户消息
-            conversation_store.add_message(conv_id, 'user', message)
+            store.add_message(conv_id, 'user', message)
 
-            # 流式调用 CLI
+            # 流式调用
             full_response = []
             current_msg_id = str(uuid.uuid4())
 
-            async def on_chunk(event):
+            async def on_chunk(event: dict):
                 await manager.send_json(client_id, {
                     'type': event['type'],
                     'data': event['data'],
                     'msg_id': event.get('msg_id', current_msg_id)
                 })
-
                 if event['type'] == 'content':
                     full_response.append(event['data'])
 
             await runner.stream_call(message, on_chunk)
 
-            # 保存完整响应
-            conversation_store.add_message(
-                conv_id, 'assistant', ''.join(full_response),
-                msg_id=current_msg_id
-            )
+            # 保存助手响应
+            store.add_message(conv_id, 'assistant', ''.join(full_response),
+                            msg_id=current_msg_id)
 
     except WebSocketDisconnect:
         manager.disconnect(client_id)
-```
 
-### 4. HTTP API 补充
 
-```python
-# abo/routes/conversations.py
+# HTTP API
+from pydantic import BaseModel
 
-from fastapi import APIRouter
-from typing import List
+class CreateConversationRequest(BaseModel):
+    cli_type: str
+    title: Optional[str] = None
 
-conversation_router = APIRouter(prefix="/api/conversations")
 
-@conversation_router.post("/")
-async def create_conversation(request: CreateConversationRequest):
-    """创建新对话"""
+@chat_router.post("/conversations")
+async def create_conversation(req: CreateConversationRequest):
     session_id = str(uuid.uuid4())
-    conv_id = conversation_store.create_conversation(
-        cli_type=request.cli_type,
-        session_id=session_id,
-        title=request.title
-    )
+    conv_id = store.create_conversation(req.cli_type, session_id, req.title)
+    return {"id": conv_id, "session_id": session_id, "cli_type": req.cli_type}
 
-    return {
-        "id": conv_id,
-        "session_id": session_id,
-        "cli_type": request.cli_type
-    }
 
-@conversation_router.get("/{conv_id}/messages")
+@chat_router.get("/conversations")
+async def list_conversations():
+    return store.list_conversations()
+
+
+@chat_router.get("/conversations/{conv_id}/messages")
 async def get_messages(conv_id: str, limit: int = 100):
-    """获取对话历史"""
-    messages = conversation_store.get_messages(conv_id, limit)
+    messages = store.get_messages(conv_id, limit)
     return {
         "messages": [
             {
                 "id": m.id,
                 "role": m.role,
                 "content": m.content,
-                "created_at": m.created_at.isoformat()
+                "created_at": m.created_at.isoformat() if m.created_at else None
             }
             for m in messages
         ]
     }
+```
 
-@conversation_router.get("/")
-async def list_conversations():
-    """列出所有对话"""
-    # 实现列表查询
-    pass
+### 5. 注册路由
+
+**文件**: `abo/main.py`
+
+```python
+from .routes.cli import cli_router
+from .routes.chat import chat_router
+
+app.include_router(cli_router)
+app.include_router(chat_router)
 ```
 
 ---
@@ -475,9 +495,9 @@ async def list_conversations():
 
 ### 1. API 层
 
-```typescript
-// src/core/api.ts 扩展
+**文件**: `src/core/api.ts`
 
+```typescript
 export interface CliConfig {
   id: string;
   name: string;
@@ -486,30 +506,32 @@ export interface CliConfig {
 
 export interface Conversation {
   id: string;
-  cliType: string;
-  sessionId: string;
+  cli_type: string;
+  session_id: string;
   title: string;
 }
 
 export interface Message {
   id: string;
-  role: 'user' | 'assistant' | 'system';
+  role: 'user' | 'assistant';
   content: string;
-  createdAt: string;
+  created_at?: string;
 }
 
-// 检测可用 CLI
+const API_BASE = 'http://127.0.0.1:8765/api';
+
 export async function detectClis(): Promise<CliConfig[]> {
-  const res = await fetch('http://127.0.0.1:8765/api/cli/detect');
+  const res = await fetch(`${API_BASE}/cli/detect`);
   return res.json();
 }
 
-// 创建对话
-export async function createConversation(
-  cliType: string,
-  title?: string
-): Promise<Conversation> {
-  const res = await fetch('http://127.0.0.1:8765/api/conversations', {
+export async function debugCli(cliType: string): Promise<unknown> {
+  const res = await fetch(`${API_BASE}/cli/debug/${cliType}`);
+  return res.json();
+}
+
+export async function createConversation(cliType: string, title?: string): Promise<Conversation> {
+  const res = await fetch(`${API_BASE}/chat/conversations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cli_type: cliType, title }),
@@ -517,11 +539,13 @@ export async function createConversation(
   return res.json();
 }
 
-// 获取消息历史
-export async function getMessages(convId: string): Promise<Message[]> {
-  const res = await fetch(
-    `http://127.0.0.1:8765/api/conversations/${convId}/messages`
-  );
+export async function listConversations(): Promise<Conversation[]> {
+  const res = await fetch(`${API_BASE}/chat/conversations`);
+  return res.json();
+}
+
+export async function getMessages(convId: string, limit = 100): Promise<Message[]> {
+  const res = await fetch(`${API_BASE}/chat/conversations/${convId}/messages?limit=${limit}`);
   const data = await res.json();
   return data.messages;
 }
@@ -529,12 +553,12 @@ export async function getMessages(convId: string): Promise<Message[]> {
 
 ### 2. WebSocket Hook
 
-```typescript
-// src/hooks/useCliChat.ts
+**文件**: `src/hooks/useCliChat.ts`
 
+```typescript
 import { useState, useEffect, useRef, useCallback } from 'react';
 
-interface StreamEvent {
+export interface StreamEvent {
   type: 'start' | 'content' | 'tool_call' | 'finish' | 'error';
   data: string;
   msg_id: string;
@@ -547,202 +571,114 @@ interface UseCliChatOptions {
   onEvent?: (event: StreamEvent) => void;
 }
 
-export function useCliChat({
-  cliType,
-  sessionId,
-  conversationId,
-  onEvent,
-}: UseCliChatOptions) {
+export function useCliChat({ cliType, sessionId, conversationId, onEvent }: UseCliChatOptions) {
   const [isConnected, setIsConnected] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    const ws = new WebSocket(
-      `ws://127.0.0.1:8765/ws/chat/${cliType}/${sessionId}`
-    );
+    const ws = new WebSocket(`ws://127.0.0.1:8765/api/chat/ws/${cliType}/${sessionId}`);
 
     ws.onopen = () => setIsConnected(true);
     ws.onclose = () => setIsConnected(false);
 
     ws.onmessage = (event) => {
       const data: StreamEvent = JSON.parse(event.data);
-
-      switch (data.type) {
-        case 'start':
-          setIsStreaming(true);
-          break;
-        case 'finish':
-          setIsStreaming(false);
-          break;
-      }
-
+      if (data.type === 'start') setIsStreaming(true);
+      if (data.type === 'finish') setIsStreaming(false);
       onEvent?.(data);
     };
 
     wsRef.current = ws;
-
-    return () => {
-      ws.close();
-    };
+    return () => ws.close();
   }, [cliType, sessionId]);
 
-  const sendMessage = useCallback(
-    (message: string) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({
-            message,
-            conversation_id: conversationId,
-          })
-        );
-      }
-    },
-    [conversationId]
-  );
+  const sendMessage = useCallback((message: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ message, conversation_id: conversationId }));
+    }
+  }, [conversationId]);
 
-  return {
-    isConnected,
-    isStreaming,
-    sendMessage,
-  };
+  return { isConnected, isStreaming, sendMessage };
 }
 ```
 
 ### 3. UI 组件
 
-复用 ABO 设计系统（Tailwind v4 + CSS vars）：
+**文件**: `src/modules/claude-panel/ChatPanel.tsx`
 
 ```tsx
-// src/modules/claude-panel/UniversalChatPanel.tsx
-
 import { useState, useEffect, useRef } from 'react';
-import { useCliChat } from '../../hooks/useCliChat';
-import { detectClis, createConversation, getMessages } from '../../core/api';
+import { useCliChat, type StreamEvent } from '../../hooks/useCliChat';
+import { detectClis, createConversation, getMessages, type CliConfig, type Message } from '../../core/api';
 import { Bot, Send, Loader2 } from 'lucide-react';
 
-interface Message {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  isStreaming?: boolean;
-}
-
-export function UniversalChatPanel() {
-  const [availableClis, setAvailableClis] = useState([]);
-  const [selectedCli, setSelectedCli] = useState('claude');
-  const [conversation, setConversation] = useState(null);
+export function ChatPanel() {
+  const [clis, setClis] = useState<CliConfig[]>([]);
+  const [conversation, setConversation] = useState<{ id: string; cli_type: string; session_id: string } | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // 检测可用 CLI
   useEffect(() => {
-    detectClis().then(setAvailableClis);
+    detectClis().then(setClis);
   }, []);
 
-  // 创建对话
-  const startConversation = async (cliType: string) => {
+  const startChat = async (cliType: string) => {
     const conv = await createConversation(cliType);
     setConversation(conv);
-    setSelectedCli(cliType);
     setMessages([]);
   };
 
-  // WebSocket 连接
   const { isConnected, isStreaming, sendMessage } = useCliChat({
-    cliType: selectedCli,
-    sessionId: conversation?.sessionId || '',
+    cliType: conversation?.cli_type || '',
+    sessionId: conversation?.session_id || '',
     conversationId: conversation?.id || '',
-    onEvent: (event) => {
+    onEvent: (event: StreamEvent) => {
       switch (event.type) {
         case 'start':
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: event.msg_id,
-              role: 'assistant',
-              content: '',
-              isStreaming: true,
-            },
-          ]);
+          setMessages(prev => [...prev, { id: event.msg_id, role: 'assistant', content: '' }]);
           break;
-
         case 'content':
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === event.msg_id
-                ? { ...m, content: m.content + event.data }
-                : m
-            )
-          );
+          setMessages(prev => prev.map(m => m.id === event.msg_id ? { ...m, content: m.content + event.data } : m));
           break;
-
         case 'finish':
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === event.msg_id ? { ...m, isStreaming: false } : m
-            )
-          );
+          // 可选：标记完成状态
           break;
-
         case 'tool_call':
-          // 显示工具调用
-          const toolData = JSON.parse(event.data);
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `tool-${Date.now()}`,
-              role: 'assistant',
-              content: `🔧 使用工具: ${toolData.tool_name}`,
-              isStreaming: false,
-            },
-          ]);
+          const tool = JSON.parse(event.data);
+          setMessages(prev => [...prev, { id: `tool-${Date.now()}`, role: 'assistant', content: `🔧 ${tool.tool_name}` }]);
           break;
       }
     },
   });
 
-  // 自动滚动
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isStreaming) return;
+    if (!input.trim() || isStreaming || !conversation) return;
 
-    // 添加用户消息
-    setMessages((prev) => [
-      ...prev,
-      { id: `user-${Date.now()}`, role: 'user', content: input },
-    ]);
-
+    setMessages(prev => [...prev, { id: `u-${Date.now()}`, role: 'user', content: input }]);
     sendMessage(input);
     setInput('');
   };
 
-  // CLI 选择器
   if (!conversation) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4 p-8">
-        <h2 className="text-xl font-semibold text-[var(--text)]">
-          选择 CLI 工具开始对话
-        </h2>
+        <h2 className="text-xl font-semibold text-[var(--text)]">选择 CLI 开始对话</h2>
         <div className="flex gap-3">
-          {availableClis.map((cli) => (
+          {clis.map(cli => (
             <button
               key={cli.id}
-              onClick={() => startConversation(cli.id)}
-              className="flex items-center gap-2 rounded-xl bg-[var(--surface)] px-6 py-3
-                         text-[var(--text)] shadow-sm transition-all
-                         hover:bg-[var(--surface-2)] hover:shadow-md"
+              onClick={() => startChat(cli.id)}
+              className="flex items-center gap-2 rounded-xl bg-[var(--surface)] px-6 py-3 text-[var(--text)] shadow-sm hover:bg-[var(--surface-2)]"
             >
               <Bot className="h-5 w-5 text-[var(--primary)]" />
               <span>{cli.name}</span>
-              <span className="text-xs text-[var(--text-muted)]">
-                {cli.version}
-              </span>
             </button>
           ))}
         </div>
@@ -752,44 +688,25 @@ export function UniversalChatPanel() {
 
   return (
     <div className="flex h-full flex-col bg-[var(--bg)]">
-      {/* 头部 */}
-      <div className="flex items-center justify-between border-b border-[var(--border)] px-6 py-4">
-        <div className="flex items-center gap-3">
-          <Bot className="h-5 w-5 text-[var(--primary)]" />
-          <span className="font-medium text-[var(--text)]">
-            {availableClis.find((c) => c.id === selectedCli)?.name}
-          </span>
-          <span
-            className={`h-2 w-2 rounded-full ${
-              isConnected ? 'bg-green-500' : 'bg-red-500'
-            }`}
-          />
-        </div>
+      <div className="flex items-center gap-3 border-b border-[var(--border)] px-6 py-4">
+        <Bot className="h-5 w-5 text-[var(--primary)]" />
+        <span className="font-medium text-[var(--text)]">{clis.find(c => c.id === conversation.cli_type)?.name}</span>
+        <span className={`h-2 w-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
       </div>
 
-      {/* 消息列表 */}
       <div className="flex-1 overflow-y-auto p-6">
-        <div className="mx-auto max-w-3xl space-y-6">
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${
-                msg.role === 'user' ? 'justify-end' : 'justify-start'
-              }`}
-            >
-              <div
-                className={`max-w-[80%] rounded-2xl px-5 py-3 ${
-                  msg.role === 'user'
-                    ? 'bg-[var(--primary)] text-white'
-                    : 'bg-[var(--surface)] border border-[var(--border)] text-[var(--text)]'
-                }`}
-              >
-                <div className="prose prose-sm dark:prose-invert max-w-none">
-                  {msg.content}
-                  {msg.isStreaming && (
-                    <span className="ml-1 inline-block animate-pulse">▋</span>
-                  )}
-                </div>
+        <div className="mx-auto max-w-3xl space-y-4">
+          {messages.map(msg => (
+            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[80%] rounded-2xl px-5 py-3 ${
+                msg.role === 'user'
+                  ? 'bg-[var(--primary)] text-white'
+                  : 'bg-[var(--surface)] border border-[var(--border)] text-[var(--text)]'
+              }`}>
+                {msg.content}
+                {msg.role === 'assistant' && isStreaming && messages[messages.length - 1]?.id === msg.id && (
+                  <span className="ml-1 animate-pulse">▋</span>
+                )}
               </div>
             </div>
           ))}
@@ -797,148 +714,24 @@ export function UniversalChatPanel() {
         </div>
       </div>
 
-      {/* 输入区 */}
-      <div className="border-t border-[var(--border)] bg-[var(--surface)] p-4">
-        <form
-          onSubmit={handleSubmit}
-          className="mx-auto flex max-w-3xl gap-3"
-        >
+      <form onSubmit={handleSubmit} className="border-t border-[var(--border)] bg-[var(--surface)] p-4">
+        <div className="mx-auto flex max-w-3xl gap-3">
           <input
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={e => setInput(e.target.value)}
             placeholder="输入消息..."
             disabled={isStreaming}
-            className="flex-1 rounded-xl border border-[var(--border)] bg-[var(--bg)]
-                       px-4 py-3 text-[var(--text)] outline-none
-                       focus-visible:ring-2 focus-visible:ring-[var(--primary)]"
+            className="flex-1 rounded-xl border border-[var(--border)] bg-[var(--bg)] px-4 py-3 text-[var(--text)] outline-none focus:ring-2 focus:ring-[var(--primary)]"
           />
           <button
             type="submit"
             disabled={isStreaming || !input.trim()}
-            className="flex items-center gap-2 rounded-xl bg-[var(--primary)] px-6 py-3
-                       text-white transition-all hover:bg-[var(--primary-dim)]
-                       disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center rounded-xl bg-[var(--primary)] px-6 py-3 text-white hover:bg-[var(--primary-dim)] disabled:opacity-50"
           >
-            {isStreaming ? (
-              <Loader2 className="h-5 w-5 animate-spin" />
-            ) : (
-              <Send className="h-5 w-5" />
-            )}
+            {isStreaming ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
           </button>
-        </form>
-      </div>
-    </div>
-  );
-}
-```
-
----
-
-## 调试流程
-
-### 1. 后端诊断
-
-```python
-# abo/main.py 添加诊断端点
-
-@router.get("/debug/cli/{cli_type}")
-async def debug_cli(cli_type: str):
-    """诊断 CLI 连接"""
-    import shutil
-    import subprocess
-
-    config = CLI_REGISTRY.get(cli_type, {})
-    cmd = config.get('check', '').split()[0] if config else cli_type
-
-    result = {
-        "cli_type": cli_type,
-        "in_path": shutil.which(cmd) is not None,
-        "path_location": shutil.which(cmd),
-        "version_check": None,
-        "error": None,
-    }
-
-    if result["in_path"]:
-        try:
-            proc = subprocess.run(
-                config.get('check', f'{cmd} --version').split(),
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            result["version_check"] = {
-                "returncode": proc.returncode,
-                "stdout": proc.stdout[:200],
-                "stderr": proc.stderr[:200],
-            }
-        except Exception as e:
-            result["error"] = str(e)
-
-    return result
-```
-
-### 2. 前端诊断面板
-
-```tsx
-// src/components/CliDebugPanel.tsx
-
-import { useState } from 'react';
-
-export function CliDebugPanel() {
-  const [results, setResults] = useState<Record<string, any>>({});
-
-  const runDiagnostics = async () => {
-    const clis = ['claude', 'gemini', 'openclaw'];
-    const newResults: Record<string, any> = {};
-
-    for (const cli of clis) {
-      const res = await fetch(
-        `http://127.0.0.1:8765/api/debug/cli/${cli}`
-      );
-      newResults[cli] = await res.json();
-    }
-
-    // WebSocket 测试
-    const wsTest = await testWebSocket();
-    newResults['websocket'] = wsTest;
-
-    setResults(newResults);
-  };
-
-  const testWebSocket = (): Promise<any> => {
-    return new Promise((resolve) => {
-      const ws = new WebSocket('ws://127.0.0.1:8765/ws/chat/claude/test');
-      const startTime = Date.now();
-
-      ws.onopen = () => {
-        resolve({
-          status: 'connected',
-          latency: Date.now() - startTime,
-        });
-        ws.close();
-      };
-
-      ws.onerror = (e) => {
-        resolve({ status: 'error', error: String(e) });
-      };
-
-      setTimeout(() => {
-        resolve({ status: 'timeout' });
-      }, 5000);
-    });
-  };
-
-  return (
-    <div className="p-6">
-      <button
-        onClick={runDiagnostics}
-        className="rounded-lg bg-indigo-600 px-4 py-2 text-white"
-      >
-        运行诊断
-      </button>
-      <pre className="mt-4 rounded-lg bg-slate-900 p-4 text-sm text-white">
-        {JSON.stringify(results, null, 2)}
-      </pre>
+        </div>
+      </form>
     </div>
   );
 }
@@ -948,57 +741,62 @@ export function CliDebugPanel() {
 
 ## 实施检查清单
 
-### Phase 1: 后端基础
-- [ ] 创建 `abo/claude_bridge/runner.py` 的 `CliRunner` 类
-- [ ] 实现 `detect_clis` API 端点
-- [ ] 创建 `ConversationStore` 数据库操作
-- [ ] 扩展 WebSocket 路由支持 `/ws/chat/{cli_type}/{session_id}`
-- [ ] 添加对话管理 HTTP API
+### Phase 1: 后端
+- [ ] 扩展 `abo/claude_bridge/runner.py` 添加 `CliRunner` 类
+- [ ] 创建 `abo/routes/cli.py` 实现 `detect_clis` 和 `debug_cli`
+- [ ] 创建 `abo/store/conversations.py` 实现 `ConversationStore`
+- [ ] 创建 `abo/routes/chat.py` 实现 WebSocket 和 HTTP API
+- [ ] 在 `abo/main.py` 注册所有路由
 
-### Phase 2: 前端基础
-- [ ] 扩展 `src/core/api.ts` 添加 CLI 相关 API
-- [ ] 创建 `useCliChat` hook
-- [ ] 实现 CLI 选择器 UI
-- [ ] 实现消息列表和输入组件
+### Phase 2: 前端
+- [ ] 扩展 `src/core/api.ts` 添加 CLI API
+- [ ] 创建 `src/hooks/useCliChat.ts`
+- [ ] 创建/更新 `src/modules/claude-panel/ChatPanel.tsx`
 
-### Phase 3: 集成测试
-- [ ] 验证 CLI 检测正常工作
-- [ ] 验证 WebSocket 连接和流式输出
-- [ ] 验证消息持久化到 SQLite
-- [ ] 验证多 CLI 切换
-
-### Phase 4: 优化
-- [ ] 添加消息虚拟滚动（大量消息时）
-- [ ] 添加对话历史搜索
-- [ ] 添加导出对话到 Vault Markdown
+### Phase 3: 验证
+- [ ] 访问 `http://127.0.0.1:8765/api/cli/detect` 返回 CLI 列表
+- [ ] 访问 `http://127.0.0.1:8765/api/cli/debug/claude` 返回诊断信息
+- [ ] WebSocket 连接 `ws://127.0.0.1:8765/api/chat/ws/claude/{session_id}` 成功
+- [ ] 发送消息后收到流式响应
+- [ ] 对话历史保存到 `~/.abo/data/conversations.db`
 
 ---
 
-## 与现有 ClaudePanel 的关系
+## 快速调试
 
-你可以选择：
+### 后端诊断
+```bash
+# 检测 CLI
+curl http://127.0.0.1:8765/api/cli/detect
 
-1. **扩展现有 ClaudePanel** - 添加 CLI 选择器，复用大部分 UI
-2. **新建 UniversalChatPanel** - 并排展示，ClaudePanel 保持不变
-3. **完全替换** - 移除 ClaudePanel，使用新的通用组件
+# 调试特定 CLI
+curl http://127.0.0.1:8765/api/cli/debug/claude
+curl http://127.0.0.1:8765/api/cli/debug/gemini
+```
 
-建议采用方案 1（扩展），因为：
-- 保持用户习惯
-- 减少代码重复
-- 可以渐进式添加新 CLI 支持
+### 前端诊断组件
+```tsx
+function DebugPanel() {
+  const [results, setResults] = useState({});
+
+  const runTest = async () => {
+    setResults({
+      clis: await detectClis(),
+      claude: await debugCli('claude'),
+    });
+  };
+
+  return <pre>{JSON.stringify(results, null, 2)}</pre>;
+}
+```
 
 ---
 
-## 参考代码位置
+## 参考文件
 
-| 功能 | 文件路径 |
-|-----|---------|
-| 现有 Claude 调用 | `abo/claude_bridge/runner.py` |
-| WebSocket 广播 | `abo/runtime/broadcaster.py` |
-| 现有 ClaudePanel | `src/modules/claude-panel/ClaudePanel.tsx` |
+| 功能 | 路径 |
+|-----|------|
+| 现有 Claude | `abo/claude_bridge/runner.py` |
+| WebSocket | `abo/runtime/broadcaster.py` |
+| 现有面板 | `src/modules/claude-panel/ClaudePanel.tsx` |
 | API 客户端 | `src/core/api.ts` |
-| 数据存储 | `abo/store/cards.py` (参考模式) |
-
----
-
-*基于 ABO 架构 v1.0*
