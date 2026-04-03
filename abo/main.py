@@ -1645,6 +1645,190 @@ async def reset_preferences():
     return {"ok": True, "removed": removed}
 
 
+# ── Module Subscription Config (Crawler Management) ────────────────
+
+class ModuleConfig(BaseModel):
+    """Module configuration schema for crawler subscriptions."""
+    keywords: list[str] = []
+    up_uids: list[str] = []  # Bilibili
+    user_ids: list[str] = []  # Xiaohongshu
+    users: list[str] = []  # Zhihu users
+    topics: list[str] = []  # Zhihu topics
+    podcast_ids: list[str] = []  # Xiaoyuzhou
+    max_results: int = 20
+    enabled: bool = True
+
+
+@app.get("/api/modules/{module_id}/config")
+async def get_module_config(module_id: str):
+    """Get subscription config for a specific module."""
+    module = _registry.get(module_id)
+    if not module:
+        raise HTTPException(404, "Module not found")
+
+    # Load from preferences
+    prefs = _prefs.all_data()
+    module_prefs = prefs.get("modules", {}).get(module_id, {})
+
+    # Map to standardized config format
+    config = {
+        "module_id": module_id,
+        "module_name": module.name,
+        "enabled": getattr(module, "enabled", True),
+        "keywords": module_prefs.get("keywords", []),
+        "up_uids": module_prefs.get("up_uids", []),
+        "user_ids": module_prefs.get("user_ids", []),
+        "users": module_prefs.get("users", []),
+        "topics": module_prefs.get("topics", []),
+        "podcast_ids": module_prefs.get("podcast_ids", []),
+        "max_results": module_prefs.get("max_results", 20),
+    }
+
+    # Add module-specific defaults if empty
+    if not config["keywords"]:
+        config["keywords"] = get_default_keywords_for_module(module_id)
+
+    return config
+
+
+@app.post("/api/modules/{module_id}/config")
+async def update_module_config(module_id: str, data: dict):
+    """Update subscription config for a specific module."""
+    module = _registry.get(module_id)
+    if not module:
+        raise HTTPException(404, "Module not found")
+
+    # Get current preferences
+    prefs = _prefs.all_data()
+    if "modules" not in prefs:
+        prefs["modules"] = {}
+    if module_id not in prefs["modules"]:
+        prefs["modules"][module_id] = {}
+
+    # Update fields
+    module_prefs = prefs["modules"][module_id]
+
+    if "keywords" in data:
+        module_prefs["keywords"] = data["keywords"]
+    if "up_uids" in data:
+        module_prefs["up_uids"] = data["up_uids"]
+    if "user_ids" in data:
+        module_prefs["user_ids"] = data["user_ids"]
+    if "users" in data:
+        module_prefs["users"] = data["users"]
+    if "topics" in data:
+        module_prefs["topics"] = data["topics"]
+    if "podcast_ids" in data:
+        module_prefs["podcast_ids"] = data["podcast_ids"]
+    if "max_results" in data:
+        module_prefs["max_results"] = data["max_results"]
+
+    # Save preferences
+    _prefs.update(prefs)
+
+    return {"ok": True, "config": module_prefs}
+
+
+@app.post("/api/modules/{module_id}/subscriptions")
+async def add_module_subscription(module_id: str, data: dict):
+    """Add a subscription to a module (UP主, user, podcast, etc.)."""
+    module = _registry.get(module_id)
+    if not module:
+        raise HTTPException(404, "Module not found")
+
+    sub_type = data.get("type")  # "up_uid", "user_id", "user", "topic", "podcast_id"
+    sub_value = data.get("value")
+
+    if not sub_type or not sub_value:
+        raise HTTPException(400, "type and value are required")
+
+    # Get current preferences
+    prefs = _prefs.all_data()
+    if "modules" not in prefs:
+        prefs["modules"] = {}
+    if module_id not in prefs["modules"]:
+        prefs["modules"][module_id] = {}
+
+    module_prefs = prefs["modules"][module_id]
+
+    # Map subscription type to preference key
+    type_to_key = {
+        "up_uid": "up_uids",
+        "user_id": "user_ids",
+        "user": "users",
+        "topic": "topics",
+        "podcast_id": "podcast_ids",
+    }
+
+    key = type_to_key.get(sub_type)
+    if not key:
+        raise HTTPException(400, f"Unknown subscription type: {sub_type}")
+
+    # Add to list if not already present
+    current = module_prefs.get(key, [])
+    if sub_value not in current:
+        current.append(sub_value)
+        module_prefs[key] = current
+        _prefs.update(prefs)
+
+    result = {"ok": True}
+    result[key] = current
+    return result
+
+
+@app.delete("/api/modules/{module_id}/subscriptions")
+async def remove_module_subscription(module_id: str, data: dict):
+    """Remove a subscription from a module."""
+    module = _registry.get(module_id)
+    if not module:
+        raise HTTPException(404, "Module not found")
+
+    sub_type = data.get("type")
+    sub_value = data.get("value")
+
+    if not sub_type or not sub_value:
+        raise HTTPException(400, "type and value are required")
+
+    prefs = _prefs.all_data()
+    if "modules" not in prefs or module_id not in prefs["modules"]:
+        raise HTTPException(404, "Module config not found")
+
+    module_prefs = prefs["modules"][module_id]
+
+    type_to_key = {
+        "up_uid": "up_uids",
+        "user_id": "user_ids",
+        "user": "users",
+        "topic": "topics",
+        "podcast_id": "podcast_ids",
+    }
+
+    key = type_to_key.get(sub_type)
+    if not key:
+        raise HTTPException(400, f"Unknown subscription type: {sub_type}")
+
+    current = module_prefs.get(key, [])
+    if sub_value in current:
+        current.remove(sub_value)
+        module_prefs[key] = current
+        _prefs.update(prefs)
+
+    result = {"ok": True}
+    result[key] = current
+    return result
+
+
+def get_default_keywords_for_module(module_id: str) -> list[str]:
+    """Get default keywords for a module."""
+    defaults = {
+        "bilibili-tracker": ["科研", "学术", "读博", "论文"],
+        "xiaohongshu-tracker": ["科研工具", "论文写作", "学术日常"],
+        "zhihu-tracker": ["人工智能", "科研", "学术"],
+        "xiaoyuzhou-tracker": ["科技", "商业", "文化"],
+    }
+    return defaults.get(module_id, [])
+
+
 # ── Gamification (Phase 3) ───────────────────────────────────────
 
 @app.get("/api/game/stats")
