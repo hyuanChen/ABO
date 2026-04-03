@@ -965,6 +965,7 @@ async def fetch_figures_from_arxiv_html(
 ) -> list[dict]:
     """Fetch figures from arXiv HTML page with smart prioritization."""
     import re
+    import asyncio
     figures = []
 
     try:
