@@ -58,7 +58,7 @@ ABO/
 │   │   └── events.ts
 │   ├── modules/
 │   │   ├── nav/NavSidebar.tsx   # 侧边栏 + 顶部缩略卡
-│   │   ├── profile/             # 角色主页（8 个组件）
+│   │   ├── profile/             # 角色主页（RoleCard, HexagonRadar, SkillGrid, etc.）
 │   │   ├── feed/                # Intelligence Feed (CardView, Feed, FeedSidebar, ModulePanel)
 │   │   ├── arxiv/               # ArXiv 追踪器
 │   │   ├── literature/          # 文献库
@@ -66,20 +66,39 @@ ABO/
 │   │   ├── claude-panel/        # Claude 对话面板
 │   │   ├── health/              # 健康管理 (placeholder)
 │   │   └── settings/
-│   └── components/              # Toast, SetupWizard
+│   └── components/              # 共享组件
+│       ├── Toast.tsx
+│       ├── SetupWizard.tsx
+│       ├── GamePanel.tsx        # 游戏状态面板
+│       ├── KeywordPreferences.tsx # 偏好学习面板
+│       ├── ModuleConfigPanel.tsx  # 爬虫模块管理
+│       ├── TimelineView.tsx       # 今日时间线
+│       ├── RewardNotification.tsx # 奖励通知
+│       └── FeedSortControl.tsx    # Feed 排序控制
 ├── abo/                         # Python 后端
 │   ├── main.py                  # FastAPI 入口 + profile router + uvicorn
 │   ├── config.py                # ~/.abo-config.json 读写
 │   ├── sdk/                     # Module ABC, Item/Card/FeedbackAction, tools
 │   ├── runtime/                 # discovery, scheduler, runner, broadcaster
-│   ├── default_modules/         # arxiv, rss, podcast, folder_monitor
-│   ├── preferences/engine.py   # 偏好权重引擎
+│   ├── default_modules/         # 7个默认模块（见下）
+│   ├── preferences/engine.py    # 偏好权重引擎
 │   ├── store/cards.py           # SQLite Card CRUD
 │   ├── profile/                 # store.py, stats.py, routes.py
+│   ├── activity/                # 活动追踪 (timeline.py, models.py)
+│   ├── summary/                 # 每日总结 (generator.py, scheduler.py)
 │   ├── literature/              # importer, indexer
 │   ├── claude_bridge/           # runner.py (stream_call/batch_call)
 │   ├── vault/                   # reader.py, writer.py
 │   └── obsidian/                # uri.py
+
+**默认模块（7个）:**
+- `arxiv-tracker` — 每天 8:00 运行
+- `semantic-scholar-tracker` — 每天 10:00 运行
+- `xiaohongshu-tracker` — 每天 10:00 运行
+- `bilibili-tracker` — 每天 11:00 运行
+- `xiaoyuzhou-tracker` — 每天 10:00 运行
+- `zhihu-tracker` — 每天 13:00 运行
+- `folder-monitor` — 每5分钟运行
 └── src-tauri/
 ```
 
@@ -128,10 +147,15 @@ os.replace(tmp, path)
 | Phase | Focus | Status |
 |-------|-------|--------|
 | 0-4 | 基础骨架 + 文献 + Claude 面板 + Ideas | done |
-| 5 | 模块运行时 + Intelligence Feed | done |
+| 5 | 模块运行时 + Intelligence Feed + 7个爬虫模块 | done |
 | 6 | ArXiv 追踪器（后端 + 前端） | done |
-| 11 | 角色主页 + 游戏化（六边形、像素小人、技能节点、SAN值） | done |
-| 8 | 健康管理（打卡 + Journal + D3 图表） | pending |
+| 7 | 社交爬虫（小红书/哔哩哔哩/小宇宙/知乎） | done |
+| 8 | 游戏化 + 奖励通知 + 偏好学习 | done |
+| 9 | 模块配置面板 + Feed排序控制 | done |
+| 10 | 集成测试 + 性能优化 | done |
+| 11 | 角色主页（六边形、像素小人、技能节点、SAN值） | done |
+| 12 | 今日时间线 + 每日总结（11AM自动生成） | done |
+| 13 | 健康管理（打卡 + Journal + D3 图表） | pending |
 
 ---
 
@@ -140,6 +164,8 @@ os.replace(tmp, path)
 **Feed:** `GET /api/cards` · `GET /api/cards/unread-counts` · `POST /api/cards/{id}/feedback`
 **Modules:** `GET /api/modules` · `POST /api/modules/{id}/run` · `PATCH /api/modules/{id}/toggle`
 **Profile:** `GET /api/profile` · `GET /api/profile/stats` · `POST /api/profile/identity` · `POST /api/profile/san` · `POST /api/profile/happiness` · `POST /api/profile/energy` · `POST /api/profile/todos` · `POST /api/profile/generate-motto`
+**Activity:** `GET /api/timeline/today` · `GET /api/timeline/{date}` · `POST /api/activity/chat`
+**Summary:** `GET /api/summary/today/status` · `GET /api/summary/{date}` · `POST /api/summary/generate`
 **Config:** `GET /api/config` · `POST /api/config`
 **Preferences:** `GET /api/preferences` · `POST /api/preferences`
 **Health:** `GET /api/health`

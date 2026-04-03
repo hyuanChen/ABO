@@ -78,11 +78,14 @@ class Module(ABC):
 | `abo/preferences/engine.py` | 用户偏好积累，STAR/SAVE/SKIP/DEEP_DIVE 调整 tag 权重 |
 | `abo/store/cards.py` | SQLite CRUD，Card 存储 + feedback 记录 |
 
-**内置模块（4个）：**
-- `arxiv` — arXiv API 爬取 + Claude 评分摘要
-- `rss` — RSS 聚合 + Claude 趋势分析
-- `podcast` — yt-dlp + faster-whisper + Claude 摘要
-- `folder_monitor` — 监控 ~/Downloads 新 PDF
+**内置模块（7个）：**
+- `arxiv-tracker` — arXiv API 爬取 + Claude 评分摘要（每天 8:00）
+- `semantic-scholar-tracker` — Semantic Scholar 后续论文追踪（每天 10:00）
+- `xiaohongshu-tracker` — 小红书科研生活内容（每天 10:00）
+- `bilibili-tracker` — 哔哩哔哩学术视频（每天 11:00）
+- `xiaoyuzhou-tracker` — 小宇宙播客（每天 10:00）
+- `zhihu-tracker` — 知乎学术讨论（每天 13:00）
+- `folder_monitor` — 监控 ~/Downloads 新 PDF（每5分钟）
 
 ---
 
@@ -148,10 +151,26 @@ NavSidebar
 ```
 健康模块未实现时基础分默认 70。
 
+### 今日时间线 (Timeline)
+
+自动追踪用户行为，生成每日活动报告：
+- **活动类型**: 浏览、点赞、保存、对话、签到、爬虫运行
+- **聊天路径**: 记录今日对话主题和时间线
+- **每日总结**: 11:00 AM 自动生成 Claude AI 总结
+
+### 奖励系统 (Rewards)
+
+用户操作触发即时奖励通知：
+| 操作 | XP | 幸福度 | SAN | 能量 |
+|------|----|--------|-----|------|
+| 点赞 | 5 | +3 | 0 | 0 |
+| 保存 | 10 | +2 | +2 | -5 |
+| 签到 | 50 | +10 | +5 | 0 |
+
 ### 数据持久化
 
 所有游戏化数据存 `~/.abo/` JSON 文件：
-`profile.json` · `daily_motto.json` · `san_log.json` · `happiness_log.json` · `energy_memory.json` · `daily_todos.json` · `skills.json` · `achievements.json` · `stats_cache.json`
+`profile.json` · `daily_motto.json` · `san_log.json` · `happiness_log.json` · `energy_memory.json` · `daily_todos.json` · `skills.json` · `achievements.json` · `stats_cache.json` · `activities/timeline_YYYY-MM-DD.json`
 
 ---
 
