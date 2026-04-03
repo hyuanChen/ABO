@@ -37,6 +37,15 @@ _activity_tracker: ActivityTracker | None = None
 _summary_generator: DailySummaryGenerator | None = None
 _summary_scheduler: SummaryScheduler | None = None
 
+
+def _validate_cron(expr: str) -> bool:
+    from apscheduler.triggers.cron import CronTrigger
+    try:
+        CronTrigger.from_crontab(expr)
+        return True
+    except Exception:
+        return False
+
 # ── 爬取任务取消控制 ────────────────────────────────────────────
 _crawl_cancel_flags: dict[str, bool] = {}  # session_id -> should_cancel
 
@@ -1571,13 +1580,37 @@ async def cancel_semantic_scholar_tracker_crawl(data: dict):
     return {"status": "ok", "message": "已发送取消信号"}
 
 
-@app.patch("/api/modules/{module_id}/toggle")
-async def toggle_module(module_id: str):
+class ModuleUpdatePayload(BaseModel):
+    enabled: bool | None = None
+    schedule: str | None = None
+
+
+@app.patch("/api/modules/{module_id}")
+async def update_module(module_id: str, payload: ModuleUpdatePayload):
     module = _registry.get(module_id)
     if not module:
         raise HTTPException(404, "Module not found")
-    module.enabled = not module.enabled
-    return {"enabled": module.enabled}
+
+    if payload.schedule is not None:
+        if not payload.schedule.strip() or not _validate_cron(payload.schedule.strip()):
+            raise HTTPException(400, "Invalid cron expression")
+
+    # Update state and persist first
+    new_state = _state_store.update_module(
+        module_id,
+        enabled=payload.enabled,
+        schedule=payload.schedule,
+        registry=_registry,
+    )
+
+    # Notify scheduler
+    if _scheduler:
+        if payload.schedule is not None:
+            _scheduler.update_schedule(module)
+        if payload.enabled is not None:
+            _scheduler.update_enabled(module, payload.enabled)
+
+    return {"ok": True, **module.get_status(), **new_state}
 
 
 # ── Config ───────────────────────────────────────────────────────
