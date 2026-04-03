@@ -960,6 +960,7 @@ async def fetch_figures_from_arxiv_html(
     max_figures: int = 5
 ) -> list[dict]:
     """Fetch figures from arXiv HTML page with smart prioritization."""
+    import re
     figures = []
 
     try:
@@ -1122,6 +1123,7 @@ async def fetch_paper_figures(
     max_figures: int = 5
 ) -> list[dict]:
     """Fetch paper figures using multiple strategies."""
+    import httpx
     figures = []
 
     async with httpx.AsyncClient() as client:
@@ -1148,6 +1150,7 @@ async def download_arxiv_pdf(
 ) -> str | None:
     """Download PDF from arXiv with multiple source fallback and retries."""
     import asyncio
+    import httpx
 
     # Clean arxiv_id (remove arxiv: prefix if present)
     clean_id = arxiv_id.replace("arxiv:", "").strip()
