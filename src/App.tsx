@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import NavSidebar from "./modules/nav/NavSidebar";
 import MainContent from "./modules/MainContent";
 import ToastContainer from "./components/Toast";
+import RewardNotificationContainer from "./components/RewardNotification";
 import { useStore, FeedModule } from "./core/store";
 import { api } from "./core/api";
 
@@ -66,6 +67,7 @@ export default function App() {
         </div>
       </main>
       <ToastContainer />
+      <RewardNotificationContainer />
     </div>
   );
 }

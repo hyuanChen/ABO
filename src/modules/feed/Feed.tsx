@@ -3,6 +3,7 @@ import { Inbox, Sparkles, Wifi, WifiOff, Layers } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, FeedCard } from "../../core/store";
 import CardView from "./CardView";
+import FeedSortControl from "../../components/FeedSortControl";
 
 const WS_URL = "ws://127.0.0.1:8765/ws/feed";
 
@@ -208,6 +209,7 @@ export default function Feed() {
     feedCards, setFeedCards, prependCard,
     activeModuleFilter, setActiveModuleFilter,
     setUnreadCounts, feedModules, unreadCounts,
+    feedSortMode,
   } = useStore();
   const [focusIdx, setFocusIdx] = useState(0);
   const [isConnected, setIsConnected] = useState(false);
@@ -226,29 +228,50 @@ export default function Feed() {
 
   // Initial load
   useEffect(() => {
+    loadCards();
+  }, [activeModuleFilter, feedSortMode, setFeedCards, setUnreadCounts]);
+
+  async function loadCards() {
     // Load modules first so FeedSidebar can display them
     loadModules(useStore.getState().setFeedModules);
 
-    const params = activeModuleFilter
-      ? `?module_id=${activeModuleFilter}&unread_only=true`
-      : "?unread_only=true";
-    api.get<{ cards: FeedCard[] }>(`/api/cards${params}`)
-      .then((r) => {
-        // Use mock data if no cards returned (for UI testing)
-        const cards = r.cards?.length ? r.cards : generateMockCards();
-        setFeedCards(cards);
-        setFocusIdx(0);
-      })
-      .catch(() => {
-        // Use mock data on error
-        setFeedCards(generateMockCards());
-        setFocusIdx(0);
-      });
+    try {
+      let cards: FeedCard[] = [];
 
+      // Choose API based on sort mode
+      if (feedSortMode === "prioritized" || feedSortMode === "mixed") {
+        // Use prioritized endpoint
+        const r = await api.get<{ cards: FeedCard[] }>(
+          `/api/cards/prioritized?limit=50&unread_only=true`
+        );
+        cards = r.cards || [];
+      } else {
+        // Default: time-based sorting
+        const params = activeModuleFilter
+          ? `?module_id=${activeModuleFilter}&unread_only=true`
+          : "?unread_only=true";
+        const r = await api.get<{ cards: FeedCard[] }>(`/api/cards${params}`);
+        cards = r.cards || [];
+      }
+
+      // Use mock data if empty (for UI testing)
+      if (cards.length === 0) {
+        cards = generateMockCards();
+      }
+
+      setFeedCards(cards);
+      setFocusIdx(0);
+    } catch (e) {
+      // Use mock data on error
+      setFeedCards(generateMockCards());
+      setFocusIdx(0);
+    }
+
+    // Load unread counts
     api.get<Record<string, number>>("/api/cards/unread-counts")
       .then(setUnreadCounts)
       .catch(() => {});
-  }, [activeModuleFilter, setFeedCards, setUnreadCounts]);
+  }
 
   // WebSocket
   useEffect(() => {
@@ -261,6 +284,17 @@ export default function Feed() {
         if (data.type === "new_card") {
           prependCard(data.card as FeedCard);
           setFocusIdx(0);
+        }
+        // Phase 4: Handle reward notifications
+        if (data.type === "reward_earned") {
+          const store = useStore.getState();
+          store.addReward({
+            action: data.action,
+            xp: data.rewards?.xp || 0,
+            happiness_delta: data.rewards?.happiness_delta || 0,
+            san_delta: data.rewards?.san_delta || 0,
+            message: data.metadata?.card_title || "",
+          });
         }
       } catch {}
     };
@@ -423,6 +457,7 @@ export default function Feed() {
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "clamp(16px, 2vw, 24px)" }}>
           {/* Header Section */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "16px" }}>
+            <FeedSortControl />
             <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
               <div
                 style={{

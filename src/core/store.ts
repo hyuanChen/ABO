@@ -68,6 +68,35 @@ export interface ProfileStats {
   happiness: DimStat;
 }
 
+// ── Phase 2-3: Gamification & Preferences ─────────────────────────
+
+export interface GameStats {
+  happiness: number;
+  san_7d_avg: number;
+  energy: number;
+  todos_completed: number;
+  achievements: Array<{ id: string; name: string; unlocked_at: string }>;
+}
+
+export interface KeywordPreference {
+  keyword: string;
+  score: number;
+  count: number;
+  source_modules: string[];
+  last_updated: string;
+}
+
+export type FeedSortMode = "default" | "prioritized" | "mixed";
+
+export interface RewardNotification {
+  id: string;
+  action: string;
+  xp: number;
+  happiness_delta: number;
+  san_delta: number;
+  message: string;
+}
+
 // ArXiv Tracker Crawl State
 export interface ArxivCrawlProgress {
   current: number;
@@ -118,6 +147,25 @@ interface AboStore {
   setProfileSan: (s: number) => void;
   setProfileMotto: (m: string) => void;
   setProfileStats: (s: ProfileStats) => void;
+
+  // Phase 2-3: Gamification
+  gameStats: GameStats | null;
+  todayXP: number;
+  totalXP: number;
+  level: number;
+  setGameStats: (s: GameStats) => void;
+  addXP: (xp: number) => void;
+
+  // Phase 2: Preferences
+  keywordPrefs: Record<string, KeywordPreference>;
+  feedSortMode: FeedSortMode;
+  setKeywordPrefs: (prefs: Record<string, KeywordPreference>) => void;
+  setFeedSortMode: (mode: FeedSortMode) => void;
+
+  // Phase 4: Reward Notifications
+  rewardQueue: RewardNotification[];
+  addReward: (r: Omit<RewardNotification, "id">) => void;
+  dismissReward: (id: string) => void;
 
   // Module configuration
   moduleToConfigure: string | null;
@@ -174,6 +222,34 @@ export const useStore = create<AboStore>((set) => ({
   setProfileSan: (profileSan) => set({ profileSan }),
   setProfileMotto: (profileMotto) => set({ profileMotto }),
   setProfileStats: (profileStats) => set({ profileStats }),
+
+  // Phase 2-3: Gamification
+  gameStats: null,
+  todayXP: 0,
+  totalXP: 0,
+  level: 1,
+  setGameStats: (gameStats) => set({ gameStats }),
+  addXP: (xp) => set((s) => {
+    const newTodayXP = s.todayXP + xp;
+    const newTotalXP = s.totalXP + xp;
+    const newLevel = Math.floor(newTotalXP / 100) + 1;
+    return { todayXP: newTodayXP, totalXP: newTotalXP, level: newLevel };
+  }),
+
+  // Phase 2: Preferences
+  keywordPrefs: {},
+  feedSortMode: "default",
+  setKeywordPrefs: (keywordPrefs) => set({ keywordPrefs }),
+  setFeedSortMode: (feedSortMode) => set({ feedSortMode }),
+
+  // Phase 4: Reward Notifications
+  rewardQueue: [],
+  addReward: (r) => set((s) => ({
+    rewardQueue: [...s.rewardQueue, { ...r, id: crypto.randomUUID() }],
+  })),
+  dismissReward: (id) => set((s) => ({
+    rewardQueue: s.rewardQueue.filter((r) => r.id !== id),
+  })),
 
   // Module configuration
   moduleToConfigure: null,

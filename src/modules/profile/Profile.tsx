@@ -10,6 +10,8 @@ import HexagonRadar from "./HexagonRadar";
 import SkillGrid from "./SkillGrid";
 import AchievementGallery from "./AchievementGallery";
 import DailyCheckInModal from "./DailyCheckInModal";
+import GamePanel from "../../components/GamePanel";
+import KeywordPreferences from "../../components/KeywordPreferences";
 
 interface Todo {
   id: string;
@@ -105,6 +107,24 @@ export default function Profile() {
         <div style={{ marginTop: "clamp(20px, 3vw, 28px)" }}>
           <DailyTodo todos={todos} onChange={setTodos} />
         </div>
+
+        {/* Phase 3: Gamification Panel */}
+        <Card
+          title="游戏状态"
+          icon={<Sparkles style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
+          style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
+        >
+          <GamePanel />
+        </Card>
+
+        {/* Phase 2: Keyword Preferences */}
+        <Card
+          title="偏好学习"
+          icon={<span style={{ fontSize: "1rem" }}>📊</span>}
+          style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
+        >
+          <KeywordPreferences />
+        </Card>
 
         {/* Hexagon Radar */}
         <Card
