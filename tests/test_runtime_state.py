@@ -61,6 +61,26 @@ def test_update_module_persists_and_returns_state(temp_state_path):
     assert saved["m1"]["schedule"] == "0 12 * * *"
 
 
+def test_update_module_partial_update(temp_state_path):
+    temp_state_path.write_text(json.dumps({
+        "m1": {"enabled": True, "schedule": "0 8 * * *"}
+    }))
+    store = ModuleStateStore()
+    m1 = FakeModule("m1", enabled=True, schedule="0 8 * * *")
+    registry = FakeRegistry([m1])
+    result = store.update_module("m1", enabled=False, registry=registry)
+    assert result["enabled"] is False
+    assert result["schedule"] == "0 8 * * *"
+    assert m1.enabled is False
+    assert m1.schedule == "0 8 * * *"
+
+
+def test_update_module_requires_registry(temp_state_path):
+    store = ModuleStateStore()
+    with pytest.raises(ValueError, match="registry is required"):
+        store.update_module("m1", enabled=False)
+
+
 def test_cleanup_removes_stale_modules(temp_state_path):
     temp_state_path.write_text(json.dumps({
         "old-module": {"enabled": True, "schedule": "0 8 * * *"},

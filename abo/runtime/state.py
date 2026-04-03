@@ -2,7 +2,6 @@ import json
 import os
 from pathlib import Path
 
-from abo.sdk.base import Module
 from abo.runtime.discovery import ModuleRegistry
 
 _STATE_PATH = Path.home() / ".abo" / "module-runtime.json"
@@ -55,15 +54,22 @@ class ModuleStateStore:
     def update_module(
         self,
         module_id: str,
-        enabled: bool,
-        schedule: str,
-        registry: ModuleRegistry,
+        enabled: bool | None = None,
+        schedule: str | None = None,
+        registry: ModuleRegistry | None = None,
     ) -> dict:
+        if registry is None:
+            raise ValueError("registry is required")
         data = self.load(registry)
-        data[module_id] = {"enabled": enabled, "schedule": schedule}
+        module_state = data.setdefault(module_id, {})
         module = registry.get(module_id)
-        if module is not None:
-            module.enabled = enabled
-            module.schedule = schedule
+        if enabled is not None:
+            module_state["enabled"] = enabled
+            if module is not None:
+                module.enabled = enabled
+        if schedule is not None:
+            module_state["schedule"] = schedule
+            if module is not None:
+                module.schedule = schedule
         self.save(data)
-        return data[module_id]
+        return module_state.copy()
