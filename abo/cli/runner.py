@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from abc import ABC, abstractmethod
 import logging
 
+import websockets
+
+logger = logging.getLogger(__name__)
+
 logger = logging.getLogger(__name__)
 
 
@@ -195,6 +199,8 @@ class AcpRunner(BaseRunner):
                 msg_id=msg_id
             ))
             raise
+        finally:
+            await self.close()
 
     async def _send_acp_message(self, msg: dict):
         """发送 ACP 消息"""
@@ -305,7 +311,6 @@ class WebSocketRunner(BaseRunner):
     async def send_message(self, message: str, msg_id: str,
                           on_event: Callable[[StreamEvent], None]) -> None:
         """通过 WebSocket 发送消息"""
-        import websockets
 
         await self._emit(on_event, StreamEvent(type="start", data="", msg_id=msg_id))
 
@@ -358,6 +363,8 @@ class WebSocketRunner(BaseRunner):
                 msg_id=msg_id
             ))
             raise
+        finally:
+            await self.close()
 
 
 class RunnerFactory:
