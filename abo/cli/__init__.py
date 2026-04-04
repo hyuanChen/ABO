@@ -1,14 +1,8 @@
-"""CLI 模块 - 检测和管理各种 CLI 工具"""
-from .detector import detector, CliInfo, CliDetector
-from .runner import RunnerFactory, StreamEvent, BaseRunner, RawRunner, AcpRunner
+"""CLI module for chat integration"""
+from .detector import CliDetector, CliInfo, detector
+from .runner import RunnerFactory, BaseRunner, RawRunner, AcpRunner, StreamEvent
 
 __all__ = [
-    'detector',
-    'CliInfo',
-    'CliDetector',
-    'RunnerFactory',
-    'StreamEvent',
-    'BaseRunner',
-    'RawRunner',
-    'AcpRunner',
+    'CliDetector', 'CliInfo', 'detector',
+    'RunnerFactory', 'BaseRunner', 'RawRunner', 'AcpRunner', 'StreamEvent'
 ]
