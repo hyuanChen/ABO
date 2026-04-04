@@ -53,13 +53,12 @@ class XiaohongshuTracker(Module):
         prefs_path = Path.home() / ".abo" / "preferences.json"
         config_keywords = []
         config_users = []
-        config_cookie = ""
+        config_cookie = self._module_cookie()
         if prefs_path.exists():
             data = json.loads(prefs_path.read_text())
             xhs_config = data.get("modules", {}).get("xiaohongshu-tracker", {})
             config_keywords = xhs_config.get("keywords", [])
             config_users = xhs_config.get("user_ids", [])
-            config_cookie = xhs_config.get("cookie", "")
 
         keywords = keywords or config_keywords or ["科研", "读博", "学术"]
         user_ids = user_ids or config_users

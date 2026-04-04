@@ -34,9 +34,12 @@ class Module(ABC):
         import json
         from pathlib import Path
         prefs_path = Path.home() / ".abo" / "preferences.json"
-        if prefs_path.exists():
-            data = json.loads(prefs_path.read_text())
-            return data.get("modules", {}).get(self.id, {}).get("cookie", "")
+        try:
+            if prefs_path.exists():
+                data = json.loads(prefs_path.read_text())
+                return data.get("modules", {}).get(self.id, {}).get("cookie", "")
+        except (json.JSONDecodeError, OSError):
+            pass
         return ""
 
     def get_status(self) -> dict:
