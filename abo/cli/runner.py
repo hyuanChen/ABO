@@ -1,7 +1,9 @@
-"""CLI 运行器 - 支持Raw协议 (Claude --print)"""
+"""CLI 运行器 - 支持多种协议"""
 
 import asyncio
+import json
 import os
+import uuid
 from typing import Callable, Optional, Dict, Any
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
@@ -161,13 +163,239 @@ class RawRunner(BaseRunner):
             await self.close()
 
 
+class AcpRunner(BaseRunner):
+    """ACP (Agent Communication Protocol) Runner (Gemini, Codex)"""
+
+    async def send_message(self, message: str, msg_id: str,
+                          on_event: Callable[[StreamEvent], None]) -> None:
+        """使用 ACP 协议发送消息"""
+
+        await on_event(StreamEvent(type="start", data="", msg_id=msg_id))
+
+        try:
+            # 启动 ACP 模式
+            cmd = [self.cli_info.command] + getattr(self.cli_info, 'acp_args', [])
+
+            self.process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.workspace,
+                env=self._get_env()
+            )
+
+            # 发送 ACP 初始化消息
+            init_msg = {
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {"sessionId": self.session_id},
+                "id": str(uuid.uuid4())
+            }
+
+            await self._send_acp_message(init_msg)
+
+            # 发送对话消息
+            chat_msg = {
+                "jsonrpc": "2.0",
+                "method": "conversation/submit",
+                "params": {
+                    "sessionId": self.session_id,
+                    "text": message
+                },
+                "id": msg_id
+            }
+
+            await self._send_acp_message(chat_msg)
+
+            # 读取响应
+            await self._read_acp_stream(on_event, msg_id)
+
+        except Exception as e:
+            logger.exception("ACP runner error")
+            await on_event(StreamEvent(
+                type="error",
+                data=str(e),
+                msg_id=msg_id
+            ))
+            raise
+
+    async def _send_acp_message(self, msg: dict):
+        """发送 ACP 消息"""
+        assert self.process and self.process.stdin
+        data = json.dumps(msg) + "\n"
+        self.process.stdin.write(data.encode())
+        await self.process.stdin.drain()
+
+    async def _read_acp_stream(self, on_event: Callable, msg_id: str):
+        """读取 ACP 流式响应"""
+        assert self.process and self.process.stdout
+
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        loop = asyncio.get_event_loop()
+
+        # 将 stdout 连接到 StreamReader
+        transport, _ = await loop.connect_read_pipe(
+            lambda: protocol, self.process.stdout
+        )
+
+        buffer = b""
+
+        try:
+            while not self._closed:
+                try:
+                    chunk = await asyncio.wait_for(reader.read(4096), timeout=30.0)
+                    if not chunk:
+                        break
+
+                    buffer += chunk
+
+                    # 处理完整行
+                    while b"\n" in buffer:
+                        line, buffer = buffer.split(b"\n", 1)
+                        await self._process_acp_line(line.decode(), on_event, msg_id)
+
+                except asyncio.TimeoutError:
+                    logger.warning("ACP read timeout")
+                    break
+
+        finally:
+            transport.close()
+            await on_event(StreamEvent(type="finish", data="", msg_id=msg_id))
+
+    async def _process_acp_line(self, line: str, on_event: Callable, msg_id: str):
+        """处理单行 ACP 消息"""
+        line = line.strip()
+        if not line:
+            return
+
+        try:
+            data = json.loads(line)
+            method = data.get("method", "")
+            params = data.get("params", {})
+
+            if method == "conversation/update":
+                content = params.get("content", {})
+                text = content.get("text", "")
+                status = params.get("status", "")
+
+                if text:
+                    await on_event(StreamEvent(
+                        type="content",
+                        data=text,
+                        msg_id=data.get("id", msg_id)
+                    ))
+
+                if status == "completed":
+                    await on_event(StreamEvent(
+                        type="finish",
+                        data="",
+                        msg_id=data.get("id", msg_id)
+                    ))
+
+            elif method == "tool_call":
+                await on_event(StreamEvent(
+                    type="tool_call",
+                    data=json.dumps(params),
+                    msg_id=data.get("id", msg_id),
+                    metadata=params
+                ))
+
+            elif method == "error":
+                await on_event(StreamEvent(
+                    type="error",
+                    data=params.get("message", "Unknown error"),
+                    msg_id=data.get("id", msg_id)
+                ))
+
+        except json.JSONDecodeError:
+            # 可能是非 JSON 输出，作为内容处理
+            await on_event(StreamEvent(
+                type="content",
+                data=line,
+                msg_id=msg_id
+            ))
+
+
+class WebSocketRunner(BaseRunner):
+    """WebSocket 协议 Runner (OpenClaw Gateway)"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ws = None
+        self.ws_url = "ws://localhost:8080"  # OpenClaw 默认端口
+
+    async def send_message(self, message: str, msg_id: str,
+                          on_event: Callable[[StreamEvent], None]) -> None:
+        """通过 WebSocket 发送消息"""
+        import websockets
+
+        await on_event(StreamEvent(type="start", data="", msg_id=msg_id))
+
+        try:
+            # 启动 gateway 进程
+            cmd = [self.cli_info.command] + getattr(self.cli_info, 'acp_args', [])
+            self.process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            # 等待 gateway 启动
+            await asyncio.sleep(2)
+
+            # 连接 WebSocket
+            async with websockets.connect(self.ws_url) as ws:
+                self.ws = ws
+
+                # 发送消息
+                await ws.send(json.dumps({
+                    "type": "message",
+                    "sessionKey": self.session_id,
+                    "content": message
+                }))
+
+                # 接收响应
+                async for response in ws:
+                    data = json.loads(response)
+
+                    if data.get("type") == "chunk":
+                        await on_event(StreamEvent(
+                            type="content",
+                            data=data.get("content", ""),
+                            msg_id=msg_id
+                        ))
+                    elif data.get("type") == "complete":
+                        await on_event(StreamEvent(
+                            type="finish",
+                            data="",
+                            msg_id=msg_id
+                        ))
+                        break
+
+        except Exception as e:
+            logger.exception("WebSocket runner error")
+            await on_event(StreamEvent(
+                type="error",
+                data=str(e),
+                msg_id=msg_id
+            ))
+            raise
+
+
 class RunnerFactory:
     """Runner 工厂"""
 
-    @classmethod
-    def create(cls, cli_info, session_id: str, workspace: str = "") -> BaseRunner:
-        """创建对应协议的 Runner
+    RUNNERS = {
+        "raw": RawRunner,
+        "acp": AcpRunner,
+        "websocket": WebSocketRunner,
+    }
 
-        目前只支持 raw 协议 (Claude --print)
-        """
-        return RawRunner(cli_info, session_id, workspace)
+    @classmethod
+    def create(cls, cli_info: 'CliInfo', session_id: str,
+               workspace: str = "") -> BaseRunner:
+        """创建对应协议的 Runner"""
+        runner_class = cls.RUNNERS.get(cli_info.protocol, RawRunner)
+        return runner_class(cli_info, session_id, workspace)
