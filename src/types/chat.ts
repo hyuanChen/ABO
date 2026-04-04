@@ -6,7 +6,6 @@ export interface CliConfig {
   command: string;
   version?: string;
   isAvailable: boolean;
-  acpArgs?: string[];
   protocol: 'raw' | 'acp' | 'websocket';
 }
 
@@ -35,7 +34,6 @@ export interface Message {
     toolName?: string;
     toolInput?: Record<string, unknown>;
     tokens?: number;
-    latency?: number;
   };
   status: MessageStatus;
   createdAt: number;
