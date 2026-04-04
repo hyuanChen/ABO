@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Search,
   MessageCircle,
@@ -13,6 +13,8 @@ import {
   ChevronDown,
   ChevronUp,
   BookOpen,
+  Cookie,
+  AlertCircle,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
 import { api } from "../../core/api";
@@ -68,10 +70,21 @@ interface TrendsResponse {
 
 type TabType = "search" | "trends" | "comments";
 
+interface ConfigResponse {
+  cookie_configured: boolean;
+  cookie_preview: string | null;
+}
+
 export function XiaohongshuTool() {
   const [activeTab, setActiveTab] = useState<TabType>("search");
   const [loading, setLoading] = useState(false);
   const toast = useToast();
+
+  // Cookie config state
+  const [cookie, setCookie] = useState<string>("");
+  const [cookieConfigured, setCookieConfigured] = useState(false);
+  const [showCookieInput, setShowCookieInput] = useState(false);
+  const [cookiePreview, setCookiePreview] = useState<string | null>(null);
 
   // Search state
   const [searchKeyword, setSearchKeyword] = useState("");
@@ -89,6 +102,45 @@ export function XiaohongshuTool() {
   const [commentsResult, setCommentsResult] = useState<CommentsResponse | null>(null);
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
 
+  // Load config on mount
+  useEffect(() => {
+    loadConfig();
+  }, []);
+
+  async function loadConfig() {
+    try {
+      const config = await api.get<ConfigResponse>("/api/tools/xiaohongshu/config");
+      setCookieConfigured(config.cookie_configured);
+      setCookiePreview(config.cookie_preview);
+      if (config.cookie_configured) {
+        // Load cookie from localStorage as fallback
+        const savedCookie = localStorage.getItem("xiaohongshu_cookie");
+        if (savedCookie) {
+          setCookie(savedCookie);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load config:", e);
+    }
+  }
+
+  async function saveCookie() {
+    if (!cookie.trim()) {
+      toast.error("请输入 Cookie");
+      return;
+    }
+    try {
+      await api.post("/api/tools/xiaohongshu/config", { cookie: cookie.trim() });
+      localStorage.setItem("xiaohongshu_cookie", cookie.trim());
+      setCookieConfigured(true);
+      setCookiePreview(cookie.trim().slice(0, 50) + "...");
+      setShowCookieInput(false);
+      toast.success("Cookie 已保存");
+    } catch (e) {
+      toast.error("保存 Cookie 失败");
+    }
+  }
+
   const handleSearch = async () => {
     if (!searchKeyword.trim()) {
       toast.error("请输入关键词");
@@ -101,6 +153,7 @@ export function XiaohongshuTool() {
         max_results: 20,
         min_likes: minLikes,
         sort_by: sortBy,
+        cookie: cookie || undefined,
       });
       setSearchResult(result);
       toast.success(`找到 ${result.total_found} 条结果`);
@@ -203,6 +256,135 @@ export function XiaohongshuTool() {
         </button>
       ))}
     </div>
+  );
+
+  const renderCookieConfig = () => (
+    <Card
+      title={`Cookie 配置 ${cookieConfigured ? "✓" : ""}`}
+      icon={<Cookie style={{ width: "18px", height: "18px" }} />}
+    >
+      <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+        <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
+          配置小红书登录 Cookie 后可获取真实搜索结果。
+          <a
+            href="#"
+            onClick={(e) => {
+              e.preventDefault();
+              toast.info("请在小红书网页版登录后，从浏览器开发者工具复制 Cookie");
+            }}
+            style={{ color: "var(--color-primary)", marginLeft: "8px" }}
+          >
+            如何获取？
+          </a>
+        </p>
+
+        {cookiePreview && (
+          <div
+            style={{
+              padding: "8px 12px",
+              borderRadius: "var(--radius-sm)",
+              background: "var(--bg-hover)",
+              fontSize: "0.8125rem",
+              color: "var(--text-muted)",
+              fontFamily: "monospace",
+            }}
+          >
+            当前: {cookiePreview}
+          </div>
+        )}
+
+        {!showCookieInput ? (
+          <button
+            onClick={() => setShowCookieInput(true)}
+            style={{
+              padding: "10px 20px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border-light)",
+              background: "var(--bg-card)",
+              color: "var(--text-main)",
+              fontSize: "0.875rem",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              width: "fit-content",
+            }}
+          >
+            <Cookie style={{ width: "16px", height: "16px" }} />
+            {cookieConfigured ? "更新 Cookie" : "配置 Cookie"}
+          </button>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            <textarea
+              value={cookie}
+              onChange={(e) => setCookie(e.target.value)}
+              placeholder="请粘贴小红书 Cookie..."
+              style={{
+                width: "100%",
+                minHeight: "100px",
+                padding: "12px",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-card)",
+                color: "var(--text-main)",
+                fontSize: "0.8125rem",
+                fontFamily: "monospace",
+                resize: "vertical",
+              }}
+            />
+            <div style={{ display: "flex", gap: "8px" }}>
+              <button
+                onClick={saveCookie}
+                style={{
+                  padding: "10px 20px",
+                  borderRadius: "var(--radius-md)",
+                  border: "none",
+                  background: "var(--color-primary)",
+                  color: "white",
+                  fontSize: "0.875rem",
+                  cursor: "pointer",
+                }}
+              >
+                保存
+              </button>
+              <button
+                onClick={() => setShowCookieInput(false)}
+                style={{
+                  padding: "10px 20px",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-hover)",
+                  color: "var(--text-main)",
+                  fontSize: "0.875rem",
+                  cursor: "pointer",
+                }}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!cookieConfigured && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "12px",
+              borderRadius: "var(--radius-md)",
+              background: "var(--color-warning)10",
+              border: "1px solid var(--color-warning)30",
+            }}
+          >
+            <AlertCircle style={{ width: "16px", height: "16px", color: "var(--color-warning)" }} />
+            <span style={{ fontSize: "0.8125rem", color: "var(--color-warning)" }}>
+              未配置 Cookie，将使用模拟数据或搜索引擎结果
+            </span>
+          </div>
+        )}
+      </div>
+    </Card>
   );
 
   const renderSearchTab = () => (
@@ -839,6 +1021,7 @@ export function XiaohongshuTool() {
       <PageContent maxWidth="1200px">
         <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
           {renderTabs()}
+          {renderCookieConfig()}
 
           {loading && !searchResult && !trendsResult && !commentsResult ? (
             <LoadingState message="加载中..." />

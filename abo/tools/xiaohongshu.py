@@ -73,12 +73,155 @@ class XiaohongshuAPI:
         self.timeout = timeout
         self.client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
 
+    async def search_by_keyword_with_cookie(
+        self,
+        keyword: str,
+        cookie: str,
+        max_results: int = 20,
+        min_likes: int = 100,
+    ) -> list[XHSNote]:
+        """使用用户提供的 Cookie 访问小红书获取真实数据"""
+        from playwright.async_api import async_playwright
+
+        notes = []
+        encoded_keyword = quote(keyword)
+        url = f"https://www.xiaohongshu.com/search_result?keyword={encoded_keyword}"
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+            )
+
+            # 设置 Cookie
+            if cookie:
+                # 解析 cookie 字符串
+                cookies = self._parse_cookie_string(cookie)
+                await context.add_cookies(cookies)
+                print(f"已设置 {len(cookies)} 个 cookies")
+
+            page = await context.new_page()
+
+            try:
+                print(f"使用 Cookie 访问: {url}")
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                await asyncio.sleep(3)  # 等待内容加载
+
+                # 检查是否还在登录页
+                login_btn = await page.query_selector('button:has-text("登录"), .login-btn')
+                if login_btn:
+                    print("Cookie 可能已失效，仍在登录页面")
+                    return []
+
+                # 等待笔记加载
+                await page.wait_for_selector('.note-item, .cover, [class*="note"]', timeout=10000)
+
+                # 滚动加载更多
+                for _ in range(3):
+                    await page.evaluate("window.scrollBy(0, 800)")
+                    await asyncio.sleep(1)
+
+                # 提取笔记
+                note_elements = await page.query_selector_all('.note-item, .feeds-page > div > div')
+                print(f"找到 {len(note_elements)} 个笔记元素")
+
+                for elem in note_elements[:max_results]:
+                    try:
+                        # 提取标题
+                        title_elem = await elem.query_selector('.title, .note-title, span[class*="title"]')
+                        title = await title_elem.inner_text() if title_elem else "无标题"
+
+                        # 提取作者
+                        author_elem = await elem.query_selector('.author, .user-name, [class*="author"]')
+                        author = await author_elem.inner_text() if author_elem else "未知"
+
+                        # 提取点赞
+                        likes_elem = await elem.query_selector('.like-wrapper .count, [class*="like"]')
+                        likes_text = await likes_elem.inner_text() if likes_elem else "0"
+                        likes = self._parse_count(likes_text)
+
+                        # 提取链接
+                        link_elem = await elem.query_selector('a[href*="/explore/"]')
+                        href = await link_elem.get_attribute('href') if link_elem else ""
+                        note_id = href.split('/explore/')[-1].split('?')[0] if '/explore/' in href else f"note-{hash(title) % 1000000}"
+
+                        if likes >= min_likes:
+                            notes.append(XHSNote(
+                                id=note_id,
+                                title=title.strip()[:100],
+                                content="",
+                                author=author.strip()[:50],
+                                author_id="",
+                                likes=likes,
+                                collects=likes // 4,
+                                comments_count=likes // 10,
+                                url=f"https://www.xiaohongshu.com/explore/{note_id}",
+                                published_at=datetime.now(),
+                            ))
+                    except Exception as e:
+                        print(f"解析笔记失败: {e}")
+                        continue
+
+            except Exception as e:
+                print(f"Cookie 搜索失败: {e}")
+            finally:
+                await browser.close()
+
+        return notes[:max_results]
+
+    def _parse_cookie_string(self, cookie_str: str) -> list[dict]:
+        """解析 cookie 字符串为 Playwright 格式"""
+        cookies = []
+        # 支持两种格式:
+        # 1. JSON 格式: [{"name": "x", "value": "y", "domain": "..."}]
+        # 2. Netscape/Header 格式: a=b; c=d
+
+        cookie_str = cookie_str.strip()
+
+        # 尝试 JSON 解析
+        if cookie_str.startswith('[') or cookie_str.startswith('{'):
+            try:
+                import json
+                data = json.loads(cookie_str)
+                if isinstance(data, list):
+                    return data
+                elif isinstance(data, dict):
+                    # 转换 {name: value} 格式
+                    for name, value in data.items():
+                        if isinstance(value, dict):
+                            cookies.append(value)
+                        else:
+                            cookies.append({
+                                "name": name,
+                                "value": str(value),
+                                "domain": ".xiaohongshu.com",
+                                "path": "/",
+                            })
+                    return cookies
+            except:
+                pass
+
+        # 解析 a=b; c=d 格式
+        for pair in cookie_str.split(';'):
+            pair = pair.strip()
+            if '=' in pair:
+                name, value = pair.split('=', 1)
+                cookies.append({
+                    "name": name.strip(),
+                    "value": value.strip(),
+                    "domain": ".xiaohongshu.com",
+                    "path": "/",
+                })
+
+        return cookies
+
     async def search_by_keyword_playwright(
         self,
         keyword: str,
         max_results: int = 20,
         min_likes: int = 100,
-    ) -> list[XHSNote]:
+    ):
         """使用 Playwright 搜索小红书（真实数据）- 通过百度/谷歌搜索结果"""
         from playwright.async_api import async_playwright
         import random
@@ -202,26 +345,38 @@ class XiaohongshuAPI:
     async def search_by_keyword(
         self,
         keyword: str,
-        sort_by: str = "likes",  # likes, time, default
+        sort_by: str = "likes",
         max_results: int = 20,
         min_likes: int = 100,
+        cookie: str = None,
     ) -> list[XHSNote]:
         """
         根据关键词搜索小红书笔记
-        优先使用 Playwright 获取真实数据，失败时回退到模拟数据
-
-        Args:
-            keyword: 搜索关键词
-            sort_by: 排序方式 (likes=高赞优先, time=最新, default=默认)
-            max_results: 最大返回结果数
-            min_likes: 最小点赞数过滤
-
-        Returns:
-            XHSNote 列表（已按赞排序）
+        优先使用 Cookie 访问，然后是 Playwright，最后回退到模拟数据
         """
-        # 首先尝试 Playwright 真实搜索
+        # 如果有 Cookie，优先使用
+        if cookie:
+            try:
+                print(f"使用 Cookie 搜索: {keyword}")
+                notes = await self.search_by_keyword_with_cookie(
+                    keyword=keyword,
+                    cookie=cookie,
+                    max_results=max_results,
+                    min_likes=min_likes,
+                )
+                if notes:
+                    print(f"Cookie 搜索成功，找到 {len(notes)} 条结果")
+                    if sort_by == "likes":
+                        notes.sort(key=lambda x: x.likes, reverse=True)
+                    return notes[:max_results]
+                else:
+                    print("Cookie 搜索返回空结果，尝试其他方式")
+            except Exception as e:
+                print(f"Cookie 搜索失败: {e}")
+
+        # 尝试 Playwright 无 Cookie 搜索（通过搜索引擎）
         try:
-            print(f"开始使用 Playwright 搜索: {keyword}")
+            print(f"使用 Playwright 搜索: {keyword}")
             notes = await self.search_by_keyword_playwright(
                 keyword=keyword,
                 max_results=max_results,
@@ -229,12 +384,9 @@ class XiaohongshuAPI:
             )
             if notes:
                 print(f"Playwright 搜索成功，找到 {len(notes)} 条结果")
-                # 排序
                 if sort_by == "likes":
                     notes.sort(key=lambda x: x.likes, reverse=True)
                 return notes[:max_results]
-            else:
-                print("Playwright 未找到结果，尝试 RSSHub")
         except Exception as e:
             print(f"Playwright 搜索失败: {e}")
 
@@ -466,6 +618,7 @@ async def xiaohongshu_search(
     max_results: int = 20,
     min_likes: int = 100,
     sort_by: str = "likes",
+    cookie: str = None,
 ) -> dict:
     """
     搜索小红书高赞内容
@@ -475,24 +628,13 @@ async def xiaohongshu_search(
         max_results: 最大返回结果数
         min_likes: 最小点赞数过滤
         sort_by: 排序方式 (likes/time)
+        cookie: 小红书登录 Cookie（可选）
 
     Returns:
         {
             "keyword": str,
             "total_found": int,
-            "notes": [
-                {
-                    "id": str,
-                    "title": str,
-                    "content": str,
-                    "author": str,
-                    "likes": int,
-                    "collects": int,
-                    "comments_count": int,
-                    "url": str,
-                    "published_at": str,
-                }
-            ]
+            "notes": [...]
         }
     """
     api = XiaohongshuAPI()
@@ -502,6 +644,7 @@ async def xiaohongshu_search(
             sort_by=sort_by,
             max_results=max_results,
             min_likes=min_likes,
+            cookie=cookie,
         )
 
         return {

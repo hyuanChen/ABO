@@ -18,6 +18,7 @@ class SearchRequest(BaseModel):
     max_results: int = 20
     min_likes: int = 100
     sort_by: str = "likes"  # likes, time
+    cookie: Optional[str] = None  # 小红书登录 Cookie
 
 
 class CommentsRequest(BaseModel):
@@ -38,8 +39,37 @@ async def api_xiaohongshu_search(req: SearchRequest):
         max_results=req.max_results,
         min_likes=req.min_likes,
         sort_by=req.sort_by,
+        cookie=req.cookie,
     )
     return result
+
+
+@router.get("/xiaohongshu/config")
+async def get_xiaohongshu_config():
+    """获取小红书工具配置（从全局配置中读取）"""
+    from abo.config import load as load_config
+    config = load_config()
+    return {
+        "cookie_configured": bool(config.get("xiaohongshu_cookie")),
+        "cookie_preview": config.get("xiaohongshu_cookie", "")[:50] + "..." if config.get("xiaohongshu_cookie") else None,
+    }
+
+
+class CookieConfig(BaseModel):
+    cookie: str
+
+@router.post("/xiaohongshu/config")
+async def set_xiaohongshu_config(config: CookieConfig):
+    """保存小红书 Cookie 配置"""
+    from abo.config import load as load_config, save as save_config
+    existing = load_config()
+    existing["xiaohongshu_cookie"] = config.cookie
+    save_config(existing)
+    return {
+        "success": True,
+        "cookie_configured": True,
+        "cookie_preview": config.cookie[:50] + "..." if len(config.cookie) > 50 else config.cookie,
+    }
 
 
 @router.post("/xiaohongshu/comments")
