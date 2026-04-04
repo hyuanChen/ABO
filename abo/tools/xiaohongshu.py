@@ -212,94 +212,180 @@ class XiaohongshuAPI:
         url = f"https://www.xiaohongshu.com/search_result?keyword={encoded_keyword}"
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(
+                headless=False,  # 有头模式更难被检测
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-web-security',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                ]
+            )
+
+            # 设置更真实的浏览器上下文
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800},
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+                permissions=["geolocation"],
             )
 
-            # 设置 Cookie
-            if cookie:
-                # 解析 cookie 字符串
-                cookies = self._parse_cookie_string(cookie)
-                await context.add_cookies(cookies)
-                print(f"已设置 {len(cookies)} 个 cookies")
+            # 注入脚本绕过 webdriver 检测
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                window.chrome = { runtime: {} };
+            """)
 
             page = await context.new_page()
 
             try:
-                print(f"使用 Cookie 访问: {url}")
-                await page.goto(url, wait_until="networkidle", timeout=30000)
-                await asyncio.sleep(3)  # 等待内容加载
+                # 先访问小红书主页设置 cookie
+                print("访问主页设置 cookie...")
+                await page.goto("https://www.xiaohongshu.com", wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(2)
 
-                # 检查是否还在登录页
-                login_btn = await page.query_selector('button:has-text("登录"), .login-btn')
-                if login_btn:
-                    print("Cookie 可能已失效，仍在登录页面")
-                    return []
+                # 设置 Cookie
+                if cookie:
+                    cookies = self._parse_cookie_string(cookie)
+                    print(f"设置 {len(cookies)} 个 cookies: {[c['name'] for c in cookies]}")
+                    await context.add_cookies(cookies)
 
-                # 等待笔记加载
-                await page.wait_for_selector('.note-item, .cover, [class*="note"]', timeout=10000)
+                # 然后访问搜索页
+                print(f"访问搜索页: {url}")
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(5)  # 等待 JS 渲染
 
-                # 滚动加载更多
-                for _ in range(3):
-                    await page.evaluate("window.scrollBy(0, 800)")
-                    await asyncio.sleep(1)
+                current_url = page.url
+                print(f"当前 URL: {current_url}")
 
-                # 提取笔记
-                note_elements = await page.query_selector_all('.note-item, .feeds-page > div > div')
-                print(f"找到 {len(note_elements)} 个笔记元素")
+                # 检查是否需要登录或验证
+                page_content = await page.content()
+                if "login" in current_url.lower() or "扫码" in page_content or "APP" in page_content or "请使用小红书APP" in page_content:
+                    print("\n" + "="*50)
+                    print("需要登录验证！")
+                    print("请在弹出的浏览器窗口中完成小红书登录/扫码")
+                    print("等待 30 秒...")
+                    print("="*50 + "\n")
+                    await asyncio.sleep(30)  # 给用户时间扫码
 
-                for elem in note_elements[:max_results]:
+                    # 再次检查
+                    current_url = page.url
+                    page_content = await page.content()
+                    if "login" in current_url.lower() or "扫码" in page_content:
+                        print("30秒后仍未完成验证，请手动登录后再试")
+                        return []
+
+                    # 验证完成后刷新页面
+                    await page.reload(wait_until="domcontentloaded")
+                    await asyncio.sleep(5)
+
+                # 尝试多种方式提取数据
+                # 方式1: 直接执行 JavaScript 获取页面数据
+                notes_data = await page.evaluate('''() => {
+                    const results = [];
+                    // 小红书的笔记卡片通常有这些特征
+                    const cards = document.querySelectorAll('[data-v-] > div, section, article');
+
+                    for (const card of cards) {
+                        // 查找标题
+                        let title = '';
+                        const titleSelectors = ['span[class*="title"]', 'a[class*="title"]', '.title', 'h3', 'h4'];
+                        for (const sel of titleSelectors) {
+                            const el = card.querySelector(sel);
+                            if (el && el.textContent.trim().length > 5) {
+                                title = el.textContent.trim();
+                                break;
+                            }
+                        }
+
+                        // 查找作者
+                        let author = '未知';
+                        const authorSelectors = ['[class*="author"]', '[class*="nickname"]', '[class*="user"]'];
+                        for (const sel of authorSelectors) {
+                            const el = card.querySelector(sel);
+                            if (el && el.textContent.trim().length > 0 && el.textContent.trim().length < 50) {
+                                author = el.textContent.trim();
+                                break;
+                            }
+                        }
+
+                        // 查找链接
+                        let href = '';
+                        const linkEl = card.querySelector('a[href*="/explore/"]');
+                        if (linkEl) {
+                            href = linkEl.getAttribute('href');
+                        }
+
+                        // 查找点赞数
+                        let likes = 0;
+                        const text = card.textContent;
+                        const match = text.match(/(\d+\.?\d*)\s*[万k]?\s*赞/) || text.match(/赞\s*(\d+\.?\d*[万k]?)/);
+                        if (match) {
+                            likes = match[1];
+                        }
+
+                        if (title || href) {
+                            results.push({title, author, href, likes: String(likes)});
+                        }
+                    }
+                    return results;
+                }''')
+
+                print(f"提取到 {len(notes_data)} 条原始数据")
+
+                # 调试: 打印前几条
+                for i, data in enumerate(notes_data[:3]):
+                    print(f"  {i+1}. {data['title'][:50]}... by {data['author']}")
+
+                for data in notes_data[:max_results]:
                     try:
-                        # 提取标题
-                        title_elem = await elem.query_selector('.title, .note-title, span[class*="title"]')
-                        title = await title_elem.inner_text() if title_elem else "无标题"
+                        likes = self._parse_count(data['likes']) if isinstance(data['likes'], str) else data.get('likes', 0)
 
-                        # 提取作者
-                        author_elem = await elem.query_selector('.author, .user-name, [class*="author"]')
-                        author = await author_elem.inner_text() if author_elem else "未知"
+                        href = data.get('href', '') or ''
+                        if href and not href.startswith('http'):
+                            href = f"https://www.xiaohongshu.com{href}"
 
-                        # 提取点赞
-                        likes_elem = await elem.query_selector('.like-wrapper .count, [class*="like"]')
-                        likes_text = await likes_elem.inner_text() if likes_elem else "0"
-                        likes = self._parse_count(likes_text)
+                        note_id = 'unknown'
+                        if '/explore/' in href:
+                            note_id = href.split('/explore/')[-1].split('?')[0][:20]
 
-                        # 提取链接
-                        link_elem = await elem.query_selector('a[href*="/explore/"]')
-                        href = await link_elem.get_attribute('href') if link_elem else ""
-                        note_id = href.split('/explore/')[-1].split('?')[0] if '/explore/' in href else f"note-{hash(title) % 1000000}"
-
-                        if likes >= min_likes:
-                            notes.append(XHSNote(
-                                id=note_id,
-                                title=title.strip()[:100],
-                                content="",
-                                author=author.strip()[:50],
-                                author_id="",
-                                likes=likes,
-                                collects=likes // 4,
-                                comments_count=likes // 10,
-                                url=f"https://www.xiaohongshu.com/explore/{note_id}",
-                                published_at=datetime.now(),
-                            ))
+                        notes.append(XHSNote(
+                            id=note_id,
+                            title=(data.get('title') or '无标题')[:100],
+                            content="",
+                            author=(data.get('author') or '未知')[:50],
+                            author_id="",
+                            likes=likes,
+                            collects=0,
+                            comments_count=0,
+                            url=href or f"https://www.xiaohongshu.com",
+                            published_at=datetime.now(),
+                        ))
                     except Exception as e:
                         print(f"解析笔记失败: {e}")
-                        continue
 
             except Exception as e:
-                print(f"Cookie 搜索失败: {e}")
+                print(f"搜索失败: {e}")
+                import traceback
+                traceback.print_exc()
             finally:
                 await browser.close()
 
-        return notes[:max_results]
+        print(f"返回 {len(notes)} 条笔记")
+        return notes
 
     def _parse_cookie_string(self, cookie_str: str) -> list[dict]:
         """解析 cookie 字符串为 Playwright 格式"""
         cookies = []
-        # 支持两种格式:
+        # 支持三种格式:
         # 1. JSON 格式: [{"name": "x", "value": "y", "domain": "..."}]
         # 2. Netscape/Header 格式: a=b; c=d
+        # 3. 单独的 web_session 值: 040069b05e586b57b240d...
 
         cookie_str = cookie_str.strip()
 
@@ -352,16 +438,37 @@ class XiaohongshuAPI:
                 pass
 
         # 解析 a=b; c=d 格式
-        for pair in cookie_str.split(';'):
-            pair = pair.strip()
-            if '=' in pair:
-                name, value = pair.split('=', 1)
-                cookies.append({
-                    "name": name.strip(),
-                    "value": value.strip(),
-                    "domain": ".xiaohongshu.com",
-                    "path": "/",
-                })
+        if '=' in cookie_str and ';' in cookie_str:
+            for pair in cookie_str.split(';'):
+                pair = pair.strip()
+                if '=' in pair:
+                    name, value = pair.split('=', 1)
+                    cookies.append({
+                        "name": name.strip(),
+                        "value": value.strip(),
+                        "domain": ".xiaohongshu.com",
+                        "path": "/",
+                    })
+            return cookies
+
+        # 单独的 cookie 值（如 web_session=xxx 或纯值）
+        if '=' in cookie_str:
+            # web_session=xxx 格式
+            name, value = cookie_str.split('=', 1)
+            cookies.append({
+                "name": name.strip(),
+                "value": value.strip(),
+                "domain": ".xiaohongshu.com",
+                "path": "/",
+            })
+        else:
+            # 纯值格式，假设是 web_session
+            cookies.append({
+                "name": "web_session",
+                "value": cookie_str,
+                "domain": ".xiaohongshu.com",
+                "path": "/",
+            })
 
         return cookies
 

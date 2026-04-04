@@ -110,3 +110,26 @@ export async function bilibiliGetCookieFromBrowser(): Promise<BrowserCookieRespo
   if (!res.ok) throw new Error("Failed to get cookie from browser");
   return res.json();
 }
+
+export interface DebugTestResult {
+  sessdata_preview: string;
+  tests: Record<string, {
+    status_code?: number;
+    code?: number;
+    message?: string;
+    cards_count?: number;
+    first_card_types?: number[];
+    error?: string;
+  }>;
+  suggestions: string[];
+}
+
+export async function bilibiliDebugTest(sessdata: string): Promise<DebugTestResult> {
+  const res = await fetch(`${API_BASE}/bilibili/debug`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessdata }),
+  });
+  if (!res.ok) throw new Error("Debug test failed");
+  return res.json();
+}

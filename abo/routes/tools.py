@@ -282,6 +282,79 @@ async def api_bilibili_verify(req: BilibiliVerifyRequest):
     return result
 
 
+@router.post("/bilibili/debug")
+async def api_bilibili_debug(req: BilibiliVerifyRequest):
+    """
+    调试端点：直接测试 Bilibili API 并返回原始响应
+    用于诊断为什么获取不到关注动态
+    """
+    import httpx
+
+    DYNAMIC_API = "https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/dynamic_new"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Cookie": f"SESSDATA={req.sessdata}",
+        "Referer": "https://t.bilibili.com/",
+    }
+
+    results = {}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        # 测试 1: type_list=8 (仅视频)
+        try:
+            resp1 = await client.get(DYNAMIC_API, params={"type_list": 8}, headers=headers)
+            data1 = resp1.json()
+            results["video_only"] = {
+                "status_code": resp1.status_code,
+                "code": data1.get("code"),
+                "message": data1.get("message"),
+                "cards_count": len(data1.get("data", {}).get("cards", [])),
+            }
+        except Exception as e:
+            results["video_only"] = {"error": str(e)}
+
+        # 测试 2: type_list=268435455 (全部)
+        try:
+            resp2 = await client.get(DYNAMIC_API, params={"type_list": 268435455}, headers=headers)
+            data2 = resp2.json()
+            cards = data2.get("data", {}).get("cards", [])
+            results["all_types"] = {
+                "status_code": resp2.status_code,
+                "code": data2.get("code"),
+                "message": data2.get("message"),
+                "cards_count": len(cards),
+                "first_card_types": [c.get("desc", {}).get("type") for c in cards[:5]],
+            }
+        except Exception as e:
+            results["all_types"] = {"error": str(e)}
+
+        # 测试 3: 无 type_list 参数
+        try:
+            resp3 = await client.get(DYNAMIC_API, headers=headers)
+            data3 = resp3.json()
+            results["no_params"] = {
+                "status_code": resp3.status_code,
+                "code": data3.get("code"),
+                "message": data3.get("message"),
+                "cards_count": len(data3.get("data", {}).get("cards", [])),
+            }
+        except Exception as e:
+            results["no_params"] = {"error": str(e)}
+
+    return {
+        "sessdata_preview": req.sessdata[:20] + "..." if len(req.sessdata) > 20 else req.sessdata,
+        "tests": results,
+        "suggestions": [
+            "如果所有测试都返回 0 卡片，可能是：",
+            "1. SESSDATA 过期但 API 没有正确返回错误码",
+            "2. 账号没有关注任何用户",
+            "3. 关注用户最近没有发布动态",
+            "4. API 端点或参数格式已更改",
+            "5. 需要在 Cookie 中提供额外的验证字段（如 bili_jct）",
+        ]
+    }
+
+
 @router.get("/bilibili/config")
 async def get_bilibili_config():
     """获取哔哩哔哩工具配置（从全局配置中读取）"""

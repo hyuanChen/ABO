@@ -29,8 +29,14 @@ interface ArxivPaper {
   comment?: string;
 }
 
+interface Category {
+  code: string;
+  name: string;
+  main: string;
+}
+
 interface CategoriesResponse {
-  categories: string[];
+  categories: Category[];
 }
 
 interface SearchResponse {
@@ -45,7 +51,7 @@ export function ArxivAPITool() {
   // Search parameters
   const [keywords, setKeywords] = useState("");
   const [categories, setCategories] = useState<string[]>([]);
-  const [availableCategories, setAvailableCategories] = useState<string[]>([]);
+  const [availableCategories, setAvailableCategories] = useState<Category[]>([]);
   const [mode, setMode] = useState<"AND" | "OR">("OR");
   const [maxResults, setMaxResults] = useState(50);
   const [daysBack, setDaysBack] = useState<number | null>(null);
@@ -392,22 +398,23 @@ export function ArxivAPITool() {
           >
             {availableCategories.map((category) => (
               <button
-                key={category}
-                onClick={() => toggleCategory(category)}
+                key={category.code}
+                onClick={() => toggleCategory(category.code)}
+                title={category.name}
                 style={{
                   padding: "6px 12px",
                   borderRadius: "var(--radius-full)",
                   border: "1px solid var(--border-light)",
-                  background: categories.includes(category)
+                  background: categories.includes(category.code)
                     ? "var(--color-primary)"
                     : "var(--bg-hover)",
-                  color: categories.includes(category) ? "white" : "var(--text-secondary)",
+                  color: categories.includes(category.code) ? "white" : "var(--text-secondary)",
                   fontSize: "0.8125rem",
                   cursor: "pointer",
                   transition: "all 0.2s ease",
                 }}
               >
-                {category}
+                {category.code}
               </button>
             ))}
           </div>

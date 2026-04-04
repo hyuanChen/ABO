@@ -95,9 +95,15 @@ class BilibiliToolAPI:
         params = {"type_list": type_list}
 
         try:
+            print(f"[bilibili-tool] Request URL: {self.DYNAMIC_API}")
+            print(f"[bilibili-tool] Headers: Cookie=SESSDATA={self.sessdata[:20]}... Referer={headers['Referer']}")
+            print(f"[bilibili-tool] Params: {params}")
+
             resp = await self.client.get(
                 self.DYNAMIC_API, params=params, headers=headers
             )
+
+            print(f"[bilibili-tool] Response status: {resp.status_code}")
 
             if resp.status_code != 200:
                 print(f"[bilibili-tool] API error: {resp.status_code}")
@@ -111,6 +117,13 @@ class BilibiliToolAPI:
 
             cards = data.get("data", {}).get("cards", [])
             print(f"[bilibili-tool] Got {len(cards)} cards from API")
+
+            # Debug: 打印返回数据的结构
+            if data.get("data"):
+                data_keys = list(data["data"].keys())
+                print(f"[bilibili-tool] Response data keys: {data_keys}")
+            else:
+                print(f"[bilibili-tool] No data field in response")
             dynamics = []
             cutoff = datetime.now() - timedelta(days=days_back)
 

@@ -27,6 +27,8 @@ import {
   bilibiliGetConfig,
   bilibiliSaveConfig,
   bilibiliGetCookieFromBrowser,
+  bilibiliDebugTest,
+  DebugTestResult,
 } from "../../api/bilibili";
 
 const DYNAMIC_TYPE_MAP: Record<string, { label: string; icon: typeof Play; color: string }> = {
@@ -87,6 +89,10 @@ export function BilibiliTool() {
   const [dynamics, setDynamics] = useState<BiliDynamic[]>([]);
   const [loading, setLoading] = useState(false);
   const [totalFound, setTotalFound] = useState(0);
+
+  // Debug state
+  const [debugResult, setDebugResult] = useState<DebugTestResult | null>(null);
+  const [debugLoading, setDebugLoading] = useState(false);
 
   // Persist keywords
   useEffect(() => {
@@ -318,6 +324,23 @@ export function BilibiliTool() {
       hour: "2-digit",
       minute: "2-digit",
     });
+  };
+
+  const handleDebugTest = async () => {
+    if (!sessdata.trim()) {
+      toast.error("请先输入 SESSDATA");
+      return;
+    }
+    setDebugLoading(true);
+    try {
+      const result = await bilibiliDebugTest(sessdata.trim());
+      setDebugResult(result);
+      toast.success("诊断测试完成");
+    } catch (err) {
+      toast.error("诊断失败", err instanceof Error ? err.message : "未知错误");
+    } finally {
+      setDebugLoading(false);
+    }
   };
 
   return (
@@ -771,6 +794,107 @@ export function BilibiliTool() {
                 </>
               )}
             </button>
+
+            {/* Diagnostic Button */}
+            <button
+              onClick={handleDebugTest}
+              disabled={debugLoading || !sessdata.trim()}
+              style={{
+                padding: "12px 20px",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-card)",
+                color: "var(--text-secondary)",
+                fontSize: "0.875rem",
+                fontWeight: 500,
+                cursor: debugLoading || !sessdata.trim() ? "not-allowed" : "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "8px",
+              }}
+            >
+              {debugLoading ? (
+                <>
+                  <div
+                    style={{
+                      width: "16px",
+                      height: "16px",
+                      border: "2px solid var(--text-muted)",
+                      borderTopColor: "transparent",
+                      borderRadius: "50%",
+                      animation: "spin 1s linear infinite",
+                    }}
+                  />
+                  诊断中...
+                </>
+              ) : (
+                <>
+                  <AlertCircle size={16} />
+                  运行诊断测试
+                </>
+              )}
+            </button>
+
+            {/* Debug Results */}
+            {debugResult && (
+              <Card title="诊断结果" icon={<AlertCircle size={18} />}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                  <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+                    SESSDATA: {debugResult.sessdata_preview}
+                  </div>
+                  {Object.entries(debugResult.tests).map(([name, test]) => (
+                    <div
+                      key={name}
+                      style={{
+                        padding: "12px",
+                        borderRadius: "var(--radius-sm)",
+                        background: "var(--bg-hover)",
+                        fontSize: "0.8125rem",
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, color: "var(--text-main)", marginBottom: "4px" }}>
+                        {name === "video_only" && "仅视频 (type_list=8)"}
+                        {name === "all_types" && "全部类型 (type_list=268435455)"}
+                        {name === "no_params" && "无参数"}
+                      </div>
+                      {test.error ? (
+                        <div style={{ color: "var(--color-error)" }}>错误: {test.error}</div>
+                      ) : (
+                        <div style={{ color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: "2px" }}>
+                          <span>状态码: {test.status_code}</span>
+                          <span>返回码: {test.code}</span>
+                          <span>消息: {test.message}</span>
+                          <span style={{ fontWeight: 600, color: test.cards_count && test.cards_count > 0 ? "var(--color-success)" : "var(--text-muted)" }}>
+                            卡片数: {test.cards_count}
+                          </span>
+                          {test.first_card_types && test.first_card_types.length > 0 && (
+                            <span>前5个卡片类型: {test.first_card_types.join(", ")}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  <div
+                    style={{
+                      padding: "12px",
+                      borderRadius: "var(--radius-sm)",
+                      background: "rgba(255, 193, 7, 0.1)",
+                      border: "1px solid rgba(255, 193, 7, 0.3)",
+                    }}
+                  >
+                    <div style={{ fontWeight: 600, color: "#FFB800", marginBottom: "8px", fontSize: "0.8125rem" }}>
+                      可能的原因：
+                    </div>
+                    <ul style={{ margin: 0, paddingLeft: "16px", fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                      {debugResult.suggestions.slice(1).map((s, i) => (
+                        <li key={i} style={{ marginBottom: "4px" }}>{s}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </Card>
+            )}
           </div>
 
           {/* Right content - Results */}
