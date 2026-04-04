@@ -39,19 +39,36 @@ class CliDetector:
             acp_args=["--print"],
             protocol="raw"
         ),
-        "echo": CliInfo(
-            id="echo",
-            name="Echo Test",
-            command="cat",
-            check_cmd="cat --version",
+        "gemini": CliInfo(
+            id="gemini",
+            name="Gemini CLI",
+            command="gemini",
+            check_cmd="gemini --version",
+            acp_args=["--experimental-acp"],
+            protocol="acp"
+        ),
+        "openclaw": CliInfo(
+            id="openclaw",
+            name="OpenClaw",
+            command="openclaw",
+            check_cmd="openclaw --version",
             acp_args=[],
-            protocol="raw"
+            protocol="websocket"
+        ),
+        "codex": CliInfo(
+            id="codex",
+            name="OpenAI Codex",
+            command="codex",
+            check_cmd="codex --version",
+            acp_args=[],
+            protocol="acp"
         ),
     }
 
     def __init__(self, db_path: str = "~/.abo/data/cli_configs.json"):
         self.db_path = os.path.expanduser(db_path)
         self._cache: Dict[str, CliInfo] = {}
+        self._load_cache()
 
     def detect_all(self, force: bool = False) -> List[CliInfo]:
         """检测所有已知的 CLI 工具"""
@@ -139,6 +156,34 @@ class CliDetector:
             return self._detect_single(self.REGISTRY[cli_id])
 
         return None
+
+    def _load_cache(self) -> None:
+        """从文件加载缓存"""
+        try:
+            if os.path.exists(self.db_path):
+                with open(self.db_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    for item in data:
+                        self._cache[item['id']] = CliInfo(**item)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            self._cache = {}
+
+    def _save_cache(self) -> None:
+        """保存缓存到文件"""
+        try:
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+            data = [asdict(info) for info in self._cache.values()]
+            with open(self.db_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except (OSError, TypeError):
+            pass
+
+    def add_custom_cli(self, info: CliInfo) -> None:
+        """添加自定义 CLI 到注册表"""
+        self.REGISTRY[info.id] = info
+        detected = self._detect_single(info)
+        self._cache[info.id] = detected
+        self._save_cache()
 
 
 # 全局检测器实例
