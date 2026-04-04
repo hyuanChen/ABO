@@ -14,6 +14,8 @@ import {
   MessageSquare,
   X,
   Plus,
+  Cookie,
+  Globe,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
 import { useToast } from "../../components/Toast";
@@ -22,6 +24,9 @@ import {
   BiliDynamic,
   bilibiliFetchFollowed,
   bilibiliVerifySessdata,
+  bilibiliGetConfig,
+  bilibiliSaveConfig,
+  bilibiliGetCookieFromBrowser,
 } from "../../api/bilibili";
 
 const DYNAMIC_TYPE_MAP: Record<string, { label: string; icon: typeof Play; color: string }> = {
@@ -57,7 +62,13 @@ const LIMIT_OPTIONS = [10, 20, 50];
 export function BilibiliTool() {
   const toast = useToast();
 
-  // SESSDATA state
+  // Cookie configuration state
+  const [cookieConfigured, setCookieConfigured] = useState(false);
+  const [cookiePreview, setCookiePreview] = useState<string | null>(null);
+  const [cookieInput, setCookieInput] = useState("");
+  const [gettingFromBrowser, setGettingFromBrowser] = useState(false);
+
+  // SESSDATA state (extracted from cookie)
   const [sessdata, setSessdata] = useState(() => localStorage.getItem("bilibili_sessdata") || "");
   const [sessdataVerified, setSessdataVerified] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -70,7 +81,7 @@ export function BilibiliTool() {
   const [keywordInput, setKeywordInput] = useState("");
   const [selectedTypes, setSelectedTypes] = useState<string[]>(["video", "image", "text", "article"]);
   const [daysBack, setDaysBack] = useState(7);
-  const [limit, setLimit] = useState(20);
+  const [limit, setLimit] = useState(50);
 
   // Results state
   const [dynamics, setDynamics] = useState<BiliDynamic[]>([]);
@@ -90,6 +101,118 @@ export function BilibiliTool() {
       localStorage.removeItem("bilibili_sessdata");
     }
   }, [sessdata]);
+
+  // Load config on mount
+  useEffect(() => {
+    loadConfig();
+  }, []);
+
+  async function loadConfig() {
+    try {
+      const config = await bilibiliGetConfig();
+      setCookieConfigured(config.cookie_configured);
+      setCookiePreview(config.cookie_preview);
+
+      // If we have a configured cookie, try to extract SESSDATA
+      if (config.cookie_configured && config.cookie_preview) {
+        const extractedSessdata = extractSessdataFromCookie(config.cookie_preview.replace("...", ""));
+        if (extractedSessdata && !sessdata) {
+          setSessdata(extractedSessdata);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load config:", err);
+    }
+  }
+
+  function extractSessdataFromCookie(cookieStr: string): string | null {
+    try {
+      // Try JSON format
+      if (cookieStr.startsWith("[") || cookieStr.startsWith("{")) {
+        const parsed = JSON.parse(cookieStr);
+        if (Array.isArray(parsed)) {
+          const sessdataCookie = parsed.find((c: any) => c.name === "SESSDATA");
+          if (sessdataCookie) return sessdataCookie.value;
+        }
+      }
+
+      // Try "SESSDATA=value" format
+      const match = cookieStr.match(/SESSDATA=([^;\s]+)/);
+      if (match) return match[1];
+
+      // Try direct value (just the SESSDATA string)
+      if (cookieStr.length > 20 && !cookieStr.includes("=") && !cookieStr.includes("{")) {
+        return cookieStr.trim();
+      }
+    } catch (e) {
+      console.error("Failed to parse cookie:", e);
+    }
+    return null;
+  }
+
+  async function handleSaveCookie() {
+    if (!cookieInput.trim()) {
+      toast.error("请输入 Cookie");
+      return;
+    }
+
+    try {
+      // Try to extract and set SESSDATA
+      const extractedSessdata = extractSessdataFromCookie(cookieInput.trim());
+      if (extractedSessdata) {
+        setSessdata(extractedSessdata);
+        // Also save to localStorage for backward compatibility
+        localStorage.setItem("bilibili_sessdata", extractedSessdata);
+      }
+
+      const res = await bilibiliSaveConfig({ cookie: cookieInput.trim() });
+      if (res.success) {
+        setCookieConfigured(true);
+        setCookiePreview(res.cookie_preview);
+        toast.success("Cookie 保存成功");
+      }
+    } catch (err) {
+      toast.error("保存失败", err instanceof Error ? err.message : "未知错误");
+    }
+  }
+
+  async function handleGetFromBrowser() {
+    setGettingFromBrowser(true);
+    try {
+      const res = await bilibiliGetCookieFromBrowser();
+      if (res.success && res.cookie_preview) {
+        setCookieInput(res.cookie_preview.replace("...", ""));
+        setCookieConfigured(true);
+        setCookiePreview(res.cookie_preview);
+
+        // Extract and set SESSDATA
+        const extractedSessdata = extractSessdataFromCookie(res.cookie_preview.replace("...", ""));
+        if (extractedSessdata) {
+          setSessdata(extractedSessdata);
+          localStorage.setItem("bilibili_sessdata", extractedSessdata);
+        }
+
+        toast.success("从浏览器获取 Cookie 成功", res.message || `获取到 ${res.cookie_count} 个 Cookie`);
+      } else {
+        toast.error("获取失败", res.error || "未找到 Cookie");
+      }
+    } catch (err) {
+      toast.error("获取失败", err instanceof Error ? err.message : "未知错误");
+    } finally {
+      setGettingFromBrowser(false);
+    }
+  }
+
+  function applyCookieToSessdata() {
+    const extracted = extractSessdataFromCookie(cookieInput);
+    if (extracted) {
+      setSessdata(extracted);
+      localStorage.setItem("bilibili_sessdata", extracted);
+      toast.success("已提取 SESSDATA");
+    } else {
+      toast.error("无法从输入中提取 SESSDATA");
+    }
+  }
 
   const handleVerifySessdata = async () => {
     if (!sessdata.trim()) {
@@ -208,11 +331,150 @@ export function BilibiliTool() {
         <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: "24px", height: "100%" }}>
           {/* Left sidebar - Configuration */}
           <div style={{ display: "flex", flexDirection: "column", gap: "16px", overflow: "auto" }}>
-            {/* SESSDATA Card */}
-            <Card title="SESSDATA 配置" icon={<Tv size={18} />}>
+            {/* Cookie Configuration Card */}
+            <Card
+              title={`Cookie 配置 ${cookieConfigured ? "✓" : ""}`}
+              icon={<Cookie size={18} />}
+            >
               <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
                 <p style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                  从浏览器 Cookie 中复制 SESSDATA 值用于身份验证
+                  配置 B 站登录 Cookie 后可获取关注列表动态。支持 JSON 格式或 SESSDATA 字符串。
+                </p>
+
+                {cookiePreview && (
+                  <div
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: "var(--radius-sm)",
+                      background: "var(--bg-hover)",
+                      fontSize: "0.8125rem",
+                      color: "var(--text-secondary)",
+                      fontFamily: "monospace",
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    当前: {cookiePreview}
+                  </div>
+                )}
+
+                <textarea
+                  value={cookieInput}
+                  onChange={(e) => setCookieInput(e.target.value)}
+                  placeholder={`支持以下格式：
+1. JSON 数组: [{"name":"SESSDATA","value":"xxx"},...]
+2. Header 格式: SESSDATA=xxx; bili_jct=yyy
+3. 纯 SESSDATA: xxx`}
+                  style={{
+                    width: "100%",
+                    padding: "12px",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid var(--border-light)",
+                    background: "var(--bg-input)",
+                    color: "var(--text-main)",
+                    fontSize: "0.8125rem",
+                    fontFamily: "monospace",
+                    resize: "vertical",
+                    minHeight: "100px",
+                  }}
+                />
+
+                <CookieGuide platform="bilibili" cookieName="SESSDATA" />
+
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button
+                    onClick={handleSaveCookie}
+                    disabled={!cookieInput.trim()}
+                    style={{
+                      flex: 1,
+                      padding: "10px 16px",
+                      borderRadius: "var(--radius-sm)",
+                      border: "none",
+                      background: !cookieInput.trim() ? "var(--bg-muted)" : "var(--color-primary)",
+                      color: "white",
+                      fontSize: "0.875rem",
+                      fontWeight: 600,
+                      cursor: !cookieInput.trim() ? "not-allowed" : "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: "8px",
+                    }}
+                  >
+                    <CheckCircle size={16} />
+                    保存 Cookie
+                  </button>
+
+                  <button
+                    onClick={handleGetFromBrowser}
+                    disabled={gettingFromBrowser}
+                    style={{
+                      flex: 1,
+                      padding: "10px 16px",
+                      borderRadius: "var(--radius-sm)",
+                      border: "none",
+                      background: gettingFromBrowser ? "var(--bg-muted)" : "#00AEEC",
+                      color: "white",
+                      fontSize: "0.875rem",
+                      fontWeight: 600,
+                      cursor: gettingFromBrowser ? "not-allowed" : "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: "8px",
+                    }}
+                  >
+                    {gettingFromBrowser ? (
+                      <>
+                        <div
+                          style={{
+                            width: "16px",
+                            height: "16px",
+                            border: "2px solid rgba(255,255,255,0.3)",
+                            borderTopColor: "white",
+                            borderRadius: "50%",
+                            animation: "spin 1s linear infinite",
+                          }}
+                        />
+                        获取中...
+                      </>
+                    ) : (
+                      <>
+                        <Globe size={16} />
+                        从 Chrome 获取
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {cookieInput && (
+                  <button
+                    onClick={applyCookieToSessdata}
+                    style={{
+                      padding: "10px 16px",
+                      borderRadius: "var(--radius-sm)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-hover)",
+                      color: "var(--text-secondary)",
+                      fontSize: "0.8125rem",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: "8px",
+                    }}
+                  >
+                    <Tv size={16} />
+                    提取 SESSDATA 到下方输入框
+                  </button>
+                )}
+              </div>
+            </Card>
+
+            {/* SESSDATA Quick Input Card */}
+            <Card title="SESSDATA 快速输入" icon={<Tv size={18} />}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                <p style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+                  直接输入 SESSDATA 值（如果你只有这一个值）
                 </p>
                 <textarea
                   value={sessdata}
@@ -234,7 +496,6 @@ export function BilibiliTool() {
                     minHeight: "80px",
                   }}
                 />
-                <CookieGuide platform="bilibili" cookieName="SESSDATA" />
                 <button
                   onClick={handleVerifySessdata}
                   disabled={verifying || !sessdata.trim()}

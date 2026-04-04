@@ -79,7 +79,12 @@ class BilibiliToolAPI:
         # This is the bitmask Bilibili API expects for fetching all dynamic types
         type_list = 0x0FFFFFFF
         if dynamic_types:
-            type_list = sum(1 << (t - 1) for t in dynamic_types)
+            # Filter out 0 values and validate
+            valid_types = [t for t in dynamic_types if t > 0]
+            print(f"[bilibili-tool] Requested dynamic_types: {dynamic_types}, valid: {valid_types}")
+            if valid_types:
+                type_list = sum(1 << (t - 1) for t in valid_types)
+        print(f"[bilibili-tool] Using type_list: {type_list} (hex: {hex(type_list)})")
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -99,11 +104,13 @@ class BilibiliToolAPI:
                 return []
 
             data = resp.json()
+            print(f"[bilibili-tool] API response code: {data.get('code')}, message: {data.get('message')}")
             if data.get("code") != 0:
                 print(f"[bilibili-tool] API error: {data.get('message')}")
                 return []
 
             cards = data.get("data", {}).get("cards", [])
+            print(f"[bilibili-tool] Got {len(cards)} cards from API")
             dynamics = []
             cutoff = datetime.now() - timedelta(days=days_back)
 
@@ -112,12 +119,15 @@ class BilibiliToolAPI:
                 if dynamic:
                     # 时间过滤
                     if dynamic.published_at and dynamic.published_at < cutoff:
+                        print(f"[bilibili-tool] Skipping {dynamic.dynamic_id} - too old")
                         continue
                     dynamics.append(dynamic)
+                    print(f"[bilibili-tool] Added: {dynamic.title[:50]}... by {dynamic.author}")
 
                     if len(dynamics) >= limit:
                         break
 
+            print(f"[bilibili-tool] Returning {len(dynamics)} dynamics (keyword filter: {keywords if keywords else 'none'})")
             return dynamics
 
         except Exception as e:
@@ -291,6 +301,7 @@ async def bilibili_fetch_followed(
     """
     获取关注列表的动态（带关键词过滤）
     """
+    print(f"[bilibili-tool] Fetch request: keywords={keywords}, types={dynamic_types}, limit={limit}, days={days_back}")
     api = BilibiliToolAPI(sessdata=sessdata)
     try:
         dynamics = await api.fetch_followed_dynamics(
