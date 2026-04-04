@@ -67,6 +67,7 @@ class ConversationStore:
         """获取数据库连接"""
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     def _init_db(self):
