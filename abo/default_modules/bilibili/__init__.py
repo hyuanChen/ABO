@@ -42,6 +42,7 @@ from pathlib import Path
 import httpx
 
 from abo.sdk import Module, Item, Card, claude_json
+from .wbi import enc_wbi, get_wbi_keys
 
 
 # Dynamic type codes
@@ -493,88 +494,83 @@ class BilibiliTracker(Module):
     async def _fetch_via_api(
         self, uid: str, keywords: list[str], limit: int
     ) -> list[Item]:
-        """Fetch videos using Bilibili API with demo fallback."""
         items = []
-        url = f"{self.API_BASE}/x/space/wbi/arc/search"
+        try:
+            img_key, sub_key = await get_wbi_keys()
+        except Exception as e:
+            print(f"[bilibili] Failed to fetch WBI keys: {e}")
+            return items
 
         params = {
             "mid": uid,
             "ps": limit * 2,
             "pn": 1,
             "order": "pubdate",
+            "platform": "web",
+            "web_location": "1550101",
+            "order_avoided": "true",
+            "dm_img_list": "[]",
+            "dm_img_str": "V2ViR0wgMS4w",
+            "dm_cover_img_str": (
+                "QU5HRUwgKEFQSSlOQU5HRUwgKEFQSSlOQU5HRUwgKEFQSSlOQU5HRUwgKEFQSSlO"
+                "QU5HRUwgKEFQSSlOQU5HRUwgKEFQSSlOQU5HRUwgKEFQSSlOQU5HRUwgKEFQSSlO"
+            ),
         }
+        signed = enc_wbi(params, img_key, sub_key)
 
+        url = "https://api.bilibili.com/x/space/wbi/arc/search"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
             "Referer": f"https://space.bilibili.com/{uid}/video",
-            "Origin": "https://space.bilibili.com",
-            "Accept": "application/json, text/plain, */*",
         }
 
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                resp = await client.get(url, params=params, headers=headers)
+                resp = await client.get(url, params=signed, headers=headers)
+            if resp.status_code != 200:
+                print(f"[bilibili] API returned {resp.status_code}")
+                return items
 
-            if resp.status_code == 200:
-                # Bilibili may return brotli compressed data
-                try:
-                    data = resp.json()
-                except:
-                    # Try to decompress
-                    try:
-                        import brotli
-                        decompressed = brotli.decompress(resp.content)
-                        data = json.loads(decompressed.decode('utf-8'))
-                    except:
-                        data = {}
+            data = resp.json()
+            vlist = data.get("data", {}).get("list", {}).get("vlist", [])
+            cutoff = datetime.utcnow() - timedelta(days=14)
 
-                if data.get("data", {}).get("list", {}).get("vlist"):
-                    vlist = data["data"]["list"]["vlist"]
-                    cutoff = datetime.utcnow() - timedelta(days=14)
-
-                    for video in vlist:
-                        title = video.get("title", "")
-
-                        # Keyword filtering
-                        title_lower = title.lower()
-                        if not any(kw.lower() in title_lower for kw in keywords):
-                            continue
-
-                        # Check date
-                        created_timestamp = video.get("created", 0)
-                        if created_timestamp:
-                            created_dt = datetime.fromtimestamp(created_timestamp)
-                            if created_dt < cutoff:
-                                continue
-
-                        bvid = video.get("bvid", "")
-                        items.append(
-                            Item(
-                                id=f"bili-{uid}-{bvid}",
-                                raw={
-                                    "title": title,
-                                    "description": video.get("description", ""),
-                                    "url": f"https://www.bilibili.com/video/{bvid}",
-                                    "bvid": bvid,
-                                    "up_uid": uid,
-                                    "published": created_dt.isoformat() if created_timestamp else "",
-                                    "platform": "bilibili",
-                                    "duration": video.get("length", ""),
-                                    "pic": video.get("pic", ""),
-                                },
-                            )
-                        )
-
-                        if len(items) >= limit:
-                            break
-
+            for video in vlist:
+                title = video.get("title", "")
+                if not any(kw.lower() in title.lower() for kw in keywords):
+                    continue
+                created_timestamp = video.get("created", 0)
+                if created_timestamp:
+                    created_dt = datetime.fromtimestamp(created_timestamp)
+                    if created_dt < cutoff:
+                        continue
+                bvid = video.get("bvid", "")
+                items.append(
+                    Item(
+                        id=f"bili-{uid}-{bvid}",
+                        raw={
+                            "title": title,
+                            "description": video.get("description", ""),
+                            "url": f"https://www.bilibili.com/video/{bvid}",
+                            "bvid": bvid,
+                            "up_uid": uid,
+                            "published": created_dt.isoformat() if created_timestamp else "",
+                            "platform": "bilibili",
+                            "duration": video.get("length", ""),
+                            "pic": video.get("pic", ""),
+                        },
+                    )
+                )
+                if len(items) >= limit:
+                    break
         except Exception as e:
-            print(f"Bilibili API failed for UID {uid}: {e}")
+            print(f"[bilibili] API failed for UID {uid}: {e}")
 
-        # Demo fallback: generate sample data if no items and demo mode enabled
         if not items:
             items = self._generate_demo_items(uid, keywords, limit)
-
         return items[:limit]
 
     def _generate_demo_items(self, uid: str, keywords: list[str], limit: int) -> list[Item]:
