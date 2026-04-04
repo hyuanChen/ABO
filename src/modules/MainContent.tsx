@@ -10,6 +10,7 @@ import Settings from "./settings/Settings";
 import BubbleVault from "./vault/BubbleVault";
 import ModulePanel from "./feed/ModulePanel";
 import { XiaohongshuTool } from "./xiaohongshu/XiaohongshuTool";
+import { BilibiliTool } from "./bilibili/BilibiliTool";
 
 export default function MainContent() {
   const activeTab = useStore((s) => s.activeTab);
@@ -47,11 +48,13 @@ export default function MainContent() {
       {activeTab === "literature" && <Literature />}
       {activeTab === "journal"    && <Journal />}
       {activeTab === "claude"     && <ChatPanel />}
+      {activeTab === "chat"       && <ChatPanel />}
       {activeTab === "arxiv"      && <ArxivTracker />}
       {activeTab === "health"     && <HealthDashboard />}
       {activeTab === "settings"   && <Settings />}
       {activeTab === "modules"    && <ModulePanel />}
       {activeTab === "xiaohongshu" && <XiaohongshuTool />}
+      {activeTab === "bilibili" && <BilibiliTool />}
     </main>
   );
 }

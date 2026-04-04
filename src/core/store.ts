@@ -10,10 +10,12 @@ export type ActiveTab =
   | "journal"
   | "health"
   | "claude"
+  | "chat"
   | "vault"
   | "settings"
   | "modules"
-  | "xiaohongshu";
+  | "xiaohongshu"
+  | "bilibili";
 
 export type ToastKind = "info" | "error" | "success";
 

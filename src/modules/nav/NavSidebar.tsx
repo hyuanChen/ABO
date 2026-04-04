@@ -16,6 +16,7 @@ const MAIN: NavItem[] = [
   { id: "literature", label: "文献库",     Icon: BookOpen },
   { id: "journal",    label: "手记",       Icon: FileText },
   { id: "claude",     label: "Claude",     Icon: MessageSquare },
+  { id: "chat",       label: "AI 对话",    Icon: MessageSquare },
 ];
 
 export default function NavSidebar() {
