@@ -47,13 +47,11 @@ class ZhihuSearchRequest(BaseModel):
     max_results: int = 20
     min_votes: int = 100
     sort_by: str = "votes"  # votes, time
-    content_types: Optional[list[str]] = None  # ["answer", "article", "video"]
     cookie: Optional[str] = None
 
 
 class ZhihuCommentsRequest(BaseModel):
     content_id: str
-    content_type: str = "answer"  # answer, article, video
     max_comments: int = 50
     sort_by: str = "likes"
 
