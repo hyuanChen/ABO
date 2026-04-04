@@ -1,193 +1,266 @@
 /**
- * ChatPanel - 严格遵循 AionUi 设计规范
- * 完整集成 WebSocket 流式通信
+ * ChatPanel - 完整集成 useChat hook
+ * 布局: Header (CLI选择器 + 连接状态 + 设置) + 消息列表 + 输入框
+ * 设计: AionUi - 背景 #FCFAF2, 全高度 flex 布局
  */
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { ChatHeader } from './ChatHeader';
-import { MessageList, Message } from './MessageList';
+import { useEffect, useRef, useCallback } from 'react';
+import { Plus, AlertCircle, Loader2 } from 'lucide-react';
+import { MessageList, Message as MessageListMessage } from './MessageList';
 import { ChatInput } from './ChatInput';
-import { API_BASE_URL } from '../../core/api';
+import { useChat } from '../../hooks/useChat';
+import type { Message } from '../../types/chat';
 
-interface WebSocketEvent {
-  type: 'connected' | 'ping' | 'start' | 'content' | 'tool_call' | 'finish' | 'error';
-  data?: string;
-  msg_id?: string;
-  metadata?: any;
+// 将 useChat 的 Message 转换为 MessageList 的 Message
+function convertMessages(messages: Message[]): MessageListMessage[] {
+  return messages.map((msg) => ({
+    id: msg.id,
+    role: msg.role === 'system' ? 'assistant' : msg.role,
+    content: msg.content,
+    timestamp: new Date(msg.createdAt).toLocaleTimeString('zh-CN', {
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+    isStreaming: msg.status === 'streaming',
+  }));
 }
 
 export function ChatPanel() {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [conversationId, setConversationId] = useState<string | null>(null);
-  const [_sessionId, setSessionId] = useState<string | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const currentMsgIdRef = useRef<string | null>(null);
+  const {
+    // CLI
+    availableClis,
+    selectedCli,
+    selectCli,
 
-  // 创建对话
-  const createConversation = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/chat/conversations`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          cli_type: 'echo',
-          title: 'Claude Chat',
-          workspace: '',
-        }),
-      });
-      const data = await response.json();
-      setConversationId(data.id);
-      setSessionId(data.session_id);
-      return data;
-    } catch (error) {
-      console.error('Failed to create conversation:', error);
-      return null;
-    }
+    // Conversation
+    conversation,
+    createNewConversation,
+
+    // Messages
+    messages,
+    sendMessage,
+    isStreaming,
+
+    // Connection state
+    isConnected,
+    isLoading,
+    error,
+  } = useChat();
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // 自动滚动到底部
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
 
-  // 连接 WebSocket
-  const connectWebSocket = useCallback((conv: any) => {
-    if (!conv?.session_id) return;
-
-    const wsUrl = `${API_BASE_URL.replace('http', 'ws')}/api/chat/ws/echo/${conv.session_id}`;
-    const ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      console.log('WebSocket connected');
-    };
-
-    ws.onmessage = (event) => {
-      const msg: WebSocketEvent = JSON.parse(event.data);
-      handleWebSocketMessage(msg);
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
-
-    ws.onclose = () => {
-      console.log('WebSocket disconnected');
-      setIsConnected(false);
-    };
-
-    wsRef.current = ws;
-  }, []);
-
-  // 处理 WebSocket 消息
-  const handleWebSocketMessage = useCallback((msg: WebSocketEvent) => {
-    switch (msg.type) {
-      case 'connected':
-        setIsConnected(true);
-        break;
-
-      case 'start':
-        setIsStreaming(true);
-        currentMsgIdRef.current = msg.msg_id || null;
-        // 添加空的助手消息
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: msg.msg_id || Date.now().toString(),
-            role: 'assistant',
-            content: '',
-            timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-            isStreaming: true,
-          },
-        ]);
-        break;
-
-      case 'content':
-        if (msg.data) {
-          setMessages((prev) => {
-            const lastMsg = prev[prev.length - 1];
-            if (lastMsg && lastMsg.role === 'assistant' && lastMsg.isStreaming) {
-              return [
-                ...prev.slice(0, -1),
-                { ...lastMsg, content: lastMsg.content + msg.data },
-              ];
-            }
-            return prev;
-          });
-        }
-        break;
-
-      case 'finish':
-        setIsStreaming(false);
-        setMessages((prev) => {
-          const lastMsg = prev[prev.length - 1];
-          if (lastMsg && lastMsg.role === 'assistant') {
-            return [...prev.slice(0, -1), { ...lastMsg, isStreaming: false }];
-          }
-          return prev;
-        });
-        currentMsgIdRef.current = null;
-        break;
-
-      case 'error':
-        console.error('Server error:', msg.data);
-        setIsStreaming(false);
-        break;
-    }
-  }, []);
-
-  // 初始化
   useEffect(() => {
-    let mounted = true;
+    scrollToBottom();
+  }, [messages, scrollToBottom]);
 
-    const init = async () => {
-      const conv = await createConversation();
-      if (mounted && conv) {
-        connectWebSocket(conv);
+  // 处理 CLI 选择
+  const handleCliSelect = useCallback(
+    (cliId: string) => {
+      const cli = availableClis.find((c) => c.id === cliId);
+      if (cli) {
+        selectCli(cli);
       }
-    };
-
-    init();
-
-    return () => {
-      mounted = false;
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-    };
-  }, [createConversation, connectWebSocket]);
-
-  // 发送消息
-  const handleSend = useCallback(
-    (content: string) => {
-      if (!wsRef.current || !conversationId) return;
-
-      // 添加用户消息
-      const userMsg: Message = {
-        id: Date.now().toString(),
-        role: 'user',
-        content,
-        timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-      };
-      setMessages((prev) => [...prev, userMsg]);
-
-      // 发送 WebSocket 消息
-      wsRef.current.send(
-        JSON.stringify({
-          type: 'message',
-          content,
-          conversation_id: conversationId,
-        })
-      );
     },
-    [conversationId]
+    [availableClis, selectCli]
   );
 
+  // 处理新建对话
+  const handleNewChat = useCallback(async () => {
+    await createNewConversation();
+  }, [createNewConversation]);
+
+  // 处理发送消息
+  const handleSend = useCallback(
+    (content: string) => {
+      sendMessage(content);
+    },
+    [sendMessage]
+  );
+
+  // 获取可用的 CLI 列表（只显示可用的）
+  const availableCliList = availableClis.filter((cli) => cli.isAvailable);
+
+  // 头部渲染：CLI 选择器 + 新建对话按钮 + 连接状态
+  const renderHeader = () => {
+    return (
+      <div className="flex items-center justify-between px-4 h-[60px] border-b border-[#E6DDF2] bg-[#FCFAF2]">
+        {/* 左侧: CLI 选择器 + 新建对话按钮 */}
+        <div className="flex items-center gap-3">
+          {/* CLI 选择器 */}
+          <div className="flex items-center gap-2">
+            <select
+              value={selectedCli?.id || ''}
+              onChange={(e) => handleCliSelect(e.target.value)}
+              disabled={isLoading || availableCliList.length === 0}
+              className="px-3 py-1.5 rounded-md border border-[#E6DDF2] bg-white
+                         text-sm text-[#1a1a1a] focus:outline-none focus:border-[#D8B4E2]
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <option value="">
+                {availableCliList.length === 0 ? '无可用 CLI' : '选择 CLI'}
+              </option>
+              {availableCliList.map((cli) => (
+                <option key={cli.id} value={cli.id}>
+                  {cli.name}
+                </option>
+              ))}
+            </select>
+
+            {/* 新建对话按钮 */}
+            <button
+              onClick={handleNewChat}
+              disabled={!selectedCli || isLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md
+                         bg-[#7B5EA7] text-white text-sm
+                         hover:bg-[#6B4E97] disabled:opacity-50 disabled:cursor-not-allowed
+                         transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              新对话
+            </button>
+          </div>
+
+          {/* 连接状态指示器 */}
+          {conversation && (
+            <div className="flex items-center gap-1.5 ml-2">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isConnected ? 'bg-green-500' : 'bg-gray-400'
+                }`}
+              />
+              <span className="text-sm text-[#666666]">
+                {isConnected ? '已连接' : '未连接'}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* 右侧: 设置按钮 */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => console.log('Settings clicked')}
+            className="p-2 rounded-md hover:bg-[#F5F5F0] transition-colors"
+            aria-label="Settings"
+          >
+            <svg
+              className="w-5 h-5 text-[#666666]"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+              />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+              />
+            </svg>
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // 错误提示
+  const renderError = () => {
+    if (!error) return null;
+
+    return (
+      <div className="px-4 py-2 bg-red-50 border-b border-red-100">
+        <div className="flex items-center gap-2 text-red-600 text-sm">
+          <AlertCircle className="w-4 h-4" />
+          <span>{error}</span>
+        </div>
+      </div>
+    );
+  };
+
+  // 加载状态
+  const renderLoading = () => {
+    if (!isLoading) return null;
+
+    return (
+      <div className="absolute inset-0 bg-[#FCFAF2]/80 flex items-center justify-center z-10">
+        <div className="flex items-center gap-2 text-[#7B5EA7]">
+          <Loader2 className="w-5 h-5 animate-spin" />
+          <span className="text-sm">连接中...</span>
+        </div>
+      </div>
+    );
+  };
+
+  // 空状态提示
+  const renderEmptyState = () => {
+    if (conversation || isLoading) return null;
+
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-[#F3EDFA] flex items-center justify-center">
+            <svg
+              className="w-8 h-8 text-[#7B5EA7]"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
+              />
+            </svg>
+          </div>
+          <p className="text-[#666666] text-sm mb-2">选择一个 CLI 开始新对话</p>
+          {availableCliList.length === 0 && (
+            <p className="text-[#999999] text-xs">未检测到可用的 CLI</p>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
-    <div className="flex flex-col h-full bg-[#FCFAF2]">
-      <ChatHeader
-        cliName="Claude Code"
-        isOnline={isConnected}
-        onSettings={() => console.log('Settings clicked')}
-        onClose={() => console.log('Close clicked')}
-      />
-      <MessageList messages={messages} />
-      <ChatInput onSend={handleSend} disabled={!isConnected || isStreaming} />
+    <div className="flex flex-col h-full bg-[#FCFAF2] relative">
+      {/* 头部: CLI 选择器 + 连接状态 + 设置 */}
+      {renderHeader()}
+
+      {/* 错误提示 */}
+      {renderError()}
+
+      {/* 加载遮罩 */}
+      {renderLoading()}
+
+      {/* 消息列表区域 */}
+      {conversation ? (
+        <>
+          <div className="flex-1 overflow-hidden relative">
+            <div className="absolute inset-0 overflow-y-auto">
+              <MessageList messages={convertMessages(messages)} />
+              <div ref={messagesEndRef} />
+            </div>
+          </div>
+
+          {/* 输入区域 */}
+          <ChatInput
+            onSend={handleSend}
+            disabled={!isConnected || isStreaming}
+            placeholder={isConnected ? '输入消息...' : '等待连接...'}
+          />
+        </>
+      ) : (
+        renderEmptyState()
+      )}
     </div>
   );
 }
