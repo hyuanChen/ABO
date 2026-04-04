@@ -11,6 +11,7 @@ from datetime import datetime
 
 @dataclass
 class CliInfo:
+    """CLI 信息"""
     id: str
     name: str
     command: str
@@ -18,7 +19,7 @@ class CliInfo:
     version: str = ""
     is_available: bool = False
     acp_args: List[str] = None
-    protocol: str = "raw"  # raw, acp, websocket
+    protocol: str = "raw"  # raw only for now
     last_check: int = 0
 
     def __post_init__(self):
@@ -38,84 +39,23 @@ class CliDetector:
             acp_args=["--print"],
             protocol="raw"
         ),
-        "gemini": CliInfo(
-            id="gemini",
-            name="Gemini CLI",
-            command="gemini",
-            check_cmd="gemini --version",
-            acp_args=["--experimental-acp"],
-            protocol="acp"
-        ),
-        "openclaw": CliInfo(
-            id="openclaw",
-            name="OpenClaw",
-            command="openclaw",
-            check_cmd="openclaw --version",
-            acp_args=["gateway"],
-            protocol="websocket"
-        ),
-        "codex": CliInfo(
-            id="codex",
-            name="OpenAI Codex",
-            command="codex",
-            check_cmd="codex --version",
-            acp_args=["--acp"],
-            protocol="acp"
-        ),
     }
 
     def __init__(self, db_path: str = "~/.abo/data/cli_configs.json"):
         self.db_path = os.path.expanduser(db_path)
         self._cache: Dict[str, CliInfo] = {}
-        self._load_cache()
-
-    def _load_cache(self):
-        """加载缓存的检测结果"""
-        if os.path.exists(self.db_path):
-            try:
-                with open(self.db_path, 'r') as f:
-                    data = json.load(f)
-                    for item in data:
-                        self._cache[item['id']] = CliInfo(**item)
-            except Exception:
-                pass
-
-    def _save_cache(self):
-        """保存检测结果到缓存"""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        with open(self.db_path, 'w') as f:
-            json.dump([asdict(info) for info in self._cache.values()], f, indent=2)
 
     def detect_all(self, force: bool = False) -> List[CliInfo]:
-        """
-        检测所有已知的 CLI 工具
-
-        Args:
-            force: 强制重新检测，忽略缓存
-
-        Returns:
-            可用的 CLI 列表
-        """
+        """检测所有已知的 CLI 工具"""
         available = []
 
         for cli_id, info in self.REGISTRY.items():
-            # 检查缓存
-            if not force and cli_id in self._cache:
-                cached = self._cache[cli_id]
-                # 缓存 5 分钟内有效
-                if datetime.now().timestamp() - cached.last_check < 300:
-                    if cached.is_available:
-                        available.append(cached)
-                    continue
-
-            # 执行检测
             detected = self._detect_single(info)
             self._cache[cli_id] = detected
 
             if detected.is_available:
                 available.append(detected)
 
-        self._save_cache()
         return available
 
     def _detect_single(self, info: CliInfo) -> CliInfo:
@@ -148,7 +88,6 @@ class CliDetector:
                 result.is_available = True
                 result.version = proc.stdout.strip()[:100]
             else:
-                # 有些 CLI 返回非零但可用
                 result.is_available = True
                 result.version = "unknown"
 
@@ -176,8 +115,7 @@ class CliDetector:
             for line in result.stdout.strip().split('\n'):
                 if '=' in line:
                     key, value = line.split('=', 1)
-                    if key in ['PATH', 'HOME', 'ANTHROPIC_API_KEY',
-                               'GEMINI_API_KEY', 'OPENAI_API_KEY']:
+                    if key in ['PATH', 'HOME', 'ANTHROPIC_API_KEY']:
                         env[key] = value
         except Exception:
             pass
@@ -193,12 +131,6 @@ class CliDetector:
             return self._detect_single(self.REGISTRY[cli_id])
 
         return None
-
-    def add_custom_cli(self, info: CliInfo):
-        """添加自定义 CLI 配置"""
-        self.REGISTRY[info.id] = info
-        self._cache[info.id] = self._detect_single(info)
-        self._save_cache()
 
 
 # 全局检测器实例
