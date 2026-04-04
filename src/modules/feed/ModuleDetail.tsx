@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ArrowLeft, Play, Save, Settings, BookOpen, Info, Clock, CheckCircle } from "lucide-react";
 import ToggleSwitch from "../../components/ToggleSwitch";
+import SubscriptionManager, { SubType } from "../../components/SubscriptionManager";
 import { api } from "../../core/api";
 import { useStore, FeedModule } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Card, Grid } from "../../components/Layout";
@@ -46,7 +47,7 @@ const MODULE_CONFIGS: Record<string, {
   name: string;
   icon: string;
   description: string;
-  fields: { key: string; label: string; placeholder: string; type?: "array" | "string"; description?: string }[];
+  fields: { key: string; label: string; placeholder: string; type?: "array" | "string" | "boolean"; description?: string }[];
   guide: ModuleGuide;
 }> = {
   "arxiv-tracker": {
@@ -305,6 +306,8 @@ export default function ModuleDetail({ module, onBack }: Props) {
     SCHEDULE_PRESETS.some((p) => p.value === module.schedule) ? "" : module.schedule
   );
   const [updatingRuntime, setUpdatingRuntime] = useState(false);
+  const [subscriptions, setSubscriptions] = useState<Record<string, string[]>>({});
+  const [subTypes, setSubTypes] = useState<SubType[]>([]);
 
   const configSchema = MODULE_CONFIGS[module.id];
 
@@ -313,6 +316,14 @@ export default function ModuleDetail({ module, onBack }: Props) {
       .then((data) => {
         const config = data.modules?.[module.id] || {};
         setModuleConfig(config);
+        setSubTypes((config as any).subscription_types || []);
+        setSubscriptions({
+          up_uids: config.up_uids || [],
+          user_ids: config.user_ids || [],
+          users: config.users || [],
+          topics: config.topics || [],
+          podcast_ids: config.podcast_ids || [],
+        });
       })
       .catch(() => setModuleConfig({}));
   }, [module.id]);
@@ -370,12 +381,29 @@ export default function ModuleDetail({ module, onBack }: Props) {
     }
   }
 
+  async function saveSubscriptions(next: Record<string, string[]>) {
+    try {
+      const body: Record<string, any> = {};
+      if ("up_uids" in next) body.up_uids = next.up_uids;
+      if ("user_ids" in next) body.user_ids = next.user_ids;
+      if ("users" in next) body.users = next.users;
+      if ("topics" in next) body.topics = next.topics;
+      if ("podcast_ids" in next) body.podcast_ids = next.podcast_ids;
+      await api.post(`/api/modules/${module.id}/config`, body);
+      setModuleConfig((prev) => ({ ...prev, ...body }));
+      setSubscriptions(next);
+      toast.success("订阅已更新", "");
+    } catch {
+      toast.error("订阅保存失败", "");
+    }
+  }
+
   function updateConfigField(key: string, value: string, type?: string) {
     if (type === "array") {
       const arrayValue = value.split(",").map((s) => s.trim()).filter(Boolean);
       // Convert numeric strings to numbers for follow_feed_types
       if (key === "follow_feed_types") {
-        setModuleConfig((prev) => ({ ...prev, [key]: arrayValue.map(v => parseInt(v) || v) }));
+        setModuleConfig((prev) => ({ ...prev, [key]: arrayValue.map(v => parseInt(v) || 0) as number[] }));
       } else {
         setModuleConfig((prev) => ({ ...prev, [key]: arrayValue }));
       }
@@ -555,6 +583,14 @@ export default function ModuleDetail({ module, onBack }: Props) {
                   {updatingRuntime ? "保存中..." : "保存运行设置"}
                 </button>
               </div>
+            </Card>
+
+            <Card title="订阅管理" icon={<BookOpen style={{ width: "20px", height: "20px", color: "var(--color-primary)" }} />}>
+              <SubscriptionManager
+                types={subTypes}
+                subscriptions={subscriptions}
+                onChange={saveSubscriptions}
+              />
             </Card>
 
             <Card title="配置参数" icon={<Settings style={{ width: "20px", height: "20px", color: "var(--color-primary)" }} />}>
