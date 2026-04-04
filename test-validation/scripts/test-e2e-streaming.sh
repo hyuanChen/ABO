@@ -7,7 +7,7 @@ echo "==================================="
 
 # 1. 启动后端
 echo "[1] 启动后端..."
-python -m abo.main > /tmp/abo-test.log 2>&1 &
+python3 -m abo.main > /tmp/abo-test.log 2>&1 &
 BACKEND_PID=$!
 sleep 3
 
@@ -23,7 +23,7 @@ echo "✅ 后端启动成功 (PID: $BACKEND_PID)"
 echo "[2] 创建对话..."
 CONV_RESPONSE=$(curl -s -X POST http://127.0.0.1:8765/api/chat/conversations \
     -H "Content-Type: application/json" \
-    -d '{"cli_type": "claude", "title": "Test"}')
+    -d '{"cli_type": "echo", "title": "Test"}')
 
 CONV_ID=$(echo $CONV_RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 SESSION_ID=$(echo $CONV_RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['session_id'])")
@@ -39,7 +39,7 @@ import json
 import sys
 
 async def test_streaming():
-    uri = "ws://127.0.0.1:8765/api/chat/ws/claude/${SESSION_ID}"
+    uri = "ws://127.0.0.1:8765/api/chat/ws/echo/${SESSION_ID}"
 
     async with websockets.connect(uri) as ws:
         # 等待 connected
