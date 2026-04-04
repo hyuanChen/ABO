@@ -1,4 +1,4 @@
-export type CliType = 'claude' | 'gemini' | 'openclaw' | 'custom';
+export type CliType = 'claude' | 'gemini' | 'openclaw' | 'codex' | 'custom';
 
 export interface CliConfig {
   id: CliType;
@@ -34,14 +34,36 @@ export interface Message {
     toolName?: string;
     toolInput?: Record<string, unknown>;
     tokens?: number;
+    latency?: number;
   };
   status: MessageStatus;
   createdAt: number;
 }
 
 export interface StreamEvent {
-  type: 'start' | 'content' | 'tool_call' | 'error' | 'finish';
+  type: 'start' | 'content' | 'tool_call' | 'error' | 'finish' | 'ping' | 'pong' | 'connected' | 'stopped';
   data: string;
   msgId: string;
   metadata?: Record<string, unknown>;
+  timestamp?: string;
+}
+
+export type ConnectionState =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'streaming'
+  | 'disconnected'
+  | 'error'
+  | 'reconnecting';
+
+export interface ConnectionStatus {
+  clientId: string;
+  cliType: string;
+  state: ConnectionState;
+  isAlive: boolean;
+  latencyMs?: number;
+  reconnectCount: number;
+  connectedAt?: string;
+  error?: string;
 }
