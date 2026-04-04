@@ -312,9 +312,8 @@ export default function ModuleDetail({ module, onBack }: Props) {
   const configSchema = MODULE_CONFIGS[module.id];
 
   useEffect(() => {
-    api.get<{ modules: Record<string, ModuleConfig> }>("/api/preferences")
-      .then((data) => {
-        const config = data.modules?.[module.id] || {};
+    api.get<ModuleConfig>(`/api/modules/${module.id}/config`)
+      .then((config) => {
         setModuleConfig(config);
         setSubTypes((config as any).subscription_types || []);
         setSubscriptions({
@@ -587,6 +586,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
 
             <Card title="订阅管理" icon={<BookOpen style={{ width: "20px", height: "20px", color: "var(--color-primary)" }} />}>
               <SubscriptionManager
+                moduleId={module.id}
                 types={subTypes}
                 subscriptions={subscriptions}
                 onChange={saveSubscriptions}

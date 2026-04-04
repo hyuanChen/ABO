@@ -14,7 +14,7 @@ export function XiaohongshuTool() {
 
   // Search state
   const [searchResult, setSearchResult] = useState<SearchResponse | null>(null);
-  const [maxResults, setMaxResults] = useState(20);
+  const [maxResults, _setMaxResults] = useState(20);
   const [minLikes, setMinLikes] = useState(100);
   const [sortBy, setSortBy] = useState<'likes' | 'time'>('likes');
 

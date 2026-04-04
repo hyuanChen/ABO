@@ -8,6 +8,7 @@ export interface SubType {
 }
 
 interface Props {
+  moduleId: string;
   types: SubType[];
   subscriptions: Record<string, string[]>; // e.g. { up_uids: ["123", "456"] }
   onChange: (next: Record<string, string[]>) => void;
@@ -21,7 +22,7 @@ const keyMap: Record<string, string> = {
   podcast_id: "podcast_ids",
 };
 
-export default function SubscriptionManager({ types, subscriptions, onChange }: Props) {
+export default function SubscriptionManager({ moduleId: _moduleId, types, subscriptions, onChange }: Props) {
   const [adding, setAdding] = useState<Record<string, string>>({});
 
   if (!types || types.length === 0) return null;
