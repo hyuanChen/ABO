@@ -6,6 +6,7 @@ import { Settings, Clock, Globe, RefreshCw, Hash } from "lucide-react";
 import { api } from "../core/api";
 import { useStore } from "../core/store";
 import ToggleSwitch from "./ToggleSwitch";
+import SchedulerTimeline from "./SchedulerTimeline";
 
 interface ModuleConfig {
   id: string;
@@ -189,6 +190,20 @@ export default function ModuleConfigPanel() {
           </div>
           <div className="text-xs" style={{ color: "var(--text-muted)" }}>已禁用</div>
         </div>
+      </div>
+
+      <div style={{ marginTop: "20px" }}>
+        <h4
+          style={{
+            fontSize: "0.9375rem",
+            fontWeight: 600,
+            marginBottom: "12px",
+            color: "var(--text-main)",
+          }}
+        >
+          定时任务
+        </h4>
+        <SchedulerTimeline />
       </div>
     </div>
   );
