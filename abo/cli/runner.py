@@ -294,12 +294,79 @@ class AcpRunner(BaseRunner):
             ))
 
 
+class WebSocketRunner(BaseRunner):
+    """WebSocket 协议 Runner (OpenClaw Gateway)"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ws = None
+        self.ws_url = "ws://localhost:8080"  # OpenClaw 默认端口
+
+    async def send_message(self, message: str, msg_id: str,
+                          on_event: Callable[[StreamEvent], None]) -> None:
+        """通过 WebSocket 发送消息"""
+        import websockets
+
+        await self._emit(on_event, StreamEvent(type="start", data="", msg_id=msg_id))
+
+        try:
+            # 启动 gateway 进程
+            cmd = [self.cli_info.command] + self.cli_info.acp_args
+            self.process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            # 等待 gateway 启动
+            await asyncio.sleep(2)
+
+            # 连接 WebSocket
+            async with websockets.connect(self.ws_url) as ws:
+                self.ws = ws
+
+                # 发送消息
+                await ws.send(json.dumps({
+                    "type": "message",
+                    "sessionKey": self.session_id,
+                    "content": message
+                }))
+
+                # 接收响应
+                async for response in ws:
+                    data = json.loads(response)
+
+                    if data.get("type") == "chunk":
+                        await self._emit(on_event, StreamEvent(
+                            type="content",
+                            data=data.get("content", ""),
+                            msg_id=msg_id
+                        ))
+                    elif data.get("type") == "complete":
+                        await self._emit(on_event, StreamEvent(
+                            type="finish",
+                            data="",
+                            msg_id=msg_id
+                        ))
+                        break
+
+        except Exception as e:
+            logger.exception("WebSocket runner error")
+            await self._emit(on_event, StreamEvent(
+                type="error",
+                data=str(e),
+                msg_id=msg_id
+            ))
+            raise
+
+
 class RunnerFactory:
     """Runner 工厂"""
 
     RUNNERS = {
         "raw": RawRunner,
         "acp": AcpRunner,
+        "websocket": WebSocketRunner,
     }
 
     @classmethod
