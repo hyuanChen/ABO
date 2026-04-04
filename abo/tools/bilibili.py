@@ -10,12 +10,9 @@
 依赖：bilibili-tracker 模块的 API 调用逻辑
 """
 
-import asyncio
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -78,8 +75,9 @@ class BilibiliToolAPI:
         if dynamic_types is None:
             dynamic_types = [8, 2, 4, 64]
 
-        # Build type_list bitmask (268435455 = all types)
-        type_list = 268435455
+        # Build type_list bitmask (0x0FFFFFFF = all types = 268435455)
+        # This is the bitmask Bilibili API expects for fetching all dynamic types
+        type_list = 0x0FFFFFFF
         if dynamic_types:
             type_list = sum(1 << (t - 1) for t in dynamic_types)
 
@@ -139,7 +137,7 @@ class BilibiliToolAPI:
         # 解析卡片内容
         try:
             card_content = json.loads(card.get("card", "{}"))
-        except:
+        except json.JSONDecodeError:
             card_content = {}
 
         # 根据类型解析
