@@ -15,6 +15,11 @@ from abo.tools.bilibili import (
     bilibili_fetch_followed,
     bilibili_verify_sessdata,
 )
+from abo.tools.zhihu import (
+    zhihu_search,
+    zhihu_analyze_trends,
+    zhihu_fetch_comments,
+)
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 
@@ -34,6 +39,26 @@ class CommentsRequest(BaseModel):
 
 
 class TrendsRequest(BaseModel):
+    keyword: str
+
+
+class ZhihuSearchRequest(BaseModel):
+    keyword: str
+    max_results: int = 20
+    min_votes: int = 100
+    sort_by: str = "votes"  # votes, time
+    content_types: Optional[list[str]] = None  # ["answer", "article", "video"]
+    cookie: Optional[str] = None
+
+
+class ZhihuCommentsRequest(BaseModel):
+    content_id: str
+    content_type: str = "answer"  # answer, article, video
+    max_comments: int = 50
+    sort_by: str = "likes"
+
+
+class ZhihuTrendsRequest(BaseModel):
     keyword: str
 
 
@@ -222,4 +247,109 @@ async def api_bilibili_followed(req: BilibiliFollowedRequest):
 async def api_bilibili_verify(req: BilibiliVerifyRequest):
     """验证 SESSDATA 是否有效"""
     result = await bilibili_verify_sessdata(req.sessdata)
+    return result
+
+
+# === 知乎工具 API ===
+
+@router.post("/zhihu/search")
+async def api_zhihu_search(req: ZhihuSearchRequest):
+    """搜索知乎高赞内容"""
+    result = await zhihu_search(
+        keyword=req.keyword,
+        max_results=req.max_results,
+        min_votes=req.min_votes,
+        sort_by=req.sort_by,
+        content_types=req.content_types,
+        cookie=req.cookie,
+    )
+    return result
+
+
+@router.get("/zhihu/config")
+async def get_zhihu_config():
+    """获取知乎工具配置"""
+    from abo.config import load as load_config
+    config = load_config()
+    return {
+        "cookie_configured": bool(config.get("zhihu_cookie")),
+        "cookie_preview": config.get("zhihu_cookie", "")[:50] + "..." if config.get("zhihu_cookie") else None,
+    }
+
+
+@router.post("/zhihu/config")
+async def set_zhihu_config(config: CookieConfig):
+    """保存知乎 Cookie 配置"""
+    from abo.config import load as load_config, save as save_config
+    existing = load_config()
+    existing["zhihu_cookie"] = config.cookie
+    save_config(existing)
+    return {
+        "success": True,
+        "cookie_configured": True,
+        "cookie_preview": config.cookie[:50] + "..." if len(config.cookie) > 50 else config.cookie,
+    }
+
+
+@router.post("/zhihu/config/from-browser")
+async def get_zhihu_cookie_from_browser():
+    """从本地浏览器自动获取知乎 Cookie"""
+    try:
+        import browser_cookie3
+
+        # 获取 Chrome 浏览器的 cookie
+        cj = browser_cookie3.chrome(domain_name="zhihu.com")
+
+        # 转换为列表格式
+        cookie_list = []
+        for cookie in cj:
+            cookie_list.append({
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain,
+                "path": cookie.path,
+            })
+
+        if not cookie_list:
+            return {
+                "success": False,
+                "error": "未找到知乎 Cookie，请先登录 zhihu.com",
+            }
+
+        # 保存到配置
+        from abo.config import load as load_config, save as save_config
+        existing = load_config()
+        existing["zhihu_cookie"] = json.dumps(cookie_list)
+        save_config(existing)
+
+        return {
+            "success": True,
+            "cookie_count": len(cookie_list),
+            "cookie_preview": json.dumps(cookie_list)[:100] + "...",
+            "message": f"成功从浏览器获取 {len(cookie_list)} 个 Cookie",
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"获取浏览器 Cookie 失败: {str(e)}",
+        }
+
+
+@router.post("/zhihu/comments")
+async def api_zhihu_comments(req: ZhihuCommentsRequest):
+    """获取知乎内容评论"""
+    result = await zhihu_fetch_comments(
+        content_id=req.content_id,
+        content_type=req.content_type,
+        max_comments=req.max_comments,
+        sort_by=req.sort_by,
+    )
+    return result
+
+
+@router.post("/zhihu/trends")
+async def api_zhihu_trends(req: ZhihuTrendsRequest):
+    """分析知乎 Trends"""
+    result = await zhihu_analyze_trends(keyword=req.keyword)
     return result
