@@ -1,141 +1,53 @@
-import { Bot, Settings, X, Loader2 } from 'lucide-react';
-import type { CliConfig } from '../../types/chat';
+/**
+ * ChatHeader - 严格遵循 AionUi 设计规范
+ * 高度: 60px, 底部边框, 在线状态指示器
+ */
+import { Settings, X, Plug } from 'lucide-react';
 
 interface ChatHeaderProps {
-  cli: CliConfig | null;
-  isConnected: boolean;
-  isConnecting: boolean;
+  cliName: string;
+  isOnline: boolean;
   onSettings?: () => void;
   onClose?: () => void;
 }
 
-const cliIcons: Record<string, string> = {
-  claude: '🌟',
-  gemini: '✨',
-  openclaw: '🦀',
-  codex: '🎯',
-  custom: '🤖',
-};
-
-export function ChatHeader({
-  cli,
-  isConnected,
-  isConnecting,
-  onSettings,
-  onClose,
-}: ChatHeaderProps) {
-  const getStatusColor = () => {
-    if (isConnecting) return '#F5C88C';
-    if (isConnected) return '#7DD3C0';
-    return '#FFB7B2';
-  };
-
-  const getStatusText = () => {
-    if (isConnecting) return '连接中...';
-    if (isConnected) return '在线';
-    return '未连接';
-  };
-
+export function ChatHeader({ cliName, isOnline, onSettings, onClose }: ChatHeaderProps) {
   return (
-    <div
-      className="flex items-center justify-between px-6 py-4"
-      style={{
-        background: 'var(--bg-panel)',
-        borderBottom: '1px solid var(--border-light)',
-        backdropFilter: 'blur(16px) saturate(160%)',
-      }}
+    <header
+      className="flex items-center justify-between px-4 h-[60px] border-b border-[#E6DDF2] bg-[#FCFAF2]"
+      style={{ backgroundColor: '#FCFAF2', borderBottom: '1px solid #E6DDF2' }}
     >
-      {/* Left: CLI Info */}
+      {/* 左侧: 插头图标 + CLI名称 + 在线状态 */}
       <div className="flex items-center gap-3">
-        <div
-          className="flex items-center justify-center w-10 h-10 rounded-xl"
-          style={{
-            background: cli
-              ? 'linear-gradient(135deg, #BCA4E3, #9D7BDB)'
-              : 'var(--bg-disabled)',
-            boxShadow: cli ? '0 4px 12px rgba(188, 164, 227, 0.3)' : 'none',
-          }}
-        >
-          {cli ? (
-            <span className="text-xl">{cliIcons[cli.id] || '🤖'}</span>
-          ) : (
-            <Bot size={20} color="var(--text-muted)" />
-          )}
-        </div>
-
-        <div>
-          <h2
-            className="text-base font-semibold"
-            style={{ color: 'var(--text-main)' }}
-          >
-            {cli?.name || 'AI 助手'}
-          </h2>
-          <div className="flex items-center gap-2 mt-0.5">
-            {isConnecting ? (
-              <Loader2 size={12} color="#F5C88C" className="animate-spin" />
-            ) : (
-              <span
-                className="w-2 h-2 rounded-full"
-                style={{
-                  background: getStatusColor(),
-                  transition: 'background 0.3s ease',
-                }}
-              />
-            )}
-            <span
-              className="text-xs"
-              style={{ color: 'var(--text-secondary)' }}
-            >
-              {getStatusText()}
-            </span>
-          </div>
+        <Plug className="w-5 h-5 text-[#7B5EA7]" />
+        <span className="font-medium text-[#1a1a1a] text-base">
+          {cliName}
+        </span>
+        <div className="flex items-center gap-1.5 ml-2">
+          <span className="w-2 h-2 rounded-full bg-green-500" />
+          <span className="text-sm text-[#666666]">在线</span>
         </div>
       </div>
 
-      {/* Right: Actions */}
+      {/* 右侧: 设置按钮 + 关闭按钮 */}
       <div className="flex items-center gap-2">
-        {onSettings && (
-          <button
-            onClick={onSettings}
-            className="p-2 rounded-lg transition-all duration-200 hover:scale-105"
-            style={{
-              color: 'var(--text-muted)',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'var(--bg-hover)';
-              e.currentTarget.style.color = 'var(--text-main)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'transparent';
-              e.currentTarget.style.color = 'var(--text-muted)';
-            }}
-            title="设置"
-          >
-            <Settings size={18} />
-          </button>
-        )}
-
-        {onClose && (
-          <button
-            onClick={onClose}
-            className="p-2 rounded-lg transition-all duration-200 hover:scale-105"
-            style={{
-              color: 'var(--text-muted)',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'rgba(255, 183, 178, 0.2)';
-              e.currentTarget.style.color = '#D48984';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'transparent';
-              e.currentTarget.style.color = 'var(--text-muted)';
-            }}
-            title="关闭"
-          >
-            <X size={18} />
-          </button>
-        )}
+        <button
+          onClick={onSettings}
+          className="p-2 rounded-md hover:bg-[#F5F5F0] transition-colors"
+          aria-label="Settings"
+        >
+          <Settings className="w-5 h-5 text-[#666666]" />
+        </button>
+        <button
+          onClick={onClose}
+          className="p-2 rounded-md hover:bg-[#F5F5F0] transition-colors"
+          aria-label="Close"
+        >
+          <X className="w-5 h-5 text-[#666666]" />
+        </button>
       </div>
-    </div>
+    </header>
   );
 }
+
+export default ChatHeader;
