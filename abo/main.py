@@ -1743,6 +1743,7 @@ async def get_module_config(module_id: str):
         "fetch_follow_limit": module_prefs.get("fetch_follow_limit", 20),
         "keyword_filter": module_prefs.get("keyword_filter", True),
         "sessdata": module_prefs.get("sessdata", ""),
+        "cookie": module_prefs.get("cookie", ""),
     }
 
     # Add module-specific defaults if empty
@@ -1794,6 +1795,8 @@ async def update_module_config(module_id: str, data: dict):
         module_prefs["keyword_filter"] = data["keyword_filter"]
     if "sessdata" in data:
         module_prefs["sessdata"] = data["sessdata"]
+    if "cookie" in data:
+        module_prefs["cookie"] = data["cookie"]
 
     # Save preferences
     _prefs.update(prefs)

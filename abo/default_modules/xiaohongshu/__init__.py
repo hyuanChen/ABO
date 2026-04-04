@@ -53,12 +53,13 @@ class XiaohongshuTracker(Module):
         prefs_path = Path.home() / ".abo" / "preferences.json"
         config_keywords = []
         config_users = []
-
+        config_cookie = ""
         if prefs_path.exists():
             data = json.loads(prefs_path.read_text())
             xhs_config = data.get("modules", {}).get("xiaohongshu-tracker", {})
             config_keywords = xhs_config.get("keywords", [])
             config_users = xhs_config.get("user_ids", [])
+            config_cookie = xhs_config.get("cookie", "")
 
         keywords = keywords or config_keywords or ["科研", "读博", "学术"]
         user_ids = user_ids or config_users
@@ -79,43 +80,39 @@ class XiaohongshuTracker(Module):
         return items[:max_results]
 
     async def _fetch_user_notes(self, user_id: str, limit: int) -> list[Item]:
-        """Fetch notes from a specific user."""
         items = []
-
-        # Clean user_id (extract from URL if needed)
         clean_id = self._extract_user_id(user_id)
-
-        # Try RSSHub endpoint
         url = f"{self.RSSHUB_BASE}/xiaohongshu/user/{clean_id}"
+
+        prefs_path = Path.home() / ".abo" / "preferences.json"
+        cookie = ""
+        if prefs_path.exists():
+            data = json.loads(prefs_path.read_text())
+            cookie = data.get("modules", {}).get("xiaohongshu-tracker", {}).get("cookie", "")
+
+        headers = {"User-Agent": "ABO-Tracker/1.0"}
+        if cookie:
+            headers["Cookie"] = cookie
 
         try:
             async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                resp = await client.get(url, headers={"User-Agent": "ABO-Tracker/1.0"})
-
+                resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
-                # Parse RSS feed
                 import xml.etree.ElementTree as ET
-
                 root = ET.fromstring(resp.text)
                 ns = {"content": "http://purl.org/rss/1.0/modules/content/"}
-
                 for entry in root.findall(".//item")[:limit]:
                     title_elem = entry.find("title")
                     link_elem = entry.find("link")
                     desc_elem = entry.find("description")
                     pub_date_elem = entry.find("pubDate")
-
                     if title_elem is None:
                         continue
-
                     title = title_elem.text or "无标题"
                     link = link_elem.text if link_elem is not None else ""
                     desc = desc_elem.text if desc_elem is not None else ""
                     pub_date = pub_date_elem.text if pub_date_elem is not None else ""
-
-                    # Extract note ID from link
                     note_id = self._extract_note_id(link) or ""
-
                     items.append(
                         Item(
                             id=f"xhs-{clean_id}-{note_id}",
@@ -129,11 +126,11 @@ class XiaohongshuTracker(Module):
                             },
                         )
                     )
-
+            else:
+                print(f"[xiaohongshu] RSSHub returned {resp.status_code}; falling back to demo")
         except Exception as e:
-            print(f"Failed to fetch Xiaohongshu user {clean_id}: {e}")
-
-        return items
+            print(f"[xiaohongshu] Failed to fetch user {clean_id}: {e}")
+        return items if items else self._generate_demo_items(["科研"], limit)
 
     async def _search_by_keywords(self, keywords: list[str], limit: int) -> list[Item]:
         """Search notes by keywords using alternative methods."""

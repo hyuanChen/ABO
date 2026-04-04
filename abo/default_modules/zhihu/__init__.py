@@ -49,6 +49,7 @@ class ZhihuTracker(Module):
         config_keywords = []
         config_topics = []
         config_users = []
+        config_cookie = ""
 
         if prefs_path.exists():
             data = json.loads(prefs_path.read_text())
@@ -56,6 +57,7 @@ class ZhihuTracker(Module):
             config_keywords = zhihu_config.get("keywords", [])
             config_topics = zhihu_config.get("topics", [])
             config_users = zhihu_config.get("users", [])
+            config_cookie = zhihu_config.get("cookie", "")
 
         keywords = keywords or config_keywords or [
             "科研",
@@ -159,9 +161,19 @@ class ZhihuTracker(Module):
         # Try RSSHub endpoint for topic hot list
         url = f"{self.RSSHUB_BASE}/zhihu/topic/{clean_topic}/hot"
 
+        prefs_path = Path.home() / ".abo" / "preferences.json"
+        cookie = ""
+        if prefs_path.exists():
+            data = json.loads(prefs_path.read_text())
+            cookie = data.get("modules", {}).get("zhihu-tracker", {}).get("cookie", "")
+
+        headers = {"User-Agent": "ABO-Tracker/1.0"}
+        if cookie:
+            headers["Cookie"] = cookie
+
         try:
             async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                resp = await client.get(url, headers={"User-Agent": "ABO-Tracker/1.0"})
+                resp = await client.get(url, headers=headers)
 
             if resp.status_code == 200:
                 items = self._parse_rss_feed(resp.text, clean_topic, keywords, limit)
@@ -181,9 +193,19 @@ class ZhihuTracker(Module):
         # Try RSSHub endpoint for user activities
         url = f"{self.RSSHUB_BASE}/zhihu/people/activities/{clean_user}"
 
+        prefs_path = Path.home() / ".abo" / "preferences.json"
+        cookie = ""
+        if prefs_path.exists():
+            data = json.loads(prefs_path.read_text())
+            cookie = data.get("modules", {}).get("zhihu-tracker", {}).get("cookie", "")
+
+        headers = {"User-Agent": "ABO-Tracker/1.0"}
+        if cookie:
+            headers["Cookie"] = cookie
+
         try:
             async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                resp = await client.get(url, headers={"User-Agent": "ABO-Tracker/1.0"})
+                resp = await client.get(url, headers=headers)
 
             if resp.status_code == 200:
                 items = self._parse_rss_feed(resp.text, clean_user, keywords, limit)
