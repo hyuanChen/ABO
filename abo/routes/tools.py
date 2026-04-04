@@ -260,7 +260,6 @@ async def api_zhihu_search(req: ZhihuSearchRequest):
         max_results=req.max_results,
         min_votes=req.min_votes,
         sort_by=req.sort_by,
-        content_types=req.content_types,
         cookie=req.cookie,
     )
     return result
@@ -341,7 +340,6 @@ async def api_zhihu_comments(req: ZhihuCommentsRequest):
     """获取知乎内容评论"""
     result = await zhihu_fetch_comments(
         content_id=req.content_id,
-        content_type=req.content_type,
         max_comments=req.max_comments,
         sort_by=req.sort_by,
     )
