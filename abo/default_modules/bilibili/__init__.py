@@ -42,7 +42,7 @@ from pathlib import Path
 import httpx
 
 from abo.sdk import Module, Item, Card, claude_json
-from .wbi import enc_wbi, get_wbi_keys
+from abo.default_modules.bilibili.wbi import enc_wbi, get_wbi_keys
 
 
 # Dynamic type codes

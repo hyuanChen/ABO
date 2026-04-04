@@ -45,7 +45,7 @@ class ModuleScheduler:
                 "id": job.id,
                 "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
                 "trigger": str(job.trigger) if job.trigger else None,
-                "misfire_grace_time": job.trigger.misfire_grace_time if job.trigger else None,
+                "misfire_grace_time": job.misfire_grace_time if hasattr(job, "misfire_grace_time") else None,
             }
             for job in self._scheduler.get_jobs()
         ]
