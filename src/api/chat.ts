@@ -119,6 +119,20 @@ export async function getMessages(
   }));
 }
 
+// === 连接状态 ===
+
+export async function getAllConnectionStatus(): Promise<{ connections: unknown[]; timestamp: string }> {
+  const res = await fetch(`${API_BASE}/connections`);
+  if (!res.ok) throw new Error('Failed to get connection status');
+  return res.json();
+}
+
+export async function getConnectionStatus(clientId: string): Promise<unknown> {
+  const res = await fetch(`${API_BASE}/connections/${clientId}`);
+  if (!res.ok) throw new Error('Connection not found');
+  return res.json();
+}
+
 // === WebSocket ===
 
 export interface ChatWebSocketOptions {
@@ -155,4 +169,39 @@ export function createChatWebSocket({
   ws.onerror = (error) => onError?.(error);
 
   return ws;
+}
+
+export function sendWebSocketMessage(ws: WebSocket, message: string, conversationId: string): boolean {
+  if (ws.readyState !== WebSocket.OPEN) {
+    console.error('WebSocket is not open');
+    return false;
+  }
+
+  const payload = {
+    type: 'message',
+    data: message,
+    conversation_id: conversationId,
+    timestamp: new Date().toISOString(),
+  };
+
+  ws.send(JSON.stringify(payload));
+  return true;
+}
+
+export function sendPong(ws: WebSocket): boolean {
+  if (ws.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+
+  ws.send(JSON.stringify({ type: 'pong', timestamp: new Date().toISOString() }));
+  return true;
+}
+
+export function sendStop(ws: WebSocket): boolean {
+  if (ws.readyState !== WebSocket.OPEN) {
+    return false;
+  }
+
+  ws.send(JSON.stringify({ type: 'stop', timestamp: new Date().toISOString() }));
+  return true;
 }
