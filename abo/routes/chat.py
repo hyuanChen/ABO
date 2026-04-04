@@ -3,7 +3,6 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import datetime
 import asyncio
 import json
 import logging
@@ -11,6 +10,7 @@ import uuid
 
 from ..cli.detector import detector
 from ..cli.runner import RunnerFactory, StreamEvent
+from ..store.conversations import conversation_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat")
@@ -46,80 +46,9 @@ class MessageResponse(BaseModel):
     metadata: Optional[dict] = None
 
 
-# === 内存存储 (简化版) ===
-# 对话存储
-conversations: dict = {}
-messages_store: dict = {}
-
-
-class ConversationStore:
-    """简化版对话存储"""
-
-    @staticmethod
-    def create_conversation(cli_type: str, session_id: str, title: str = "", workspace: str = "") -> str:
-        import uuid
-        conv_id = str(uuid.uuid4())
-        now = int(datetime.now().timestamp() * 1000)
-        conversations[conv_id] = {
-            "id": conv_id,
-            "cli_type": cli_type,
-            "session_id": session_id,
-            "title": title or f"New {cli_type} chat",
-            "workspace": workspace,
-            "status": "active",
-            "created_at": now,
-            "updated_at": now
-        }
-        messages_store[conv_id] = []
-        return conv_id
-
-    @staticmethod
-    def get_conversation(conv_id: str):
-        return conversations.get(conv_id)
-
-    @staticmethod
-    def get_conversation_by_session(session_id: str):
-        for conv in conversations.values():
-            if conv["session_id"] == session_id:
-                return conv
-        return None
-
-    @staticmethod
-    def list_conversations(cli_type: Optional[str] = None, limit: int = 50):
-        convs = list(conversations.values())
-        if cli_type:
-            convs = [c for c in convs if c["cli_type"] == cli_type]
-        convs = [c for c in convs if c["status"] == "active"]
-        return sorted(convs, key=lambda x: x["updated_at"], reverse=True)[:limit]
-
-    @staticmethod
-    def add_message(conv_id: str, role: str, content: str, msg_id: Optional[str] = None, content_type: str = "text"):
-        import uuid
-        message = {
-            "id": str(uuid.uuid4()),
-            "conversation_id": conv_id,
-            "msg_id": msg_id,
-            "role": role,
-            "content": content,
-            "content_type": content_type,
-            "status": "completed",
-            "created_at": int(datetime.now().timestamp() * 1000),
-            "metadata": None
-        }
-        if conv_id in messages_store:
-            messages_store[conv_id].append(message)
-        # 更新对话时间
-        if conv_id in conversations:
-            conversations[conv_id]["updated_at"] = message["created_at"]
-        return message
-
-    @staticmethod
-    def get_messages(conv_id: str, limit: int = 100):
-        msgs = messages_store.get(conv_id, [])
-        return msgs[-limit:] if len(msgs) > limit else msgs
-
-
-conversation_store = ConversationStore()
+class SendMessageRequest(BaseModel):
+    message: str
+    conversation_id: str
 
 
 # === 连接管理器 ===
@@ -211,14 +140,35 @@ async def create_conversation(req: CreateConversationRequest):
     )
 
     conv = conversation_store.get_conversation(conv_id)
-    return ConversationResponse(**conv)
+    return ConversationResponse(
+        id=conv.id,
+        cli_type=conv.cli_type,
+        session_id=conv.session_id,
+        title=conv.title,
+        workspace=conv.workspace,
+        status=conv.status,
+        created_at=conv.created_at,
+        updated_at=conv.updated_at
+    )
 
 
 @router.get("/conversations", response_model=List[ConversationResponse])
 async def list_conversations(cli_type: Optional[str] = None, limit: int = 50):
     """列出对话"""
     convs = conversation_store.list_conversations(cli_type=cli_type, limit=limit)
-    return [ConversationResponse(**c) for c in convs]
+    return [
+        ConversationResponse(
+            id=c.id,
+            cli_type=c.cli_type,
+            session_id=c.session_id,
+            title=c.title,
+            workspace=c.workspace,
+            status=c.status,
+            created_at=c.created_at,
+            updated_at=c.updated_at
+        )
+        for c in convs
+    ]
 
 
 @router.get("/conversations/{conv_id}", response_model=ConversationResponse)
@@ -227,14 +177,97 @@ async def get_conversation(conv_id: str):
     conv = conversation_store.get_conversation(conv_id)
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return ConversationResponse(**conv)
+    return ConversationResponse(
+        id=conv.id,
+        cli_type=conv.cli_type,
+        session_id=conv.session_id,
+        title=conv.title,
+        workspace=conv.workspace,
+        status=conv.status,
+        created_at=conv.created_at,
+        updated_at=conv.updated_at
+    )
 
 
 @router.get("/conversations/{conv_id}/messages", response_model=List[MessageResponse])
-async def get_messages(conv_id: str, limit: int = 100):
+async def get_messages(conv_id: str, limit: int = 100, before_id: Optional[str] = None):
     """获取消息列表"""
-    msgs = conversation_store.get_messages(conv_id, limit=limit)
-    return [MessageResponse(**m) for m in msgs]
+    msgs = conversation_store.get_messages(conv_id, limit=limit, before_id=before_id)
+    return [
+        MessageResponse(
+            id=m.id,
+            role=m.role,
+            content=m.content,
+            content_type=m.content_type,
+            status=m.status,
+            created_at=m.created_at,
+            metadata=json.loads(m.metadata) if m.metadata else None
+        )
+        for m in msgs
+    ]
+
+
+@router.delete("/conversations/{conv_id}")
+async def delete_conversation(conv_id: str):
+    """删除对话"""
+    conversation_store.delete_conversation(conv_id)
+    return {"success": True}
+
+
+@router.patch("/conversations/{conv_id}/title")
+async def update_title(conv_id: str, title: str):
+    """更新对话标题"""
+    conversation_store.update_conversation_title(conv_id, title)
+    return {"success": True}
+
+
+@router.post("/conversations/{conv_id}/messages")
+async def send_message_http(conv_id: str, req: SendMessageRequest):
+    """HTTP 方式发送消息（非流式）"""
+    conv = conversation_store.get_conversation(conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    cli_info = detector.get_cli_info(conv.cli_type)
+    if not cli_info:
+        raise HTTPException(status_code=400, detail="CLI not found")
+
+    # 保存用户消息
+    conversation_store.add_message(
+        conv_id=conv_id,
+        role="user",
+        content=req.message
+    )
+
+    # 创建 Runner
+    runner = RunnerFactory.create(cli_info, conv.session_id, conv.workspace)
+
+    # 收集响应
+    chunks = []
+    msg_id = str(uuid.uuid4())
+
+    async def on_event(event: StreamEvent):
+        if event.type == "content":
+            chunks.append(event.data)
+
+    try:
+        await runner.send_message(req.message, msg_id, on_event)
+        response_text = "".join(chunks)
+
+        # 保存助手响应
+        conversation_store.add_message(
+            conv_id=conv_id,
+            role="assistant",
+            content=response_text,
+            msg_id=msg_id
+        )
+
+        return {"message": response_text}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await runner.close()
 
 
 # === WebSocket 实时通信 ===
@@ -279,7 +312,8 @@ async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
     cli_info = detector.get_cli_info(cli_type)
     runner = None
     if cli_info:
-        runner = RunnerFactory.create(cli_info, session_id, conv.get("workspace", "") if conv else "")
+        workspace = conv.workspace if conv else ""
+        runner = RunnerFactory.create(cli_info, session_id, workspace)
         manager.runners[session_id] = runner
 
     try:
@@ -302,7 +336,7 @@ async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
             elif msg_type == "message":
                 # 处理聊天消息
                 message = data.get("content", "")
-                conv_id = data.get("conversation_id", conv["id"] if conv else None)
+                conv_id = data.get("conversation_id", conv.id if conv else None)
 
                 if not message or not conv_id:
                     continue
