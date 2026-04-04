@@ -6,8 +6,6 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional
 
-from typing import List
-
 from abo.tools.xiaohongshu import (
     xiaohongshu_search,
     xiaohongshu_analyze_trends,
@@ -18,7 +16,7 @@ from abo.tools.bilibili import (
     bilibili_verify_sessdata,
 )
 
-router = APIRouter(prefix="/api/tools")
+router = APIRouter(prefix="/api/tools", tags=["tools"])
 
 
 class SearchRequest(BaseModel):
@@ -189,8 +187,8 @@ async def api_xiaohongshu_trends(req: TrendsRequest):
 
 class BilibiliFollowedRequest(BaseModel):
     sessdata: str
-    keywords: List[str] = []
-    dynamic_types: List[int] = [8, 2, 4, 64]  # video, image, text, article
+    keywords: list[str] = []
+    dynamic_types: list[int] = [8, 2, 4, 64]  # video, image, text, article
     limit: int = 20
     days_back: int = 7
 
