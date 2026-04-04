@@ -13,7 +13,7 @@ const SCHEDULE_OPTIONS = [
   { label: "20:00", value: "0 20 * * *" },
 ];
 
-// 各模块的订阅配置
+// 各模块的订阅配置（仅支持订阅类型的模块）
 const MODULE_SUB_CONFIG: Record<string, {
   types: { type: string; label: string; placeholder: string; example: string }[];
   desc: string;
@@ -44,16 +44,12 @@ const MODULE_SUB_CONFIG: Record<string, {
     desc: "添加播客ID追踪节目更新"
   },
   "arxiv-tracker": {
-    types: [
-      { type: "keyword", label: "关键词", placeholder: "输入英文关键词", example: "machine learning" },
-    ],
-    desc: "添加关键词追踪arXiv论文"
+    types: [],
+    desc: "在下方配置关键词"
   },
   "semantic-scholar-tracker": {
-    types: [
-      { type: "keyword", label: "关键词", placeholder: "输入英文关键词", example: "deep learning" },
-    ],
-    desc: "添加关键词追踪Semantic Scholar论文"
+    types: [],
+    desc: "在下方配置关键词"
   },
   "folder-monitor": {
     types: [],
@@ -795,6 +791,104 @@ export default function ModuleDetail({ module, onBack }: Props) {
                   }}
                 >
                   保存 Cookie
+                </button>
+              </div>
+            </Card>
+          )}
+
+          {/* arXiv 关键词配置 */}
+          {module.id === "arxiv-tracker" && (
+            <Card title="关键词" icon={<span style={{ fontSize: "14px" }}>🔤</span>}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                <input
+                  type="text"
+                  value={(moduleConfig.keywords || []).join(", ")}
+                  onChange={(e) => setModuleConfig({ ...moduleConfig, keywords: e.target.value.split(",").map(s => s.trim()).filter(Boolean) })}
+                  placeholder="robotics, manipulation, grasp"
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: "var(--radius-md)",
+                    border: "1px solid var(--border-light)",
+                    background: "var(--bg-app)",
+                    color: "var(--text-main)",
+                    fontSize: "0.875rem",
+                    outline: "none",
+                  }}
+                />
+                <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: 0 }}>
+                  输入英文关键词，用逗号分隔。系统会自动追踪包含这些关键词的新论文
+                </p>
+                <button
+                  onClick={async () => {
+                    try {
+                      await api.post("/api/preferences", { modules: { [module.id]: { keywords: moduleConfig.keywords } } });
+                      toast.success("已保存");
+                    } catch {
+                      toast.error("保存失败");
+                    }
+                  }}
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--color-primary)",
+                    color: "white",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    border: "none",
+                    cursor: "pointer",
+                    alignSelf: "flex-start",
+                  }}
+                >
+                  保存关键词
+                </button>
+              </div>
+            </Card>
+          )}
+
+          {/* Semantic Scholar 关键词配置 */}
+          {module.id === "semantic-scholar-tracker" && (
+            <Card title="关键词" icon={<span style={{ fontSize: "14px" }}>🔤</span>}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                <input
+                  type="text"
+                  value={(moduleConfig.keywords || []).join(", ")}
+                  onChange={(e) => setModuleConfig({ ...moduleConfig, keywords: e.target.value.split(",").map(s => s.trim()).filter(Boolean) })}
+                  placeholder="machine learning, NLP"
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: "var(--radius-md)",
+                    border: "1px solid var(--border-light)",
+                    background: "var(--bg-app)",
+                    color: "var(--text-main)",
+                    fontSize: "0.875rem",
+                    outline: "none",
+                  }}
+                />
+                <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: 0 }}>
+                  输入英文关键词，用逗号分隔
+                </p>
+                <button
+                  onClick={async () => {
+                    try {
+                      await api.post("/api/preferences", { modules: { [module.id]: { keywords: moduleConfig.keywords } } });
+                      toast.success("已保存");
+                    } catch {
+                      toast.error("保存失败");
+                    }
+                  }}
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--color-primary)",
+                    color: "white",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    border: "none",
+                    cursor: "pointer",
+                    alignSelf: "flex-start",
+                  }}
+                >
+                  保存关键词
                 </button>
               </div>
             </Card>

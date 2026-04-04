@@ -15,6 +15,7 @@ import {
   BookOpen,
   Cookie,
   AlertCircle,
+  Globe,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
 import { api } from "../../core/api";
@@ -68,7 +69,12 @@ interface TrendsResponse {
   based_on_notes: number;
 }
 
-type TabType = "search" | "trends" | "comments";
+type TabType = "search" | "trends" | "comments" | "following";
+
+interface FollowingFeedResponse {
+  total_found: number;
+  notes: Array<XHSNote & { matched_keywords?: string[] }>;
+}
 
 interface ConfigResponse {
   cookie_configured: boolean;
@@ -101,6 +107,10 @@ export function XiaohongshuTool() {
   const [noteId, setNoteId] = useState("");
   const [commentsResult, setCommentsResult] = useState<CommentsResponse | null>(null);
   const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
+
+  // Following feed state
+  const [followingKeywords, setFollowingKeywords] = useState("");
+  const [followingResult, setFollowingResult] = useState<FollowingFeedResponse | null>(null);
 
   // Load config on mount
   useEffect(() => {
@@ -138,6 +148,31 @@ export function XiaohongshuTool() {
       toast.success("Cookie 已保存");
     } catch (e) {
       toast.error("保存 Cookie 失败");
+    }
+  }
+
+  async function getCookieFromBrowser() {
+    try {
+      toast.info("正在从 Chrome 浏览器获取 Cookie...");
+      const result = await api.post<{
+        success: boolean;
+        cookie_count?: number;
+        cookie_preview?: string;
+        error?: string;
+        message?: string;
+      }>("/api/tools/xiaohongshu/config/from-browser", {});
+
+      if (result.success) {
+        setCookieConfigured(true);
+        setCookiePreview(result.cookie_preview || null);
+        toast.success(result.message || `成功获取 ${result.cookie_count} 个 Cookie`);
+        // 刷新配置
+        await loadConfig();
+      } else {
+        toast.error(result.error || "获取 Cookie 失败");
+      }
+    } catch (e) {
+      toast.error("获取浏览器 Cookie 失败，请手动输入");
     }
   }
 
@@ -207,6 +242,33 @@ export function XiaohongshuTool() {
     }
   };
 
+  const handleFollowingFeed = async () => {
+    if (!followingKeywords.trim()) {
+      toast.error("请输入关键词");
+      return;
+    }
+    if (!cookie) {
+      toast.error("请先配置 Cookie");
+      return;
+    }
+    setLoading(true);
+    try {
+      const keywords = followingKeywords.split(/[,，]/).map(k => k.trim()).filter(Boolean);
+      const result = await api.post<FollowingFeedResponse>("/api/tools/xiaohongshu/following-feed", {
+        cookie: cookie,
+        keywords: keywords,
+        max_notes: 50,
+      });
+      setFollowingResult(result);
+      toast.success(`关注列表中找到 ${result.total_found} 条匹配结果`);
+    } catch (e) {
+      console.error("获取关注列表失败:", e);
+      toast.error("获取关注列表失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const toggleNoteExpand = (noteId: string) => {
     setExpandedNotes((prev) => {
       const next = new Set(prev);
@@ -231,6 +293,7 @@ export function XiaohongshuTool() {
         { id: "search" as const, label: "搜索笔记", icon: Search },
         { id: "trends" as const, label: "趋势分析", icon: TrendingUp },
         { id: "comments" as const, label: "评论获取", icon: MessageCircle },
+        { id: "following" as const, label: "关注监控", icon: Users },
       ].map(({ id, label, icon: Icon }) => (
         <button
           key={id}
@@ -255,6 +318,153 @@ export function XiaohongshuTool() {
           {label}
         </button>
       ))}
+    </div>
+  );
+
+  const renderFollowingTab = () => (
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      <Card title="关注列表监控" icon={<Users style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
+            监控你关注的用户发布的内容，筛选包含指定关键词的笔记。
+            {!cookieConfigured && (
+              <span style={{ color: "var(--color-warning)" }}>（需先配置 Cookie）</span>
+            )}
+          </p>
+
+          <div style={{ display: "flex", gap: "12px" }}>
+            <input
+              type="text"
+              value={followingKeywords}
+              onChange={(e) => setFollowingKeywords(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleFollowingFeed()}
+              placeholder="输入关键词，多个用逗号分隔..."
+              disabled={!cookieConfigured}
+              style={{
+                flex: 1,
+                padding: "12px 16px",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-card)",
+                color: "var(--text-main)",
+                fontSize: "0.9375rem",
+                outline: "none",
+                opacity: cookieConfigured ? 1 : 0.5,
+              }}
+            />
+            <button
+              onClick={handleFollowingFeed}
+              disabled={loading || !followingKeywords.trim() || !cookieConfigured}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "12px 24px",
+                borderRadius: "var(--radius-md)",
+                border: "none",
+                background: loading || !cookieConfigured ? "var(--bg-hover)" : "var(--color-primary)",
+                color: "white",
+                fontSize: "0.9375rem",
+                fontWeight: 600,
+                cursor: loading || !cookieConfigured ? "not-allowed" : "pointer",
+                opacity: loading || !cookieConfigured ? 0.6 : 1,
+              }}
+            >
+              {loading ? (
+                <span>⟳ 获取中...</span>
+              ) : (
+                <>
+                  <Users style={{ width: "16px", height: "16px" }} />
+                  获取
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </Card>
+
+      {followingResult && (
+        <Card title={`匹配结果 (${followingResult.total_found})`} icon={<BookOpen style={{ width: "18px", height: "18px" }} />}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            {followingResult.notes.map((note) => (
+              <div
+                key={note.id}
+                style={{
+                  padding: "16px",
+                  borderRadius: "var(--radius-lg)",
+                  background: "var(--bg-hover)",
+                  border: "1px solid var(--border-light)",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <h4 style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)", marginBottom: "8px", flex: 1 }}>
+                    {note.title}
+                  </h4>
+                  <a
+                    href={note.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      padding: "4px 8px",
+                      borderRadius: "var(--radius-sm)",
+                      background: "var(--color-primary)20",
+                      color: "var(--color-primary)",
+                      fontSize: "0.75rem",
+                      textDecoration: "none",
+                      marginLeft: "8px",
+                    }}
+                  >
+                    <ExternalLink style={{ width: "12px", height: "12px" }} />
+                    查看
+                  </a>
+                </div>
+
+                {note.matched_keywords && note.matched_keywords.length > 0 && (
+                  <div style={{ display: "flex", gap: "4px", marginBottom: "8px", flexWrap: "wrap" }}>
+                    {note.matched_keywords.map((kw) => (
+                      <span
+                        key={kw}
+                        style={{
+                          padding: "2px 8px",
+                          borderRadius: "var(--radius-full)",
+                          background: "var(--color-primary)20",
+                          color: "var(--color-primary)",
+                          fontSize: "0.75rem",
+                        }}
+                      >
+                        {kw}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", lineHeight: 1.6, marginBottom: "12px" }}>
+                  {note.content?.slice(0, 200)}{note.content?.length > 200 ? "..." : ""}
+                </p>
+
+                <div style={{ display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>作者：{note.author}</span>
+                  <span style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "0.8125rem", color: "var(--color-danger)" }}>
+                    <Heart style={{ width: "14px", height: "14px" }} />
+                    {note.likes.toLocaleString()}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {!followingResult && !loading && (
+        <EmptyState
+          icon={Users}
+          title="关注列表监控"
+          description="输入关键词，监控你关注的用户发布的相关内容"
+        />
+      )}
     </div>
   );
 
@@ -294,25 +504,44 @@ export function XiaohongshuTool() {
         )}
 
         {!showCookieInput ? (
-          <button
-            onClick={() => setShowCookieInput(true)}
-            style={{
-              padding: "10px 20px",
-              borderRadius: "var(--radius-md)",
-              border: "1px solid var(--border-light)",
-              background: "var(--bg-card)",
-              color: "var(--text-main)",
-              fontSize: "0.875rem",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              width: "fit-content",
-            }}
-          >
-            <Cookie style={{ width: "16px", height: "16px" }} />
-            {cookieConfigured ? "更新 Cookie" : "配置 Cookie"}
-          </button>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <button
+              onClick={() => setShowCookieInput(true)}
+              style={{
+                padding: "10px 20px",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-card)",
+                color: "var(--text-main)",
+                fontSize: "0.875rem",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+            >
+              <Cookie style={{ width: "16px", height: "16px" }} />
+              {cookieConfigured ? "更新 Cookie" : "配置 Cookie"}
+            </button>
+            <button
+              onClick={getCookieFromBrowser}
+              style={{
+                padding: "10px 20px",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-hover)",
+                color: "var(--text-main)",
+                fontSize: "0.875rem",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+            >
+              <Globe style={{ width: "16px", height: "16px" }} />
+              从 Chrome 获取
+            </button>
+          </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
             <textarea
@@ -1030,6 +1259,7 @@ export function XiaohongshuTool() {
               {activeTab === "search" && renderSearchTab()}
               {activeTab === "trends" && renderTrendsTab()}
               {activeTab === "comments" && renderCommentsTab()}
+              {activeTab === "following" && renderFollowingTab()}
             </>
           )}
         </div>

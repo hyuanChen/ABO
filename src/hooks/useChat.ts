@@ -3,6 +3,7 @@ import type { Conversation, Message, StreamEvent, CliConfig } from '../types/cha
 import {
   detectClis,
   createConversation,
+  getMessages,
   createChatWebSocket,
 } from '../api/chat';
 
@@ -10,21 +11,23 @@ export interface UseChatReturn {
   // CLI
   availableClis: CliConfig[];
   selectedCli: CliConfig | null;
+  selectCli: (cli: CliConfig) => void;
 
   // 对话
   conversation: Conversation | null;
+  createNewConversation: () => Promise<void>;
+  loadConversation: (conv: Conversation) => Promise<void>;
+
+  // 消息
   messages: Message[];
-
-  // 发送消息（自动处理 CLI 检测和连接）
-  sendMessage: (content: string) => Promise<void>;
-
-  // 状态
+  sendMessage: (content: string) => void;
   isStreaming: boolean;
-  isConnecting: boolean;
-  isConnected: boolean;
-  error: string | null;
 
-  // 清除错误
+  // 连接状态
+  isConnected: boolean;
+  isLoading: boolean;
+  isConnecting: boolean;
+  error: string | null;
   clearError: () => void;
 }
 
@@ -39,20 +42,19 @@ export function useChat(): UseChatReturn {
 
   // 连接状态
   const [isConnected, setIsConnected] = useState(false);
-  const [isConnecting, setIsConnecting] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Refs
   const wsRef = useRef<WebSocket | null>(null);
   const currentMsgIdRef = useRef<string>('');
-  const pendingMessageRef = useRef<string | null>(null);
 
-  // 后台检测 CLI（不阻塞 UI）
+  // 检测 CLI
   useEffect(() => {
     detectClis()
       .then(setAvailableClis)
-      .catch(() => setAvailableClis([]));
+      .catch((e) => setError(e.message));
   }, []);
 
   // 清理 WebSocket
@@ -62,123 +64,83 @@ export function useChat(): UseChatReturn {
     };
   }, []);
 
-  // 自动连接：如果有 pending message 且检测到了 CLI
-  useEffect(() => {
-    const connectAndSend = async () => {
-      if (pendingMessageRef.current && availableClis.length > 0 && !conversation && !isConnecting) {
-        await initializeAndSend(pendingMessageRef.current);
-      }
-    };
-    connectAndSend();
-  }, [availableClis, conversation, isConnecting]);
-
-  // 初始化连接并发送消息
-  const initializeAndSend = async (content: string) => {
-    setIsConnecting(true);
+  // 选择 CLI
+  const selectCli = useCallback((cli: CliConfig) => {
+    setSelectedCli(cli);
     setError(null);
+  }, []);
 
-    try {
-      // 1. 如果没有可用 CLI，报错
-      if (availableClis.length === 0) {
-        // 再次尝试检测
-        const clis = await detectClis();
-        setAvailableClis(clis);
-
-        if (clis.length === 0) {
-          setError('未检测到可用的 CLI 工具，请安装 Claude Code 或 Gemini CLI');
-          setIsConnecting(false);
-          return;
-        }
-      }
-
-      // 2. 选择第一个可用的 CLI
-      const cli = availableClis[0];
-      setSelectedCli(cli);
-
-      // 3. 创建对话
-      const conv = await createConversation(cli.id);
-      setConversation(conv);
-
-      // 4. 建立 WebSocket 连接
-      const ws = createChatWebSocket({
-        cliType: cli.id,
-        sessionId: conv.sessionId,
-        onConnect: () => {
-          setIsConnected(true);
-          setIsConnecting(false);
-          // 连接成功后发送 pending 消息
-          if (pendingMessageRef.current) {
-            doSendMessage(pendingMessageRef.current);
-            pendingMessageRef.current = null;
-          }
-        },
-        onDisconnect: () => setIsConnected(false),
-        onEvent: handleStreamEvent,
-        onError: () => {
-          setError('WebSocket 连接失败');
-          setIsConnecting(false);
-        },
-      });
-
-      wsRef.current = ws;
-
-      // 5. 添加用户消息到列表
-      const userMsg: Message = {
-        id: `user-${Date.now()}`,
-        conversationId: conv.id,
-        role: 'user',
-        content,
-        contentType: 'text',
-        status: 'completed',
-        createdAt: Date.now(),
-      };
-      setMessages((prev) => [...prev, userMsg]);
-
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '连接失败');
-      setIsConnecting(false);
-    }
-  };
-
-  // 发送消息（入口）
-  const sendMessage = useCallback(async (content: string) => {
-    if (!content.trim()) return;
-
-    // 如果还没有连接，保存消息并初始化
-    if (!conversation || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      pendingMessageRef.current = content;
-      await initializeAndSend(content);
+  // 创建新对话
+  const createNewConversation = useCallback(async () => {
+    if (!selectedCli) {
+      setError('Please select a CLI first');
       return;
     }
 
-    // 已连接，直接发送
-    doSendMessage(content);
-  }, [conversation]);
+    setIsLoading(true);
+    setError(null);
 
-  // 实际发送消息
-  const doSendMessage = (content: string) => {
-    if (!wsRef.current || !conversation) return;
+    try {
+      // 关闭现有连接
+      wsRef.current?.close();
 
-    // 添加用户消息到列表
-    const userMsg: Message = {
-      id: `user-${Date.now()}`,
-      conversationId: conversation.id,
-      role: 'user',
-      content,
-      contentType: 'text',
-      status: 'completed',
-      createdAt: Date.now(),
-    };
-    setMessages((prev) => [...prev, userMsg]);
+      // 创建新对话
+      const conv = await createConversation(selectedCli.id);
+      setConversation(conv);
+      setMessages([]);
 
-    // 发送消息
-    wsRef.current.send(
-      JSON.stringify({
-        message: content,
-        conversation_id: conversation.id,
-      })
-    );
-  };
+      // 建立 WebSocket 连接
+      const ws = createChatWebSocket({
+        cliType: selectedCli.id,
+        sessionId: conv.sessionId,
+        onConnect: () => setIsConnected(true),
+        onDisconnect: () => setIsConnected(false),
+        onEvent: handleStreamEvent,
+        onError: () => setError('WebSocket connection failed'),
+      });
+
+      wsRef.current = ws;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [selectedCli]);
+
+  // 加载已有对话
+  const loadConversation = useCallback(async (conv: Conversation) => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      // 关闭现有连接
+      wsRef.current?.close();
+
+      // 加载历史消息
+      const history = await getMessages(conv.id);
+      setMessages(history);
+      setConversation(conv);
+
+      // 找到 CLI 配置
+      const cli = availableClis.find((c) => c.id === conv.cliType);
+      if (cli) setSelectedCli(cli);
+
+      // 建立 WebSocket 连接
+      const ws = createChatWebSocket({
+        cliType: conv.cliType,
+        sessionId: conv.sessionId,
+        onConnect: () => setIsConnected(true),
+        onDisconnect: () => setIsConnected(false),
+        onEvent: handleStreamEvent,
+      });
+
+      wsRef.current = ws;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unknown error');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [availableClis]);
 
   // 处理流式事件
   const handleStreamEvent = useCallback((event: StreamEvent) => {
@@ -212,20 +174,22 @@ export function useChat(): UseChatReturn {
         break;
 
       case 'tool_call':
-        const toolData = event.metadata || {};
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `tool-${Date.now()}`,
-            conversationId: conversation?.id || '',
-            role: 'assistant',
-            content: `使用工具: ${toolData.toolName || 'unknown'}`,
-            contentType: 'tool_call',
-            metadata: toolData,
-            status: 'completed',
-            createdAt: Date.now(),
-          },
-        ]);
+        {
+          const toolData = event.metadata || {};
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `tool-${Date.now()}`,
+              conversationId: conversation?.id || '',
+              role: 'assistant',
+              content: `使用工具: ${toolData.toolName || 'unknown'}`,
+              contentType: 'tool_call',
+              metadata: toolData,
+              status: 'completed',
+              createdAt: Date.now(),
+            },
+          ]);
+        }
         break;
 
       case 'finish':
@@ -247,7 +211,7 @@ export function useChat(): UseChatReturn {
             id: `error-${Date.now()}`,
             conversationId: conversation?.id || '',
             role: 'system',
-            content: `错误: ${event.data}`,
+            content: `Error: ${event.data}`,
             contentType: 'error',
             status: 'error',
             createdAt: Date.now(),
@@ -257,17 +221,54 @@ export function useChat(): UseChatReturn {
     }
   }, [conversation]);
 
+  // 发送消息
+  const sendMessage = useCallback((content: string) => {
+    if (!wsRef.current || !conversation) {
+      setError('Not connected');
+      return;
+    }
+
+    if (wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('WebSocket not connected');
+      return;
+    }
+
+    // 添加用户消息到列表
+    const userMsg: Message = {
+      id: `user-${Date.now()}`,
+      conversationId: conversation.id,
+      role: 'user',
+      content,
+      contentType: 'text',
+      status: 'completed',
+      createdAt: Date.now(),
+    };
+    setMessages((prev) => [...prev, userMsg]);
+
+    // 发送消息
+    wsRef.current.send(
+      JSON.stringify({
+        message: content,
+        conversation_id: conversation.id,
+      })
+    );
+  }, [conversation]);
+
   const clearError = useCallback(() => setError(null), []);
 
   return {
     availableClis,
     selectedCli,
+    selectCli,
     conversation,
+    createNewConversation,
+    loadConversation,
     messages,
     sendMessage,
     isStreaming,
-    isConnecting,
     isConnected,
+    isLoading,
+    isConnecting: isLoading,
     error,
     clearError,
   };

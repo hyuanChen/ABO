@@ -73,6 +73,130 @@ class XiaohongshuAPI:
         self.timeout = timeout
         self.client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
 
+    async def get_following_feed_with_cookie(
+        self,
+        cookie: str,
+        keywords: list[str],
+        max_notes: int = 50,
+    ) -> list[XHSNote]:
+        """
+        获取关注列表中匹配关键词的笔记
+
+        Args:
+            cookie: 小红书登录 Cookie
+            keywords: 要匹配的关键词列表
+            max_notes: 最大获取笔记数
+
+        Returns:
+            匹配关键词的笔记列表
+        """
+        from playwright.async_api import async_playwright
+
+        matched_notes = []
+        url = "https://www.xiaohongshu.com/explore?tab=following"
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+            )
+
+            # 设置 Cookie
+            if cookie:
+                cookies = self._parse_cookie_string(cookie)
+                await context.add_cookies(cookies)
+                print(f"已设置 {len(cookies)} 个 cookies")
+
+            page = await context.new_page()
+
+            try:
+                print(f"正在访问关注列表...")
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                await asyncio.sleep(3)
+
+                # 检查登录状态
+                login_btn = await page.query_selector('button:has-text("登录"), .login-btn')
+                if login_btn:
+                    print("Cookie 可能已失效，无法获取关注列表")
+                    return []
+
+                # 滚动加载更多笔记
+                all_notes = []
+                for scroll in range(5):  # 滚动5次
+                    # 提取当前可见的笔记
+                    note_elements = await page.query_selector_all('.note-item, .feeds-page > div > div')
+
+                    for elem in note_elements[len(all_notes):]:  # 只处理新加载的
+                        try:
+                            # 提取标题
+                            title_elem = await elem.query_selector('.title, .note-title, span[class*="title"]')
+                            title = await title_elem.inner_text() if title_elem else ""
+
+                            # 提取作者
+                            author_elem = await elem.query_selector('.author, .user-name, [class*="author"]')
+                            author = await author_elem.inner_text() if author_elem else "未知"
+
+                            # 提取内容摘要
+                            content_elem = await elem.query_selector('.content, .desc, [class*="content"]')
+                            content = await content_elem.inner_text() if content_elem else ""
+
+                            # 提取点赞数
+                            likes_elem = await elem.query_selector('.like-wrapper .count, [class*="like"]')
+                            likes_text = await likes_elem.inner_text() if likes_elem else "0"
+                            likes = self._parse_count(likes_text)
+
+                            # 提取链接
+                            link_elem = await elem.query_selector('a[href*="/explore/"]')
+                            href = await link_elem.get_attribute('href') if link_elem else ""
+                            note_id = href.split('/explore/')[-1].split('?')[0] if '/explore/' in href else f"note-{hash(title) % 1000000}"
+
+                            # 检查是否匹配关键词
+                            full_text = f"{title} {content}".lower()
+                            matched_keywords = [kw for kw in keywords if kw.lower() in full_text]
+
+                            if matched_keywords:
+                                note = XHSNote(
+                                    id=note_id,
+                                    title=title.strip()[:100],
+                                    content=content.strip()[:300],
+                                    author=author.strip()[:50],
+                                    author_id="",
+                                    likes=likes,
+                                    collects=likes // 4,
+                                    comments_count=likes // 10,
+                                    url=f"https://www.xiaohongshu.com/explore/{note_id}",
+                                    published_at=datetime.now(),
+                                )
+                                note.matched_keywords = matched_keywords  # 额外属性
+                                matched_notes.append(note)
+                                print(f"✓ 匹配关键词 {matched_keywords}: {title[:50]}...")
+
+                            all_notes.append(note_id)
+
+                            if len(matched_notes) >= max_notes:
+                                break
+
+                        except Exception as e:
+                            print(f"解析笔记失败: {e}")
+                            continue
+
+                    if len(matched_notes) >= max_notes:
+                        break
+
+                    # 滚动加载更多
+                    await page.evaluate("window.scrollBy(0, 1000)")
+                    await asyncio.sleep(2)
+
+                print(f"共检查 {len(all_notes)} 条笔记，匹配 {len(matched_notes)} 条")
+
+            except Exception as e:
+                print(f"获取关注列表失败: {e}")
+            finally:
+                await browser.close()
+
+        return matched_notes[:max_notes]
+
     async def search_by_keyword_with_cookie(
         self,
         keyword: str,
