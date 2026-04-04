@@ -7,3 +7,4 @@ httpx>=0.28
 watchdog>=6.0
 pyyaml>=6.0
 pdf2image>=1.17
+arxiv>=2.0.0
