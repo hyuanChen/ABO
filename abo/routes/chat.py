@@ -1,10 +1,13 @@
 """Chat WebSocket 和 HTTP API"""
 
+import asyncio
 import json
 import uuid
-from typing import Dict, Optional
+import time
+from typing import Dict, Optional, Set
+from dataclasses import dataclass, field
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
 from pydantic import BaseModel
 
 from ..cli import detector, RunnerFactory, StreamEvent
@@ -13,29 +16,144 @@ from ..store.conversations import conversation_store
 chat_router = APIRouter(prefix="/api/chat")
 
 
+@dataclass
+class ConnectionInfo:
+    """Connection metadata"""
+    client_id: str
+    cli_type: str
+    session_id: str
+    connected_at: float
+    last_pong: float
+    is_alive: bool = True
+
+
 class ConnectionManager:
+    """
+    WebSocket Connection Manager with heartbeat support.
+
+    Features:
+    - Track active connections
+    - Send heartbeat every 15 seconds
+    - Handle pong responses
+    - Manage runner lifecycle
+    """
+
+    HEARTBEAT_INTERVAL = 15.0  # seconds
+    HEARTBEAT_TIMEOUT = 30.0   # seconds
+
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
+        self.connection_info: Dict[str, ConnectionInfo] = {}
         self.runners: dict = {}
+        self._heartbeat_tasks: Dict[str, asyncio.Task] = {}
 
-    async def connect(self, websocket: WebSocket, client_id: str):
+    async def connect(self, websocket: WebSocket, client_id: str, cli_type: str = "", session_id: str = ""):
+        """Accept connection and start heartbeat."""
         await websocket.accept()
         self.active_connections[client_id] = websocket
 
+        now = time.time()
+        self.connection_info[client_id] = ConnectionInfo(
+            client_id=client_id,
+            cli_type=cli_type,
+            session_id=session_id,
+            connected_at=now,
+            last_pong=now
+        )
+
+        # Start heartbeat for this connection
+        self._heartbeat_tasks[client_id] = asyncio.create_task(
+            self._heartbeat_loop(client_id)
+        )
+
+        # Send connected event
+        await self.send_json(client_id, {"type": "connected"})
+
     def disconnect(self, client_id: str):
+        """Clean up connection and resources."""
+        # Cancel heartbeat task
+        if client_id in self._heartbeat_tasks:
+            task = self._heartbeat_tasks.pop(client_id)
+            task.cancel()
+
         self.active_connections.pop(client_id, None)
+        self.connection_info.pop(client_id, None)
+
         if client_id in self.runners:
-            runner = self.runners[client_id]
-            import asyncio
-            asyncio.create_task(runner.close())
-            del self.runners[client_id]
+            runner = self.runners.pop(client_id)
+            try:
+                # Try to close runner if event loop is running
+                loop = asyncio.get_running_loop()
+                asyncio.create_task(runner.close())
+            except RuntimeError:
+                # No running event loop, skip async cleanup
+                pass
 
     async def send_json(self, client_id: str, data: dict):
+        """Send JSON message to client."""
         if client_id in self.active_connections:
             try:
                 await self.active_connections[client_id].send_json(data)
             except Exception:
                 pass
+
+    async def _heartbeat_loop(self, client_id: str):
+        """Send periodic heartbeat pings."""
+        try:
+            while client_id in self.active_connections:
+                await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+
+                if client_id not in self.active_connections:
+                    break
+
+                # Check if client is still alive
+                info = self.connection_info.get(client_id)
+                if info:
+                    time_since_pong = time.time() - info.last_pong
+                    if time_since_pong > self.HEARTBEAT_TIMEOUT:
+                        # Client hasn't responded, disconnect
+                        info.is_alive = False
+                        await self._disconnect_client(client_id)
+                        break
+
+                # Send ping
+                await self.send_json(client_id, {
+                    "type": "ping",
+                    "timestamp": int(time.time() * 1000)
+                })
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    async def _disconnect_client(self, client_id: str):
+        """Disconnect a client due to timeout."""
+        if client_id in self.active_connections:
+            try:
+                await self.active_connections[client_id].close()
+            except Exception:
+                pass
+        self.disconnect(client_id)
+
+    def handle_pong(self, client_id: str, timestamp: float):
+        """Update last pong time."""
+        if client_id in self.connection_info:
+            self.connection_info[client_id].last_pong = time.time()
+            self.connection_info[client_id].is_alive = True
+
+    def get_active_connections(self) -> list:
+        """Get list of active connection info."""
+        return [
+            {
+                "client_id": info.client_id,
+                "cli_type": info.cli_type,
+                "session_id": info.session_id,
+                "connected_at": info.connected_at,
+                "last_pong": info.last_pong,
+                "is_alive": info.is_alive
+            }
+            for info in self.connection_info.values()
+        ]
 
 
 manager = ConnectionManager()
@@ -43,9 +161,25 @@ manager = ConnectionManager()
 
 @chat_router.websocket("/ws/{cli_type}/{session_id}")
 async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
-    """通用 CLI 对话 WebSocket"""
+    """
+    通用 CLI 对话 WebSocket
+
+    WebSocket Protocol:
+    Client -> Server:
+        - { "type": "message", "content": "...", "conversation_id": "..." }
+        - { "type": "pong", "timestamp": "..." }
+        - { "type": "stop" }
+
+    Server -> Client:
+        - { "type": "connected" }
+        - { "type": "ping", "timestamp": "..." }
+        - { "type": "start", "msg_id": "..." }
+        - { "type": "content", "data": "...", "msg_id": "..." }
+        - { "type": "finish", "msg_id": "..." }
+        - { "type": "error", "data": "...", "msg_id": "..." }
+    """
     client_id = f"{cli_type}:{session_id}"
-    await manager.connect(websocket, client_id)
+    await manager.connect(websocket, client_id, cli_type, session_id)
 
     # 查找或创建对话
     conv = conversation_store.get_conversation_by_session(session_id)
@@ -77,52 +211,69 @@ async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
     try:
         while True:
             data = await websocket.receive_json()
-            message = data.get('message', '')
-            conv_id = data.get('conversation_id', conv.id)
+            msg_type = data.get('type', 'message')
 
-            if not message:
+            # Handle pong response
+            if msg_type == 'pong':
+                timestamp = data.get('timestamp', 0)
+                manager.handle_pong(client_id, timestamp)
                 continue
 
-            # 保存用户消息
-            conversation_store.add_message(
-                conv_id=conv_id,
-                role='user',
-                content=message
-            )
+            # Handle stop request
+            if msg_type == 'stop':
+                runner = manager.runners.get(client_id)
+                if runner:
+                    await runner.close()
+                continue
 
-            # 流式处理
-            msg_id = str(uuid.uuid4())
-            full_response = []
+            # Handle message
+            if msg_type == 'message':
+                message = data.get('content', '')
+                conv_id = data.get('conversation_id', conv.id)
 
-            await manager.send_json(client_id, {'type': 'start', 'data': '', 'msg_id': msg_id})
+                if not message:
+                    continue
 
-            async def on_event(event: StreamEvent):
-                await manager.send_json(client_id, {
-                    'type': event.type,
-                    'data': event.data,
-                    'msg_id': event.msg_id,
-                    'metadata': event.metadata
-                })
-                if event.type == 'content':
-                    full_response.append(event.data)
+                # 保存用户消息
+                conversation_store.add_message(
+                    conv_id=conv_id,
+                    role='user',
+                    content=message
+                )
 
-            runner = manager.runners.get(client_id)
-            if runner:
-                try:
-                    await runner.send_message(message, msg_id, on_event)
-                    # 保存完整响应
-                    conversation_store.add_message(
-                        conv_id=conv_id,
-                        role='assistant',
-                        content=''.join(full_response),
-                        msg_id=msg_id
-                    )
-                except Exception as e:
+                # 流式处理
+                msg_id = str(uuid.uuid4())
+                full_response = []
+
+                await manager.send_json(client_id, {'type': 'start', 'data': '', 'msg_id': msg_id})
+
+                async def on_event(event: StreamEvent):
                     await manager.send_json(client_id, {
-                        'type': 'error',
-                        'data': str(e),
-                        'msg_id': msg_id
+                        'type': event.type,
+                        'data': event.data,
+                        'msg_id': event.msg_id,
+                        'metadata': event.metadata
                     })
+                    if event.type == 'content':
+                        full_response.append(event.data)
+
+                runner = manager.runners.get(client_id)
+                if runner:
+                    try:
+                        await runner.send_message(message, msg_id, on_event)
+                        # 保存完整响应
+                        conversation_store.add_message(
+                            conv_id=conv_id,
+                            role='assistant',
+                            content=''.join(full_response),
+                            msg_id=msg_id
+                        )
+                    except Exception as e:
+                        await manager.send_json(client_id, {
+                            'type': 'error',
+                            'data': str(e),
+                            'msg_id': msg_id
+                        })
 
     except WebSocketDisconnect:
         manager.disconnect(client_id)
@@ -175,6 +326,17 @@ class MessagesResponse(BaseModel):
 
 class SuccessResponse(BaseModel):
     success: bool
+
+
+# Connection Status Endpoints
+@chat_router.get("/connections")
+async def get_connections():
+    """获取活跃连接状态"""
+    connections = manager.get_active_connections()
+    return {
+        "connections": connections,
+        "count": len(connections)
+    }
 
 
 # CLI Detection Endpoints
