@@ -1,0 +1,78 @@
+{
+  "timestamp": "2026-04-05T04:28:03.491292",
+  "summary": {
+    "passed": 17,
+    "failed": 0,
+    "skipped": 0
+  },
+  "results": {
+    "Config System": {
+      "success": true,
+      "message": "Passed"
+    },
+    "SDK Types": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Card Store": {
+      "success": true,
+      "message": "Passed"
+    },
+    "ArXiv Module": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Bilibili Module": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Xiaohongshu Module": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Zhihu Module": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Xiaoyuzhou Module": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Semantic Scholar Module": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Folder Monitor Module": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Profile Store": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Profile Stats": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Xiaohongshu Tools": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Bilibili Tools": {
+      "success": true,
+      "message": "Passed"
+    },
+    "Zhihu Tools": {
+      "success": true,
+      "message": "Passed"
+    },
+    "API Routes": {
+      "success": true,
+      "message": "Passed"
+    },
+    "WebSocket": {
+      "success": true,
+      "message": "Passed"
+    }
+  }
+}
