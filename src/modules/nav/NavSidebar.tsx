@@ -3,7 +3,7 @@ import PixelAvatar from "../profile/PixelAvatar";
 import {
   Inbox, BookOpen, FileText, MessageSquare,
   Rss, Heart, Settings, Zap, User, Menu, X, Moon, Sun, LayoutGrid, FolderOpen,
-  ChevronDown, BookHeart
+  ChevronDown, BookHeart, Tv
 } from "lucide-react";
 import { useState, useEffect } from "react";
 
@@ -642,6 +642,59 @@ export default function NavSidebar() {
           </div>
           <span style={{ fontWeight: 600, fontSize: "clamp(0.875rem, 1.2vw, 0.9375rem)", flex: 1, textAlign: "left" }}>
             小红书工具
+          </span>
+        </button>
+
+        {/* Bilibili Tool */}
+        <button
+          onClick={() => {
+            setActiveTab("bilibili");
+            if (isMobile) setIsOpen(false);
+          }}
+          style={{
+            width: "100%",
+            padding: "clamp(10px, 1.5vw, 12px) clamp(14px, 2vw, 16px)",
+            borderRadius: "var(--radius-full)",
+            background: activeTab === "bilibili"
+              ? "linear-gradient(135deg, rgba(0, 174, 236, 0.3), rgba(0, 174, 236, 0.2))"
+              : "linear-gradient(135deg, rgba(0, 174, 236, 0.2), rgba(0, 174, 236, 0.1))",
+            color: "#00AEEC",
+            transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+            border: "1px solid rgba(0, 174, 236, 0.4)",
+            cursor: "pointer",
+          }}
+          onMouseEnter={(e) => {
+            if (activeTab !== "bilibili") {
+              e.currentTarget.style.background = "linear-gradient(135deg, rgba(0, 174, 236, 0.3), rgba(0, 174, 236, 0.2))";
+            }
+            e.currentTarget.style.transform = "scale(1.02)";
+          }}
+          onMouseLeave={(e) => {
+            if (activeTab !== "bilibili") {
+              e.currentTarget.style.background = "linear-gradient(135deg, rgba(0, 174, 236, 0.2), rgba(0, 174, 236, 0.1))";
+            }
+            e.currentTarget.style.transform = "scale(1)";
+          }}
+        >
+          <div
+            style={{
+              width: "clamp(32px, 4vw, 36px)",
+              height: "clamp(32px, 4vw, 36px)",
+              borderRadius: "50%",
+              background: "rgba(0, 174, 236, 0.3)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <Tv className="w-[18px] h-[18px] shrink-0" style={{ color: "#00AEEC" }} aria-hidden />
+          </div>
+          <span style={{ fontWeight: 600, fontSize: "clamp(0.875rem, 1.2vw, 0.9375rem)", flex: 1, textAlign: "left" }}>
+            哔哩哔哩工具
           </span>
         </button>
       </div>
