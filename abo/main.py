@@ -27,6 +27,7 @@ from .runtime.scheduler import ModuleScheduler
 from .runtime.state import ModuleStateStore
 from .sdk.types import FeedbackAction
 from .store.cards import CardStore
+from .subscription_store import get_subscription_store
 from .summary import DailySummaryGenerator, SummaryScheduler
 
 # ── 全局单例 ────────────────────────────────────────────────────
@@ -38,6 +39,7 @@ _scheduler: ModuleScheduler | None = None
 _activity_tracker: ActivityTracker | None = None
 _summary_generator: DailySummaryGenerator | None = None
 _summary_scheduler: SummaryScheduler | None = None
+_subscription_store = get_subscription_store()
 
 
 def _validate_cron(expr: str) -> bool:

@@ -36,6 +36,12 @@ class BaseRunner(ABC):
         """发送消息并处理流式响应"""
         pass
 
+    async def _emit(self, on_event: Callable[[StreamEvent], None], event: StreamEvent):
+        """发送事件（支持同步和异步回调）"""
+        result = on_event(event)
+        if asyncio.iscoroutine(result):
+            await result
+
     async def close(self):
         """关闭 Runner"""
         self._closed = True
@@ -60,11 +66,13 @@ class RawRunner(BaseRunner):
         """发送消息并接收流式响应"""
 
         # 发送开始事件
-        await on_event(StreamEvent(type="start", data="", msg_id=msg_id))
+        await self._emit(on_event, StreamEvent(type="start", data="", msg_id=msg_id))
 
         try:
-            # 启动进程
+            # 启动进程 - raw 协议使用 acp_args
             cmd = [self.cli_info.command] + self.cli_info.acp_args
+
+            logger.info(f"RawRunner starting: {' '.join(cmd)}")
 
             self.process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -77,7 +85,7 @@ class RawRunner(BaseRunner):
 
             # 发送消息
             assert self.process.stdin
-            input_data = f"{message}\n".encode('utf-8')
+            input_data = f"{message}\n\n".encode('utf-8')
             self.process.stdin.write(input_data)
             await self.process.stdin.drain()
             self.process.stdin.close()
@@ -94,7 +102,7 @@ class RawRunner(BaseRunner):
                 text = chunk.decode('utf-8', errors='replace')
                 chunks.append(text)
 
-                await on_event(StreamEvent(
+                await self._emit(on_event, StreamEvent(
                     type="content",
                     data=text,
                     msg_id=msg_id
@@ -104,13 +112,15 @@ class RawRunner(BaseRunner):
             assert self.process.stderr
             stderr = await self.process.stderr.read()
             if stderr:
-                logger.warning(f"CLI stderr: {stderr.decode()[:200]}")
+                err_text = stderr.decode('utf-8', errors='replace')
+                logger.warning(f"CLI stderr: {err_text[:200]}")
 
             # 等待进程结束
-            await self.process.wait()
+            exit_code = await self.process.wait()
+            logger.info(f"RawRunner process exited with code: {exit_code}")
 
             # 发送完成事件
-            await on_event(StreamEvent(
+            await self._emit(on_event, StreamEvent(
                 type="finish",
                 data="",
                 msg_id=msg_id,
@@ -119,7 +129,7 @@ class RawRunner(BaseRunner):
 
         except Exception as e:
             logger.exception("Raw runner error")
-            await on_event(StreamEvent(
+            await self._emit(on_event, StreamEvent(
                 type="error",
                 data=str(e),
                 msg_id=msg_id
@@ -136,7 +146,7 @@ class AcpRunner(BaseRunner):
                           on_event: Callable[[StreamEvent], None]) -> None:
         """使用 ACP 协议发送消息"""
 
-        await on_event(StreamEvent(type="start", data="", msg_id=msg_id))
+        await self._emit(on_event, StreamEvent(type="start", data="", msg_id=msg_id))
 
         try:
             # 启动 ACP 模式
@@ -179,7 +189,7 @@ class AcpRunner(BaseRunner):
 
         except Exception as e:
             logger.exception("ACP runner error")
-            await on_event(StreamEvent(
+            await self._emit(on_event, StreamEvent(
                 type="error",
                 data=str(e),
                 msg_id=msg_id
@@ -228,7 +238,7 @@ class AcpRunner(BaseRunner):
 
         finally:
             transport.close()
-            await on_event(StreamEvent(type="finish", data="", msg_id=msg_id))
+            await self._emit(on_event, StreamEvent(type="finish", data="", msg_id=msg_id))
 
     async def _process_acp_line(self, line: str, on_event: Callable, msg_id: str):
         """处理单行 ACP 消息"""
@@ -247,21 +257,21 @@ class AcpRunner(BaseRunner):
                 status = params.get("status", "")
 
                 if text:
-                    await on_event(StreamEvent(
+                    await self._emit(on_event, StreamEvent(
                         type="content",
                         data=text,
                         msg_id=data.get("id", msg_id)
                     ))
 
                 if status == "completed":
-                    await on_event(StreamEvent(
+                    await self._emit(on_event, StreamEvent(
                         type="finish",
                         data="",
                         msg_id=data.get("id", msg_id)
                     ))
 
             elif method == "tool_call":
-                await on_event(StreamEvent(
+                await self._emit(on_event, StreamEvent(
                     type="tool_call",
                     data=json.dumps(params),
                     msg_id=data.get("id", msg_id),
@@ -269,7 +279,7 @@ class AcpRunner(BaseRunner):
                 ))
 
             elif method == "error":
-                await on_event(StreamEvent(
+                await self._emit(on_event, StreamEvent(
                     type="error",
                     data=params.get("message", "Unknown error"),
                     msg_id=data.get("id", msg_id)
@@ -277,7 +287,7 @@ class AcpRunner(BaseRunner):
 
         except json.JSONDecodeError:
             # 可能是非 JSON 输出，作为内容处理
-            await on_event(StreamEvent(
+            await self._emit(on_event, StreamEvent(
                 type="content",
                 data=line,
                 msg_id=msg_id

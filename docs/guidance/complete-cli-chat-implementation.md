@@ -1872,7 +1872,1251 @@ export function useChat(): UseChatReturn {
 
 ---
 
-## 5. UI 组件细节
+## 5. UI 完全复刻 AionUi 设计
+
+### 5.1 布局架构（参考 AionUi ChatLayout）
+
+AionUi 采用三栏布局：侧边栏（对话列表）+ 主聊天区 + 工作区（可选）。对于 ABO 简化版本：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Header: CLI 选择器 + 连接状态 + 设置按钮                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Messages Area                                              │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ 🤖 Claude Code                        ● 在线         │   │
+│  │                                                     │   │
+│  │ 我来帮您分析这篇论文的创新点...                       │   │
+│  │                              10:23 ─────────────── │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ 帮我写一个Python脚本                          [你] │   │
+│  │ ─────────────────────────────────────────────────  │   │
+│  │ 10:24                                              │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│  SendBox（智能单行/多行切换）                                  │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ [附件] 输入消息...                           [发送] │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 5.2 SendBox 智能输入框
+
+**参考**: `AionUi/src/renderer/components/chat/sendbox.tsx`
+
+关键特性：
+- **自动高度调整**：单/多行智能切换（基于内容长度和换行符）
+- **粘贴上传**：支持图片/文件直接粘贴
+- **拖拽上传**：拖拽文件到输入框
+- **输入历史**：上下键浏览历史输入
+- **斜杠命令**：/ 触发命令菜单
+- **语音输入**：麦克风按钮（可选）
+
+```tsx
+// src/components/chat/SendBox.tsx
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { Send, Paperclip, Loader2, Mic } from 'lucide-react';
+
+interface SendBoxProps {
+  onSend: (message: string, files?: File[]) => void;
+  onStop?: () => void;
+  loading?: boolean;
+  disabled?: boolean;
+  placeholder?: string;
+}
+
+export function SendBox({ onSend, onStop, loading, disabled, placeholder }: SendBoxProps) {
+  const [input, setInput] = useState('');
+  const [isSingleLine, setIsSingleLine] = useState(true);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // 智能检测单行/多行
+  useEffect(() => {
+    if (input.includes('\n')) {
+      setIsSingleLine(false);
+      return;
+    }
+    // 超过800字符自动切换多行
+    if (input.length > 800) {
+      setIsSingleLine(false);
+      return;
+    }
+    // 测量文本宽度
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (ctx && textareaRef.current) {
+      const style = getComputedStyle(textareaRef.current);
+      ctx.font = `${style.fontSize} ${style.fontFamily}`;
+      const width = ctx.measureText(input).width;
+      const maxWidth = textareaRef.current.offsetWidth - 40;
+      if (width > maxWidth && input.length > 50) {
+        setIsSingleLine(false);
+      }
+    }
+  }, [input]);
+
+  // 自动调整高度
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 300)}px`;
+  }, [input, isSingleLine]);
+
+  // 键盘快捷键
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (input.trim() && !loading) {
+        onSend(input);
+        setInput('');
+        setIsSingleLine(true);
+      }
+    }
+    // Ctrl/Cmd + Enter 插入换行
+    if (e.key === 'Enter' && e.shiftKey) {
+      setIsSingleLine(false);
+    }
+  };
+
+  // 粘贴处理
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData.items;
+    const files: File[] = [];
+    for (const item of items) {
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      onSend(input, files);
+    }
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      className="border-t border-[var(--border)] bg-[var(--surface)] p-4"
+    >
+      <div className="mx-auto max-w-4xl relative">
+        {/* 拖拽上传遮罩 */}
+        <div
+          className="absolute inset-0 bg-[var(--primary)]/10 border-2 border-dashed border-[var(--primary)]
+                     rounded-xl pointer-events-none opacity-0 transition-opacity"
+          id="drag-overlay"
+        />
+
+        <div className="flex items-end gap-2 bg-[var(--bg)] rounded-xl border border-[var(--border)]
+                        focus-within:ring-2 focus-within:ring-[var(--primary)] transition-shadow p-2">
+          {/* 附件按钮 */}
+          <button
+            className="p-2 rounded-lg hover:bg-[var(--surface-2)] text-[var(--text-muted)]
+                       transition-colors shrink-0"
+            disabled={disabled}
+          >
+            <Paperclip className="w-5 h-5" />
+          </button>
+
+          {/* 输入区 */}
+          {isSingleLine ? (
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              placeholder={placeholder || '输入消息...'}
+              disabled={disabled}
+              className="flex-1 bg-transparent px-2 py-2 text-[var(--text)] outline-none"
+            />
+          ) : (
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              placeholder={placeholder || '输入消息... (Shift+Enter 换行)'}
+              disabled={disabled}
+              rows={1}
+              className="flex-1 bg-transparent px-2 py-2 text-[var(--text)] outline-none
+                         resize-none min-h-[44px] max-h-[300px]"
+            />
+          )}
+
+          {/* 语音/发送按钮 */}
+          {loading ? (
+            <button
+              onClick={onStop}
+              className="p-2 rounded-lg bg-red-500/10 text-red-500 hover:bg-red-500/20
+                         transition-colors shrink-0"
+            >
+              <div className="w-5 h-5 rounded-sm bg-current" />
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                if (input.trim()) {
+                  onSend(input);
+                  setInput('');
+                  setIsSingleLine(true);
+                }
+              }}
+              disabled={!input.trim() || disabled}
+              className="p-2 rounded-lg bg-[var(--primary)] text-white hover:bg-[var(--primary-dim)]
+                         disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
+            >
+              <Send className="w-5 h-5" />
+            </button>
+          )}
+        </div>
+
+        {/* 底部提示 */}
+        <div className="flex justify-between mt-2 text-xs text-[var(--text-muted)] px-2">
+          <span>按 Enter 发送，Shift+Enter 换行</span>
+          <span>{input.length} 字符</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+### 5.3 Message 消息组件
+
+**参考**: `AionUi/src/renderer/pages/conversation/Messages/`
+
+```tsx
+// src/components/chat/Message.tsx
+import { Bot, User, Copy, RefreshCw } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+
+interface MessageProps {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  status?: 'streaming' | 'completed' | 'error';
+  timestamp?: string;
+  onRegenerate?: () => void;
+}
+
+export function Message({
+  role,
+  content,
+  status,
+  timestamp,
+  onRegenerate
+}: MessageProps) {
+  const isUser = role === 'user';
+  const isStreaming = status === 'streaming';
+
+  return (
+    <div className={`flex gap-4 ${isUser ? 'flex-row-reverse' : ''}`}>
+      {/* 头像 */}
+      <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0
+                      ${isUser ? 'bg-[var(--primary)]' : 'bg-[var(--surface-2)]'}`}>
+        {isUser ? (
+          <User className="w-5 h-5 text-white" />
+        ) : (
+          <Bot className="w-5 h-5 text-[var(--primary)]" />
+        )}
+      </div>
+
+      {/* 内容 */}
+      <div className={`max-w-[85%] group ${isUser ? 'items-end' : 'items-start'} flex flex-col`}>
+        {/* 气泡 */}
+        <div className={`relative px-4 py-3 rounded-2xl
+                        ${isUser
+                          ? 'bg-[var(--primary)] text-white rounded-tr-sm'
+                          : 'bg-[var(--surface)] border border-[var(--border)] rounded-tl-sm'
+                        }`}>
+          {/* Markdown 内容 */}
+          <div className="prose prose-sm max-w-none dark:prose-invert">
+            <ReactMarkdown>{content}</ReactMarkdown>
+          </div>
+
+          {/* 流式光标 */}
+          {isStreaming && (
+            <span className="inline-block w-2 h-4 ml-1 bg-current animate-pulse">
+              ▋
+            </span>
+          )}
+        </div>
+
+        {/* 操作栏 */}
+        <div className={`flex items-center gap-2 mt-1 opacity-0 group-hover:opacity-100
+                        transition-opacity ${isUser ? 'flex-row-reverse' : ''}`}>
+          <span className="text-xs text-[var(--text-muted)]">
+            {timestamp}
+          </span>
+
+          {!isUser && (
+            <>
+              <button
+                onClick={() => navigator.clipboard.writeText(content)}
+                className="p-1 rounded hover:bg-[var(--surface-2)] text-[var(--text-muted)]"
+                title="复制"
+              >
+                <Copy className="w-3 h-3" />
+              </button>
+              {onRegenerate && (
+                <button
+                  onClick={onRegenerate}
+                  className="p-1 rounded hover:bg-[var(--surface-2)] text-[var(--text-muted)]"
+                  title="重新生成"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+### 5.4 连接状态指示器
+
+**关键**：显示 CLI 连接状态，支持断开重连
+
+```tsx
+// src/components/chat/ConnectionStatus.tsx
+import { useEffect, useState } from 'react';
+import { Wifi, WifiOff, AlertCircle, Loader2 } from 'lucide-react';
+
+type ConnectionState = 'connected' | 'connecting' | 'disconnected' | 'error';
+
+interface ConnectionStatusProps {
+  cliType: string;
+  cliName: string;
+  state: ConnectionState;
+  error?: string;
+  onReconnect: () => void;
+}
+
+export function ConnectionStatus({
+  cliName,
+  state,
+  error,
+  onReconnect
+}: ConnectionStatusProps) {
+  const configs = {
+    connected: {
+      icon: <Wifi className="w-4 h-4" />,
+      text: '已连接',
+      color: 'text-green-500',
+      bg: 'bg-green-500/10'
+    },
+    connecting: {
+      icon: <Loader2 className="w-4 h-4 animate-spin" />,
+      text: '连接中...',
+      color: 'text-yellow-500',
+      bg: 'bg-yellow-500/10'
+    },
+    disconnected: {
+      icon: <WifiOff className="w-4 h-4" />,
+      text: '已断开',
+      color: 'text-gray-400',
+      bg: 'bg-gray-500/10'
+    },
+    error: {
+      icon: <AlertCircle className="w-4 h-4" />,
+      text: error || '连接错误',
+      color: 'text-red-500',
+      bg: 'bg-red-500/10'
+    }
+  };
+
+  const config = configs[state];
+
+  return (
+    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full
+                    ${config.bg} ${config.color} text-sm`}>
+      {config.icon}
+      <span>{cliName} · {config.text}</span>
+      {(state === 'disconnected' || state === 'error') && (
+        <button
+          onClick={onReconnect}
+          className="ml-2 px-2 py-0.5 rounded bg-current/20 hover:bg-current/30
+                     text-xs font-medium transition-colors"
+        >
+          重连
+        </button>
+      )}
+    </div>
+  );
+}
+```
+
+---
+
+## 6. 后端中断检测与连接机制
+
+参考 AionUi 的 `AcpConnection` 设计，实现多层连接状态管理：
+
+### 6.1 连接状态机
+
+```
+┌──────────┐    connect()     ┌────────────┐
+│  IDLE    │ ────────────────>│ CONNECTING │
+└──────────┘                  └────────────┘
+                                     │
+        ┌────────────────────────────┼────────────────────────────┐
+        │                            │                            │
+        ▼                            ▼                            ▼
+┌──────────────┐            ┌──────────────┐            ┌──────────────┐
+│  CONNECTED   │<──────────>│  STREAMING   │            │    ERROR     │
+└──────────────┘            └──────────────┘            └──────────────┘
+        │                            │                            │
+        │ disconnect()               │ complete/error             │ retry
+        ▼                            ▼                            ▼
+┌──────────────┐            ┌──────────────┐            ┌──────────────┐
+│ DISCONNECTED │            │   COMPLETED  │───────────>│  RECONNECTING│
+└──────────────┘            └──────────────┘            └──────────────┘
+```
+
+### 6.2 增强版 ConnectionManager
+
+**文件**: `abo/routes/chat.py`
+
+```python
+import asyncio
+import logging
+from typing import Dict, Optional, Callable
+from dataclasses import dataclass, field
+from enum import Enum
+from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
+
+class ConnectionState(Enum):
+    IDLE = "idle"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    STREAMING = "streaming"
+    DISCONNECTED = "disconnected"
+    ERROR = "error"
+    RECONNECTING = "reconnecting"
+
+@dataclass
+class ConnectionInfo:
+    """连接信息"""
+    client_id: str
+    cli_type: str
+    session_id: str
+    state: ConnectionState = ConnectionState.IDLE
+    websocket: Optional[WebSocket] = None
+    runner: Optional[CliRunner] = None
+    last_ping: datetime = field(default_factory=datetime.now)
+    last_pong: datetime = field(default_factory=datetime.now)
+    reconnect_count: int = 0
+    error_message: Optional[str] = None
+    connected_at: Optional[datetime] = None
+
+    @property
+    def is_alive(self) -> bool:
+        """检查连接是否存活"""
+        if self.state in [ConnectionState.DISCONNECTED, ConnectionState.ERROR]:
+            return False
+        # 检查心跳超时（30秒）
+        if datetime.now() - self.last_pong > timedelta(seconds=30):
+            return False
+        return True
+
+    @property
+    def latency_ms(self) -> Optional[int]:
+        """计算延迟"""
+        if self.last_pong and self.last_ping:
+            delta = self.last_pong - self.last_ping
+            return int(delta.total_seconds() * 1000)
+        return None
+
+
+class EnhancedConnectionManager:
+    """增强版连接管理器 - 支持心跳、重连、状态监控"""
+
+    HEARTBEAT_INTERVAL = 15  # 心跳间隔（秒）
+    HEARTBEAT_TIMEOUT = 30   # 心跳超时（秒）
+    MAX_RECONNECT = 3        # 最大重连次数
+
+    def __init__(self):
+        self.connections: Dict[str, ConnectionInfo] = {}
+        self._heartbeat_tasks: Dict[str, asyncio.Task] = {}
+        self._state_callbacks: list[Callable] = []
+
+    def on_state_change(self, callback: Callable[[str, ConnectionState, ConnectionState], None]):
+        """注册状态变更回调 (client_id, old_state, new_state)"""
+        self._state_callbacks.append(callback)
+
+    def _set_state(self, client_id: str, new_state: ConnectionState, error: str = None):
+        """设置连接状态并触发回调"""
+        conn = self.connections.get(client_id)
+        if not conn:
+            return
+
+        old_state = conn.state
+        conn.state = new_state
+
+        if error:
+            conn.error_message = error
+
+        logger.info(f"Connection {client_id}: {old_state.value} -> {new_state.value}")
+
+        for callback in self._state_callbacks:
+            try:
+                callback(client_id, old_state, new_state)
+            except Exception as e:
+                logger.error(f"State callback error: {e}")
+
+    async def connect(self, websocket: WebSocket, cli_type: str, session_id: str) -> ConnectionInfo:
+        """建立新连接"""
+        client_id = f"{cli_type}:{session_id}"
+
+        # 如果已有连接，先断开
+        if client_id in self.connections:
+            await self.disconnect(client_id, "reconnecting")
+
+        await websocket.accept()
+
+        # 创建连接信息
+        conn = ConnectionInfo(
+            client_id=client_id,
+            cli_type=cli_type,
+            session_id=session_id,
+            websocket=websocket,
+            state=ConnectionState.CONNECTING
+        )
+        self.connections[client_id] = conn
+
+        try:
+            # 创建 Runner
+            cli_info = detector.get_cli_info(cli_type)
+            if cli_info:
+                conn.runner = RunnerFactory.create(cli_info, session_id, "")
+                conn.state = ConnectionState.CONNECTED
+                conn.connected_at = datetime.now()
+                conn.reconnect_count = 0
+
+                # 启动心跳
+                self._start_heartbeat(client_id)
+
+                self._set_state(client_id, ConnectionState.CONNECTED)
+                logger.info(f"Connection established: {client_id}")
+            else:
+                raise ValueError(f"CLI {cli_type} not found")
+
+        except Exception as e:
+            self._set_state(client_id, ConnectionState.ERROR, str(e))
+            raise
+
+        return conn
+
+    async def disconnect(self, client_id: str, reason: str = "unknown"):
+        """断开连接"""
+        conn = self.connections.pop(client_id, None)
+        if not conn:
+            return
+
+        logger.info(f"Disconnecting {client_id}: {reason}")
+
+        # 停止心跳
+        if client_id in self._heartbeat_tasks:
+            self._heartbeat_tasks[client_id].cancel()
+            del self._heartbeat_tasks[client_id]
+
+        # 关闭 runner
+        if conn.runner:
+            try:
+                await conn.runner.close()
+            except Exception as e:
+                logger.error(f"Error closing runner: {e}")
+
+        # 关闭 websocket
+        if conn.websocket:
+            try:
+                await conn.websocket.close()
+            except Exception:
+                pass
+
+        self._set_state(client_id, ConnectionState.DISCONNECTED)
+
+    def _start_heartbeat(self, client_id: str):
+        """启动心跳检测"""
+        task = asyncio.create_task(self._heartbeat_loop(client_id))
+        self._heartbeat_tasks[client_id] = task
+
+    async def _heartbeat_loop(self, client_id: str):
+        """心跳循环"""
+        try:
+            while True:
+                await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+
+                conn = self.connections.get(client_id)
+                if not conn or conn.state == ConnectionState.DISCONNECTED:
+                    break
+
+                # 发送 ping
+                conn.last_ping = datetime.now()
+                try:
+                    await conn.websocket.send_json({
+                        "type": "ping",
+                        "timestamp": conn.last_ping.isoformat()
+                    })
+                except Exception as e:
+                    logger.warning(f"Heartbeat send failed for {client_id}: {e}")
+                    await self._handle_connection_lost(client_id, "heartbeat_send_failed")
+                    break
+
+                # 检查上次 pong 是否超时
+                if datetime.now() - conn.last_pong > timedelta(seconds=self.HEARTBEAT_TIMEOUT):
+                    logger.warning(f"Heartbeat timeout for {client_id}")
+                    await self._handle_connection_lost(client_id, "heartbeat_timeout")
+                    break
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Heartbeat error for {client_id}: {e}")
+
+    async def _handle_connection_lost(self, client_id: str, reason: str):
+        """处理连接丢失"""
+        conn = self.connections.get(client_id)
+        if not conn:
+            return
+
+        if conn.reconnect_count < self.MAX_RECONNECT:
+            # 尝试重连
+            conn.reconnect_count += 1
+            self._set_state(client_id, ConnectionState.RECONNECTING)
+
+            logger.info(f"Attempting reconnect {conn.reconnect_count}/{self.MAX_RECONNECT} for {client_id}")
+
+            try:
+                # 重新创建 runner
+                if conn.runner:
+                    await conn.runner.close()
+
+                cli_info = detector.get_cli_info(conn.cli_type)
+                if cli_info:
+                    conn.runner = RunnerFactory.create(cli_info, conn.session_id, "")
+                    conn.last_pong = datetime.now()  # 重置心跳时间
+                    self._set_state(client_id, ConnectionState.CONNECTED)
+                    logger.info(f"Reconnected: {client_id}")
+
+                    # 通知客户端重连成功
+                    await self.send_json(client_id, {
+                        "type": "reconnected",
+                        "attempt": conn.reconnect_count
+                    })
+                    return
+
+            except Exception as e:
+                logger.error(f"Reconnect failed for {client_id}: {e}")
+
+        # 重连失败或超过最大次数
+        await self.disconnect(client_id, f"reconnect_failed_{reason}")
+
+        # 通知客户端
+        try:
+            await conn.websocket.send_json({
+                "type": "disconnected",
+                "reason": reason,
+                "reconnect_count": conn.reconnect_count
+            })
+        except:
+            pass
+
+    async def handle_pong(self, client_id: str, data: dict):
+        """处理客户端 pong 响应"""
+        conn = self.connections.get(client_id)
+        if conn:
+            conn.last_pong = datetime.now()
+            # 可选：计算延迟
+            latency = conn.latency_ms
+            logger.debug(f"Pong from {client_id}, latency: {latency}ms")
+
+    async def send_json(self, client_id: str, data: dict) -> bool:
+        """发送 JSON 消息"""
+        conn = self.connections.get(client_id)
+        if not conn or not conn.websocket:
+            return False
+
+        try:
+            await conn.websocket.send_json(data)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send to {client_id}: {e}")
+            await self._handle_connection_lost(client_id, "send_failed")
+            return False
+
+    def get_connection_status(self, client_id: str) -> Optional[dict]:
+        """获取连接状态"""
+        conn = self.connections.get(client_id)
+        if not conn:
+            return None
+
+        return {
+            "client_id": conn.client_id,
+            "cli_type": conn.cli_type,
+            "state": conn.state.value,
+            "is_alive": conn.is_alive,
+            "latency_ms": conn.latency_ms,
+            "reconnect_count": conn.reconnect_count,
+            "connected_at": conn.connected_at.isoformat() if conn.connected_at else None,
+            "error": conn.error_message
+        }
+
+    def get_all_status(self) -> list[dict]:
+        """获取所有连接状态"""
+        return [self.get_connection_status(cid) for cid in self.connections.keys()]
+
+
+# 全局实例
+manager = EnhancedConnectionManager()
+```
+
+### 6.3 WebSocket 路由（增强版）
+
+```python
+@router.websocket("/ws/{cli_type}/{session_id}")
+async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
+    """
+    增强版 WebSocket 聊天接口
+
+    客户端消息格式:
+    - { "type": "message", "content": "...", "conversation_id": "..." }
+    - { "type": "pong", "timestamp": "..." }
+    - { "type": "stop" }  # 停止生成
+
+    服务器消息格式:
+    - { "type": "ping", "timestamp": "..." }
+    - { "type": "connected" }
+    - { "type": "reconnected", "attempt": 1 }
+    - { "type": "disconnected", "reason": "..." }
+    - { "type": "start", "msg_id": "..." }
+    - { "type": "content", "data": "...", "msg_id": "..." }
+    - { "type": "tool_call", "data": {...}, "msg_id": "..." }
+    - { "type": "finish", "msg_id": "..." }
+    - { "type": "error", "data": "...", "msg_id": "..." }
+    """
+    client_id = f"{cli_type}:{session_id}"
+
+    try:
+        # 建立连接
+        conn = await manager.connect(websocket, cli_type, session_id)
+
+        # 发送连接成功消息
+        await websocket.send_json({
+            "type": "connected",
+            "client_id": client_id,
+            "timestamp": datetime.now().isoformat()
+        })
+
+        # 消息处理循环
+        while True:
+            try:
+                # 接收消息（设置超时以允许心跳检查）
+                data = await asyncio.wait_for(
+                    websocket.receive_json(),
+                    timeout=60.0
+                )
+
+                msg_type = data.get("type", "message")
+
+                if msg_type == "pong":
+                    # 心跳响应
+                    await manager.handle_pong(client_id, data)
+
+                elif msg_type == "stop":
+                    # 停止生成
+                    if conn.runner:
+                        await conn.runner.stop()
+                    await manager.send_json(client_id, {
+                        "type": "stopped",
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+                elif msg_type == "message":
+                    # 处理聊天消息
+                    await _handle_chat_message(conn, data, client_id)
+
+            except asyncio.TimeoutError:
+                # 超时检查连接状态
+                if not conn.is_alive:
+                    logger.warning(f"Connection {client_id} timed out")
+                    break
+
+    except WebSocketDisconnect:
+        logger.info(f"Client {client_id} disconnected")
+    except Exception as e:
+        logger.exception(f"WebSocket error for {client_id}")
+        await manager.send_json(client_id, {
+            "type": "error",
+            "data": f"Server error: {str(e)}"
+        })
+    finally:
+        await manager.disconnect(client_id, "cleanup")
+
+
+async def _handle_chat_message(conn: ConnectionInfo, data: dict, client_id: str):
+    """处理聊天消息"""
+    message = data.get("content", "")
+    conversation_id = data.get("conversation_id", "")
+
+    if not message or not conversation_id:
+        return
+
+    # 更新状态
+    conn.state = ConnectionState.STREAMING
+
+    # 保存用户消息
+    conversation_store.add_message(
+        conv_id=conversation_id,
+        role="user",
+        content=message
+    )
+
+    msg_id = str(uuid.uuid4())
+    full_response = []
+
+    async def on_event(event: StreamEvent):
+        # 转发到客户端
+        await manager.send_json(client_id, {
+            "type": event.type,
+            "data": event.data,
+            "msg_id": event.msg_id,
+            "metadata": event.metadata
+        })
+        if event.type == "content":
+            full_response.append(event.data)
+
+    try:
+        if conn.runner:
+            await conn.runner.send_message(message, msg_id, on_event)
+
+            # 保存完整响应
+            conversation_store.add_message(
+                conv_id=conversation_id,
+                role="assistant",
+                content="".join(full_response),
+                msg_id=msg_id
+            )
+
+    except Exception as e:
+        logger.exception("Message handling error")
+        await manager.send_json(client_id, {
+            "type": "error",
+            "data": str(e),
+            "msg_id": msg_id
+        })
+    finally:
+        conn.state = ConnectionState.CONNECTED
+```
+
+### 6.4 HTTP 状态查询 API
+
+```python
+@router.get("/connections/status")
+async def get_all_connection_status():
+    """获取所有连接状态（用于前端状态同步）"""
+    return {
+        "connections": manager.get_all_status(),
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+@router.get("/connections/{client_id}/status")
+async def get_connection_status(client_id: str):
+    """获取单个连接状态"""
+    status = manager.get_connection_status(client_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    return status
+
+
+@router.post("/connections/{client_id}/reconnect")
+async def force_reconnect(client_id: str):
+    """强制重连"""
+    conn = manager.connections.get(client_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    await manager._handle_connection_lost(client_id, "forced")
+    return {"success": True, "message": "Reconnect initiated"}
+```
+
+### 6.5 前端连接管理 Hook
+
+```typescript
+// src/hooks/useConnection.ts
+import { useState, useEffect, useRef, useCallback } from 'react';
+
+export type ConnectionState =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'streaming'
+  | 'disconnected'
+  | 'error'
+  | 'reconnecting';
+
+interface ConnectionStatus {
+  clientId: string;
+  cliType: string;
+  state: ConnectionState;
+  isAlive: boolean;
+  latencyMs?: number;
+  reconnectCount: number;
+  connectedAt?: string;
+  error?: string;
+}
+
+interface UseConnectionOptions {
+  cliType: string;
+  sessionId: string;
+  onStateChange?: (state: ConnectionState, prevState: ConnectionState) => void;
+  onMessage?: (data: unknown) => void;
+  onError?: (error: string) => void;
+  autoReconnect?: boolean;
+}
+
+export function useConnection({
+  cliType,
+  sessionId,
+  onStateChange,
+  onMessage,
+  onError,
+  autoReconnect = true
+}: UseConnectionOptions) {
+  const [state, setState] = useState<ConnectionState>('idle');
+  const [status, setStatus] = useState<ConnectionStatus | null>(null);
+  const [latency, setLatency] = useState<number | null>(null);
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectCountRef = useRef(0);
+  const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const stateRef = useRef<ConnectionState>('idle');
+
+  // 更新状态并触发回调
+  const updateState = useCallback((newState: ConnectionState) => {
+    const prevState = stateRef.current;
+    stateRef.current = newState;
+    setState(newState);
+    onStateChange?.(newState, prevState);
+  }, [onStateChange]);
+
+  // 连接 WebSocket
+  const connect = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    updateState('connecting');
+
+    const ws = new WebSocket(
+      `ws://127.0.0.1:8765/api/chat/ws/${cliType}/${sessionId}`
+    );
+
+    ws.onopen = () => {
+      updateState('connected');
+      reconnectCountRef.current = 0;
+
+      // 启动客户端心跳
+      pingIntervalRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'pong',
+            timestamp: new Date().toISOString()
+          }));
+        }
+      }, 15000);
+    };
+
+    ws.onclose = (event) => {
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+      }
+
+      if (!autoReconnect || reconnectCountRef.current >= 3) {
+        updateState('disconnected');
+        return;
+      }
+
+      // 自动重连
+      updateState('reconnecting');
+      reconnectCountRef.current++;
+
+      setTimeout(() => {
+        connect();
+      }, 2000 * reconnectCountRef.current); // 指数退避
+    };
+
+    ws.onerror = (error) => {
+      updateState('error');
+      onError?.('WebSocket error');
+    };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      switch (data.type) {
+        case 'ping':
+          // 响应服务器心跳
+          ws.send(JSON.stringify({
+            type: 'pong',
+            timestamp: data.timestamp
+          }));
+          break;
+
+        case 'connected':
+          updateState('connected');
+          break;
+
+        case 'reconnected':
+          updateState('connected');
+          break;
+
+        case 'disconnected':
+          updateState('disconnected');
+          break;
+
+        case 'start':
+          updateState('streaming');
+          onMessage?.(data);
+          break;
+
+        case 'finish':
+        case 'error':
+          updateState('connected');
+          onMessage?.(data);
+          break;
+
+        default:
+          onMessage?.(data);
+      }
+    };
+
+    wsRef.current = ws;
+  }, [cliType, sessionId, autoReconnect, onMessage, onError, updateState]);
+
+  // 断开连接
+  const disconnect = useCallback(() => {
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+    }
+    wsRef.current?.close();
+    updateState('disconnected');
+  }, [updateState]);
+
+  // 发送消息
+  const send = useCallback((message: string, conversationId: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'message',
+        content: message,
+        conversation_id: conversationId
+      }));
+      return true;
+    }
+    return false;
+  }, []);
+
+  // 停止生成
+  const stop = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'stop' }));
+    }
+  }, []);
+
+  // 获取状态
+  const fetchStatus = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:8765/api/chat/connections/${cliType}:${sessionId}/status`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setStatus(data);
+        if (data.latency_ms) {
+          setLatency(data.latency_ms);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to fetch connection status:', e);
+    }
+  }, [cliType, sessionId]);
+
+  // 组件卸载时清理
+  useEffect(() => {
+    return () => {
+      disconnect();
+    };
+  }, [disconnect]);
+
+  return {
+    state,
+    status,
+    latency,
+    connect,
+    disconnect,
+    send,
+    stop,
+    fetchStatus,
+    isConnected: state === 'connected' || state === 'streaming',
+    isStreaming: state === 'streaming',
+    reconnectCount: reconnectCountRef.current
+  };
+}
+```
+
+### 6.6 CLI 进程健康检查
+
+**文件**: `abo/cli/health.py`
+
+```python
+"""CLI 进程健康检查"""
+
+import asyncio
+import psutil
+from typing import Optional
+from dataclasses import dataclass
+from datetime import datetime
+
+
+@dataclass
+class ProcessHealth:
+    pid: int
+    status: str  # running, sleeping, zombie, dead
+    cpu_percent: float
+    memory_mb: float
+    create_time: datetime
+    is_responsive: bool  # 是否能响应信号
+
+
+class CliHealthMonitor:
+    """CLI 进程健康监控"""
+
+    def __init__(self):
+        self._monitored: dict[str, int] = {}  # session_id -> pid
+
+    def register(self, session_id: str, process: asyncio.subprocess.Process):
+        """注册进程监控"""
+        if process.pid:
+            self._monitored[session_id] = process.pid
+
+    def unregister(self, session_id: str):
+        """取消监控"""
+        self._monitored.pop(session_id, None)
+
+    def check_health(self, session_id: str) -> Optional[ProcessHealth]:
+        """检查进程健康状态"""
+        pid = self._monitored.get(session_id)
+        if not pid:
+            return None
+
+        try:
+            proc = psutil.Process(pid)
+
+            # 检查进程是否响应
+            is_responsive = True
+            try:
+                proc.status()
+            except psutil.NoSuchProcess:
+                return None
+
+            return ProcessHealth(
+                pid=pid,
+                status=proc.status(),
+                cpu_percent=proc.cpu_percent(interval=0.1),
+                memory_mb=proc.memory_info().rss / 1024 / 1024,
+                create_time=datetime.fromtimestamp(proc.create_time()),
+                is_responsive=is_responsive
+            )
+
+        except psutil.NoSuchProcess:
+            self.unregister(session_id)
+            return None
+        except Exception as e:
+            print(f"Health check error: {e}")
+            return None
+
+    def is_healthy(self, session_id: str) -> bool:
+        """快速健康检查"""
+        health = self.check_health(session_id)
+        if not health:
+            return False
+
+        # 进程僵死或无响应视为不健康
+        if health.status in ['zombie', 'dead']:
+            return False
+        if not health.is_responsive:
+            return False
+
+        return True
+
+
+# 全局实例
+health_monitor = CliHealthMonitor()
+```
+
+### 6.7 状态同步与恢复
+
+前端在页面刷新后需要恢复连接状态：
+
+```typescript
+// src/hooks/useConnectionRecovery.ts
+import { useEffect, useState } from 'react';
+import { useConnection } from './useConnection';
+
+export function useConnectionRecovery(conversationId: string, cliType: string) {
+  const [isRecovering, setIsRecovering] = useState(true);
+
+  const {
+    state,
+    connect,
+    status,
+    fetchStatus
+  } = useConnection({
+    cliType,
+    sessionId: conversationId,
+    autoReconnect: true
+  });
+
+  // 页面加载时尝试恢复连接
+  useEffect(() => {
+    const recover = async () => {
+      // 1. 查询后端是否有活跃连接
+      await fetchStatus();
+
+      // 2. 如果有连接，尝试重新连接
+      if (status?.isAlive) {
+        connect();
+      }
+
+      setIsRecovering(false);
+    };
+
+    recover();
+  }, []);
+
+  return {
+    isRecovering,
+    state,
+    status,
+    connect
+  };
+}
+```
 
 ### 5.1 主聊天面板
 
@@ -2426,4 +3670,196 @@ src/
 
 ---
 
-*完整实现版本 1.0*
+## 8. 更新后的实施检查清单
+
+### Phase 1: 后端基础 ✅
+- [ ] 扩展 `abo/cli/runner.py` - 添加 `CliRunner` 多协议支持
+- [ ] 创建 `abo/cli/detector.py` - CLI 自动检测
+- [ ] 创建 `abo/store/conversations.py` - SQLite 对话存储
+- [ ] 创建 `abo/routes/chat.py` - WebSocket + HTTP API
+- [ ] 在 `abo/main.py` 注册路由
+
+### Phase 2: 后端增强（新增）⚠️
+- [ ] **连接状态机** - 实现 `ConnectionState` 枚举和转换
+- [ ] **心跳机制** - 15秒间隔 ping/pong
+- [ ] **自动重连** - 最多3次重连，指数退避
+- [ ] **进程健康检查** - `CliHealthMonitor` 监控子进程
+- [ ] **状态查询 API** - `/connections/status` 端点
+- [ ] **错误恢复** - 连接断开时的优雅降级
+
+### Phase 3: 前端基础 ✅
+- [ ] `src/types/chat.ts` - TypeScript 类型定义
+- [ ] `src/api/chat.ts` - API 客户端
+- [ ] `src/hooks/useChat.ts` - 基础 WebSocket Hook
+
+### Phase 4: 前端增强（新增）⚠️
+- [ ] **SendBox 智能输入框** - 单/多行自动切换
+- [ ] **Message 组件** - Markdown 渲染 + 代码高亮
+- [ ] **ConnectionStatus 组件** - 实时连接状态指示
+- [ ] **useConnection Hook** - 增强版连接管理（支持重连）
+- [ ] **心跳保活** - 客户端心跳维持
+- [ ] **连接恢复** - 页面刷新后状态恢复
+
+### Phase 5: 集成测试
+- [ ] CLI 检测 API 返回正确结果
+- [ ] WebSocket 连接建立成功
+- [ ] 心跳消息正常收发（15秒间隔）
+- [ ] 断网后自动重连（最多3次）
+- [ ] 消息流式显示无卡顿
+- [ ] 连接状态 UI 实时更新
+
+---
+
+## 9. 调试指南（详细版）
+
+### 9.1 后端调试
+
+#### 启用详细日志
+
+```python
+# abo/main.py
+import logging
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+# 特定模块日志
+logging.getLogger('abo.cli.runner').setLevel(logging.DEBUG)
+logging.getLogger('abo.routes.chat').setLevel(logging.DEBUG)
+```
+
+#### WebSocket 测试命令
+
+```bash
+# 1. 基础连接测试
+wscat -c ws://127.0.0.1:8765/api/chat/ws/claude/test-session
+
+# 2. 心跳测试（发送 pong 响应）
+> {"type": "pong", "timestamp": "2024-01-01T00:00:00Z"}
+
+# 3. 完整对话测试
+> {"type": "message", "content": "Hello", "conversation_id": "test-123"}
+
+# 4. 停止生成测试
+> {"type": "stop"}
+```
+
+#### 进程监控
+
+```bash
+# 查看 Python 子进程
+ps aux | grep "claude --print"
+ps aux | grep "gemini --experimental-acp"
+
+# 监控进程资源
+watch -n 1 'ps -o pid,cpu,mem,comm -p $(pgrep -f "claude")'
+```
+
+### 9.2 前端调试
+
+#### WebSocket 监控
+
+```typescript
+// 浏览器控制台
+const ws = new WebSocket('ws://127.0.0.1:8765/api/chat/ws/claude/test');
+
+// 监控所有消息
+ws.addEventListener('message', (e) => {
+  console.log('[WS Receive]', JSON.parse(e.data));
+});
+
+ws.addEventListener('send', (e) => {
+  console.log('[WS Send]', e);
+});
+
+// 模拟断网测试重连
+ws.close();
+```
+
+#### 连接状态检查
+
+```typescript
+// 检查当前连接状态
+fetch('http://127.0.0.1:8765/api/chat/connections/status')
+  .then(r => r.json())
+  .then(console.log);
+
+// 强制重连
+fetch('http://127.0.0.1:8765/api/chat/connections/claude:test/reconnect', {
+  method: 'POST'
+});
+```
+
+#### React DevTools 检查点
+
+1. **useConnection Hook 状态**：
+   - `state`: 当前连接状态
+   - `latency`: 延迟（ms）
+   - `reconnectCount`: 重连次数
+
+2. **ChatPanel 组件状态**：
+   - `messages`: 消息数组
+   - `isStreaming`: 是否正在生成
+
+### 9.3 常见问题速查
+
+| 现象 | 检查项 | 命令/方法 |
+|-----|-------|----------|
+| CLI 检测为空 | shell 环境 | `echo $PATH`, `which claude` |
+| WebSocket 连不上 | 端口占用 | `lsof -i :8765` |
+| 心跳超时 | 防火墙 | 检查 ws 连接是否被代理 |
+| 消息不显示 | 事件类型 | 浏览器 console 查看 receive |
+| 重连失败 | 后端状态 | 查看后端进程是否存活 |
+| 流式卡顿 | 缓冲区 | 检查 runner 的 read buffer |
+
+---
+
+## 10. 关键设计决策
+
+### 10.1 为什么选择 WebSocket 而非 SSE？
+
+| 特性 | WebSocket | SSE |
+|-----|-----------|-----|
+| 双向通信 | ✅ | ❌（需要额外 HTTP） |
+| 心跳检测 | ✅ 原生支持 | ⚠️ 需额外实现 |
+| 重连机制 | ✅ 客户端控制 | ⚠️ 浏览器自动 |
+| 工具调用 | ✅ 双向 | ❌ 复杂 |
+| 断线检测 | ✅ 快速 | ⚠️ 延迟高 |
+
+### 10.2 心跳机制设计
+
+```
+客户端 ←────────────→ 服务器
+        ←─ ping ─
+        ─ pong ─→
+        （15秒间隔）
+
+超时判定：30秒无 pong 响应 = 断开
+```
+
+### 10.3 重连策略
+
+```
+第1次断开 ──→ 等待 2秒 ──→ 重连
+第2次断开 ──→ 等待 4秒 ──→ 重连
+第3次断开 ──→ 等待 6秒 ──→ 重连
+第4次断开 ──→ 放弃，显示"连接失败"
+```
+
+### 10.4 与 AionUi 的差异
+
+| 功能 | AionUi | ABO 简化版 |
+|-----|--------|-----------|
+| 传输协议 | ACP JSON-RPC | 简化 StreamEvent |
+| 连接管理 | AcpConnection | EnhancedConnectionManager |
+| 心跳 | 应用层 ping | WebSocket ping/pong |
+| 重连 | 自动 + 手动 | 自动（3次） |
+| 多 CLI | ✅ | ✅ |
+| 工具调用 | ✅ 完整 | ✅ 简化版 |
+| 文件上传 | ✅ | ✅ |
+
+---
+
+*完整实现版本 2.0 - 包含 UI 复刻和连接中断检测*

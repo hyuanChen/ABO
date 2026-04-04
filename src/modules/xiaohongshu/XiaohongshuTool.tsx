@@ -1,312 +1,856 @@
-import { useState } from 'react';
-import { xiaohongshuSearch, xiaohongshuComments, xiaohongshuTrends } from '../../api/xiaohongshu';
-import type { SearchResponse, CommentsResponse, TrendsResponse } from '../../api/xiaohongshu';
-import { Search, MessageCircle, TrendingUp, Heart, Loader2, ExternalLink } from 'lucide-react';
+import { useState } from "react";
+import {
+  Search,
+  MessageCircle,
+  TrendingUp,
+  Heart,
+  ExternalLink,
+  Filter,
+  Hash,
+  Lightbulb,
+  Users,
+  Zap,
+  ChevronDown,
+  ChevronUp,
+  BookOpen,
+} from "lucide-react";
+import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
+import { api } from "../../core/api";
+import { useToast } from "../../components/Toast";
 
-type TabType = 'search' | 'comments' | 'trends';
+interface XHSNote {
+  id: string;
+  title: string;
+  content: string;
+  author: string;
+  likes: number;
+  collects: number;
+  comments_count: number;
+  url: string;
+  published_at: string | null;
+}
+
+interface XHSComment {
+  id: string;
+  author: string;
+  content: string;
+  likes: number;
+  is_top: boolean;
+}
+
+interface XHSTrendsAnalysis {
+  hot_topics: string[];
+  trending_tags: { tag: string; frequency: number }[];
+  content_patterns: string[];
+  audience_insights: string[];
+  engagement_factors: string[];
+  summary: string;
+}
+
+interface SearchResponse {
+  keyword: string;
+  total_found: number;
+  notes: XHSNote[];
+}
+
+interface CommentsResponse {
+  note_id: string;
+  total_comments: number;
+  sort_by: string;
+  comments: XHSComment[];
+}
+
+interface TrendsResponse {
+  keyword: string;
+  analysis: XHSTrendsAnalysis;
+  based_on_notes: number;
+}
+
+type TabType = "search" | "trends" | "comments";
 
 export function XiaohongshuTool() {
-  const [activeTab, setActiveTab] = useState<TabType>('search');
-  const [keyword, setKeyword] = useState('');
-  const [noteId, setNoteId] = useState('');
+  const [activeTab, setActiveTab] = useState<TabType>("search");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const toast = useToast();
 
   // Search state
-  const [searchResult, setSearchResult] = useState<SearchResponse | null>(null);
-  const [maxResults, _setMaxResults] = useState(20);
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const [sortBy, setSortBy] = useState<"likes" | "time">("likes");
   const [minLikes, setMinLikes] = useState(100);
-  const [sortBy, setSortBy] = useState<'likes' | 'time'>('likes');
-
-  // Comments state
-  const [commentsResult, setCommentsResult] = useState<CommentsResponse | null>(null);
+  const [searchResult, setSearchResult] = useState<SearchResponse | null>(null);
+  const [expandedNotes, setExpandedNotes] = useState<Set<string>>(new Set());
 
   // Trends state
+  const [trendsKeyword, setTrendsKeyword] = useState("");
   const [trendsResult, setTrendsResult] = useState<TrendsResponse | null>(null);
 
+  // Comments state
+  const [noteId, setNoteId] = useState("");
+  const [commentsResult, setCommentsResult] = useState<CommentsResponse | null>(null);
+  const [expandedComments, setExpandedComments] = useState<Set<string>>(new Set());
+
   const handleSearch = async () => {
-    if (!keyword.trim()) return;
+    if (!searchKeyword.trim()) {
+      toast.error("请输入关键词");
+      return;
+    }
     setLoading(true);
-    setError('');
     try {
-      const result = await xiaohongshuSearch({
-        keyword: keyword.trim(),
-        max_results: maxResults,
+      const result = await api.post<SearchResponse>("/api/tools/xiaohongshu/search", {
+        keyword: searchKeyword.trim(),
+        max_results: 20,
         min_likes: minLikes,
         sort_by: sortBy,
       });
       setSearchResult(result);
+      toast.success(`找到 ${result.total_found} 条结果`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Search failed');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleComments = async () => {
-    if (!noteId.trim()) return;
-    setLoading(true);
-    setError('');
-    try {
-      const result = await xiaohongshuComments({
-        note_id: noteId.trim(),
-        max_comments: 50,
-        sort_by: 'likes',
-      });
-      setCommentsResult(result);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Fetch comments failed');
+      console.error("Search failed:", e);
+      toast.error("搜索失败");
     } finally {
       setLoading(false);
     }
   };
 
   const handleTrends = async () => {
-    if (!keyword.trim()) return;
+    if (!trendsKeyword.trim()) {
+      toast.error("请输入关键词");
+      return;
+    }
     setLoading(true);
-    setError('');
     try {
-      const result = await xiaohongshuTrends({
-        keyword: keyword.trim(),
+      const result = await api.post<TrendsResponse>("/api/tools/xiaohongshu/trends", {
+        keyword: trendsKeyword.trim(),
       });
       setTrendsResult(result);
+      toast.success("趋势分析完成");
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Analyze trends failed');
+      console.error("Trends analysis failed:", e);
+      toast.error("分析失败");
     } finally {
       setLoading(false);
     }
   };
 
-  return (
-    <div className="flex h-full flex-col bg-[var(--bg)]">
-      {/* Header */}
-      <div className="border-b border-[var(--border)] px-6 py-4">
-        <h1 className="text-xl font-semibold text-[var(--text)]">小红书分析工具</h1>
-        <p className="mt-1 text-sm text-[var(--text-muted)]">搜索高赞内容、分析趋势、获取评论</p>
-      </div>
+  const handleComments = async () => {
+    if (!noteId.trim()) {
+      toast.error("请输入笔记 ID");
+      return;
+    }
+    setLoading(true);
+    try {
+      const result = await api.post<CommentsResponse>("/api/tools/xiaohongshu/comments", {
+        note_id: noteId.trim(),
+        max_comments: 50,
+        sort_by: "likes",
+      });
+      setCommentsResult(result);
+      toast.success(`获取 ${result.total_comments} 条评论`);
+    } catch (e) {
+      console.error("Fetch comments failed:", e);
+      toast.error("获取评论失败");
+    } finally {
+      setLoading(false);
+    }
+  };
 
-      {/* Tabs */}
-      <div className="flex border-b border-[var(--border)]">
-        {[
-          { id: 'search', label: '搜索笔记', icon: Search },
-          { id: 'trends', label: '趋势分析', icon: TrendingUp },
-          { id: 'comments', label: '评论获取', icon: MessageCircle },
-        ].map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setActiveTab(id as TabType)}
-            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium transition-colors
-              ${activeTab === id
-                ? 'border-b-2 border-[var(--primary)] text-[var(--primary)]'
-                : 'text-[var(--text-muted)] hover:text-[var(--text)]'
-              }`}
-          >
-            <Icon className="h-4 w-4" />
-            {label}
-          </button>
-        ))}
-      </div>
+  const toggleNoteExpand = (noteId: string) => {
+    setExpandedNotes((prev) => {
+      const next = new Set(prev);
+      if (next.has(noteId)) next.delete(noteId);
+      else next.add(noteId);
+      return next;
+    });
+  };
 
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto p-6">
-        {error && (
-          <div className="mb-4 rounded-lg bg-red-50 p-4 text-red-600 dark:bg-red-900/20">
-            {error}
+  const renderTabs = () => (
+    <div
+      style={{
+        display: "flex",
+        gap: "8px",
+        padding: "4px",
+        background: "var(--bg-hover)",
+        borderRadius: "var(--radius-lg)",
+        width: "fit-content",
+      }}
+    >
+      {[
+        { id: "search" as const, label: "搜索笔记", icon: Search },
+        { id: "trends" as const, label: "趋势分析", icon: TrendingUp },
+        { id: "comments" as const, label: "评论获取", icon: MessageCircle },
+      ].map(({ id, label, icon: Icon }) => (
+        <button
+          key={id}
+          onClick={() => setActiveTab(id)}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            padding: "10px 20px",
+            borderRadius: "var(--radius-md)",
+            border: "none",
+            background: activeTab === id ? "var(--bg-card)" : "transparent",
+            color: activeTab === id ? "var(--color-primary)" : "var(--text-muted)",
+            fontSize: "0.875rem",
+            fontWeight: 600,
+            cursor: "pointer",
+            transition: "all 0.2s ease",
+            boxShadow: activeTab === id ? "var(--shadow-soft)" : "none",
+          }}
+        >
+          <Icon style={{ width: "16px", height: "16px" }} />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+
+  const renderSearchTab = () => (
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      {/* Search Input Area */}
+      <Card title="搜索条件" icon={<Filter style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          <div style={{ display: "flex", gap: "12px" }}>
+            <input
+              type="text"
+              value={searchKeyword}
+              onChange={(e) => setSearchKeyword(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+              placeholder="输入关键词搜索小红书笔记..."
+              style={{
+                flex: 1,
+                padding: "12px 16px",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-card)",
+                color: "var(--text-main)",
+                fontSize: "0.9375rem",
+                outline: "none",
+              }}
+            />
+            <button
+              onClick={handleSearch}
+              disabled={loading || !searchKeyword.trim()}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "12px 24px",
+                borderRadius: "var(--radius-md)",
+                border: "none",
+                background: loading ? "var(--bg-hover)" : "var(--color-primary)",
+                color: "white",
+                fontSize: "0.9375rem",
+                fontWeight: 600,
+                cursor: loading || !searchKeyword.trim() ? "not-allowed" : "pointer",
+                opacity: loading || !searchKeyword.trim() ? 0.6 : 1,
+                transition: "all 0.2s ease",
+              }}
+            >
+              {loading ? (
+                <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <span className="animate-spin">⟳</span>
+                  搜索中...
+                </span>
+              ) : (
+                <>
+                  <Search style={{ width: "16px", height: "16px" }} />
+                  搜索
+                </>
+              )}
+            </button>
           </div>
-        )}
 
-        {/* Search Tab */}
-        {activeTab === 'search' && (
-          <div className="space-y-6">
-            <div className="flex gap-4">
-              <input
-                type="text"
-                value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
-                placeholder="输入关键词搜索..."
-                className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-4 py-2 text-[var(--text)] outline-none focus:ring-2 focus:ring-[var(--primary)]"
-                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-              />
+          <div style={{ display: "flex", gap: "16px", alignItems: "center" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>排序：</span>
               <select
                 value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as 'likes' | 'time')}
-                className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-4 py-2 text-[var(--text)]"
+                onChange={(e) => setSortBy(e.target.value as "likes" | "time")}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: "var(--text-main)",
+                  fontSize: "0.875rem",
+                  cursor: "pointer",
+                }}
               >
-                <option value="likes">按赞排序</option>
-                <option value="time">按时间</option>
+                <option value="likes">按点赞数</option>
+                <option value="time">按发布时间</option>
               </select>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <Heart style={{ width: "14px", height: "14px", color: "var(--color-danger)" }} />
+              <span style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>最低点赞：</span>
               <input
                 type="number"
                 value={minLikes}
                 onChange={(e) => setMinLikes(Number(e.target.value))}
-                placeholder="最小点赞"
-                className="w-24 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-4 py-2 text-[var(--text)]"
+                min={0}
+                style={{
+                  width: "80px",
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: "var(--text-main)",
+                  fontSize: "0.875rem",
+                }}
               />
-              <button
-                onClick={handleSearch}
-                disabled={loading || !keyword.trim()}
-                className="flex items-center gap-2 rounded-lg bg-[var(--primary)] px-6 py-2 text-white hover:bg-[var(--primary-dim)] disabled:opacity-50"
-              >
-                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-                搜索
-              </button>
             </div>
-
-            {searchResult && (
-              <div className="space-y-4">
-                <p className="text-sm text-[var(--text-muted)]">
-                  找到 {searchResult.total_found} 条结果
-                </p>
-                {searchResult.notes.map((note) => (
-                  <div key={note.id} className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4">
-                    <h3 className="font-medium text-[var(--text)]">{note.title}</h3>
-                    <p className="mt-2 line-clamp-2 text-sm text-[var(--text-muted)]">{note.content}</p>
-                    <div className="mt-3 flex items-center gap-4 text-xs text-[var(--text-muted)]">
-                      <span>作者: {note.author}</span>
-                      <span className="flex items-center gap-1">
-                        <Heart className="h-3 w-3" /> {note.likes}
-                      </span>
-                      <span>收藏: {note.collects}</span>
-                      <span>评论: {note.comments_count}</span>
-                      {note.published_at && (
-                        <span>{new Date(note.published_at).toLocaleDateString()}</span>
-                      )}
-                      <a
-                        href={note.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="ml-auto flex items-center gap-1 text-[var(--primary)] hover:underline"
-                      >
-                        <ExternalLink className="h-3 w-3" /> 查看
-                      </a>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
-        )}
+        </div>
+      </Card>
 
-        {/* Trends Tab */}
-        {activeTab === 'trends' && (
-          <div className="space-y-6">
-            <div className="flex gap-4">
-              <input
-                type="text"
-                value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
-                placeholder="输入关键词分析趋势..."
-                className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-4 py-2 text-[var(--text)] outline-none focus:ring-2 focus:ring-[var(--primary)]"
-                onKeyDown={(e) => e.key === 'Enter' && handleTrends()}
-              />
-              <button
-                onClick={handleTrends}
-                disabled={loading || !keyword.trim()}
-                className="flex items-center gap-2 rounded-lg bg-[var(--primary)] px-6 py-2 text-white hover:bg-[var(--primary-dim)] disabled:opacity-50"
+      {/* Search Results */}
+      {searchResult && (
+        <Card
+          title={`搜索结果 (${searchResult.total_found})`}
+          icon={<BookOpen style={{ width: "18px", height: "18px" }} />}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            {searchResult.notes.map((note) => (
+              <div
+                key={note.id}
+                style={{
+                  padding: "16px",
+                  borderRadius: "var(--radius-lg)",
+                  background: "var(--bg-hover)",
+                  border: "1px solid var(--border-light)",
+                }}
               >
-                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <TrendingUp className="h-4 w-4" />}
-                分析
-              </button>
-            </div>
-
-            {trendsResult && (
-              <div className="space-y-6">
-                <div className="rounded-lg bg-[var(--surface)] p-4">
-                  <h3 className="font-medium text-[var(--text)]">趋势总结</h3>
-                  <p className="mt-2 text-sm text-[var(--text-muted)]">{trendsResult.analysis.summary}</p>
-                  <p className="mt-2 text-xs text-[var(--text-muted)]">基于 {trendsResult.based_on_notes} 条笔记分析</p>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <h4
+                    style={{
+                      fontSize: "0.9375rem",
+                      fontWeight: 600,
+                      color: "var(--text-main)",
+                      marginBottom: "8px",
+                      flex: 1,
+                    }}
+                  >
+                    {note.title}
+                  </h4>
+                  <a
+                    href={note.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      padding: "4px 8px",
+                      borderRadius: "var(--radius-sm)",
+                      background: "var(--color-primary)20",
+                      color: "var(--color-primary)",
+                      fontSize: "0.75rem",
+                      textDecoration: "none",
+                      marginLeft: "8px",
+                    }}
+                  >
+                    <ExternalLink style={{ width: "12px", height: "12px" }} />
+                    查看
+                  </a>
                 </div>
 
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4">
-                    <h4 className="font-medium text-[var(--text)]">热门话题</h4>
-                    <ul className="mt-2 space-y-1">
-                      {trendsResult.analysis.hot_topics.map((topic, i) => (
-                        <li key={i} className="text-sm text-[var(--text-muted)]">{topic}</li>
-                      ))}
-                    </ul>
-                  </div>
-
-                  <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4">
-                    <h4 className="font-medium text-[var(--text)]">热门标签</h4>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {trendsResult.analysis.trending_tags.map((tag, i) => (
-                        <span key={i} className="rounded-full bg-[var(--surface-2)] px-3 py-1 text-xs text-[var(--text-muted)]">
-                          {tag.tag} ({tag.frequency})
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4">
-                    <h4 className="font-medium text-[var(--text)]">内容模式</h4>
-                    <ul className="mt-2 space-y-1">
-                      {trendsResult.analysis.content_patterns.map((pattern, i) => (
-                        <li key={i} className="text-sm text-[var(--text-muted)]">{pattern}</li>
-                      ))}
-                    </ul>
-                  </div>
-
-                  <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4">
-                    <h4 className="font-medium text-[var(--text)]">高互动因素</h4>
-                    <ul className="mt-2 space-y-1">
-                      {trendsResult.analysis.engagement_factors.map((factor, i) => (
-                        <li key={i} className="text-sm text-[var(--text-muted)]">{factor}</li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Comments Tab */}
-        {activeTab === 'comments' && (
-          <div className="space-y-6">
-            <div className="flex gap-4">
-              <input
-                type="text"
-                value={noteId}
-                onChange={(e) => setNoteId(e.target.value)}
-                placeholder="输入笔记 ID..."
-                className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-4 py-2 text-[var(--text)] outline-none focus:ring-2 focus:ring-[var(--primary)]"
-                onKeyDown={(e) => e.key === 'Enter' && handleComments()}
-              />
-              <button
-                onClick={handleComments}
-                disabled={loading || !noteId.trim()}
-                className="flex items-center gap-2 rounded-lg bg-[var(--primary)] px-6 py-2 text-white hover:bg-[var(--primary-dim)] disabled:opacity-50"
-              >
-                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageCircle className="h-4 w-4" />}
-                获取评论
-              </button>
-            </div>
-
-            {commentsResult && (
-              <div className="space-y-4">
-                <p className="text-sm text-[var(--text-muted)]">
-                  共 {commentsResult.total_comments} 条评论（按{commentsResult.sort_by === 'likes' ? '赞' : '时间'}排序）
+                <p
+                  style={{
+                    fontSize: "0.875rem",
+                    color: "var(--text-secondary)",
+                    lineHeight: 1.6,
+                    marginBottom: "12px",
+                  }}
+                >
+                  {expandedNotes.has(note.id)
+                    ? note.content
+                    : note.content.slice(0, 150) + (note.content.length > 150 ? "..." : "")}
                 </p>
-                {commentsResult.comments.map((comment) => (
-                  <div key={comment.id} className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4">
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-[var(--text)]">{comment.author}</span>
-                      <span className="flex items-center gap-1 text-xs text-[var(--text-muted)]">
-                        <Heart className="h-3 w-3" /> {comment.likes}
-                      </span>
-                    </div>
-                    <p className="mt-2 text-sm text-[var(--text-muted)]">{comment.content}</p>
-                    {comment.is_top && (
-                      <span className="mt-2 inline-block rounded bg-[var(--primary)]/10 px-2 py-0.5 text-xs text-[var(--primary)]">置顶</span>
+
+                {note.content.length > 150 && (
+                  <button
+                    onClick={() => toggleNoteExpand(note.id)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      padding: "4px 0",
+                      background: "none",
+                      border: "none",
+                      color: "var(--color-primary)",
+                      fontSize: "0.8125rem",
+                      cursor: "pointer",
+                      marginBottom: "12px",
+                    }}
+                  >
+                    {expandedNotes.has(note.id) ? (
+                      <>
+                        <ChevronUp style={{ width: "14px", height: "14px" }} />
+                        收起
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown style={{ width: "14px", height: "14px" }} />
+                        展开
+                      </>
                     )}
-                  </div>
+                  </button>
+                )}
+
+                <div style={{ display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+                    作者：{note.author}
+                  </span>
+                  <span
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      fontSize: "0.8125rem",
+                      color: "var(--color-danger)",
+                    }}
+                  >
+                    <Heart style={{ width: "14px", height: "14px" }} />
+                    {note.likes.toLocaleString()}
+                  </span>
+                  <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+                    收藏：{note.collects.toLocaleString()}
+                  </span>
+                  <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+                    评论：{note.comments_count.toLocaleString()}
+                  </span>
+                  {note.published_at && (
+                    <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+                      {new Date(note.published_at).toLocaleDateString("zh-CN")}
+                    </span>
+                  )}
+                  <button
+                    onClick={() => {
+                      setNoteId(note.id);
+                      setActiveTab("comments");
+                      toast.info("已切换到评论获取标签");
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      padding: "4px 12px",
+                      borderRadius: "var(--radius-sm)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-card)",
+                      color: "var(--color-primary)",
+                      fontSize: "0.75rem",
+                      cursor: "pointer",
+                      marginLeft: "auto",
+                    }}
+                  >
+                    <MessageCircle style={{ width: "12px", height: "12px" }} />
+                    获取评论
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {!searchResult && !loading && (
+        <EmptyState
+          icon={Search}
+          title="开始搜索"
+          description="输入关键词搜索小红书高赞笔记"
+        />
+      )}
+    </div>
+  );
+
+  const renderTrendsTab = () => (
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      {/* Trends Input */}
+      <Card title="趋势分析" icon={<TrendingUp style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", gap: "12px" }}>
+          <input
+            type="text"
+            value={trendsKeyword}
+            onChange={(e) => setTrendsKeyword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleTrends()}
+            placeholder="输入关键词分析小红书趋势..."
+            style={{
+              flex: 1,
+              padding: "12px 16px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border-light)",
+              background: "var(--bg-card)",
+              color: "var(--text-main)",
+              fontSize: "0.9375rem",
+              outline: "none",
+            }}
+          />
+          <button
+            onClick={handleTrends}
+            disabled={loading || !trendsKeyword.trim()}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "12px 24px",
+              borderRadius: "var(--radius-md)",
+              border: "none",
+              background: loading ? "var(--bg-hover)" : "var(--color-primary)",
+              color: "white",
+              fontSize: "0.9375rem",
+              fontWeight: 600,
+              cursor: loading || !trendsKeyword.trim() ? "not-allowed" : "pointer",
+              opacity: loading || !trendsKeyword.trim() ? 0.6 : 1,
+            }}
+          >
+            {loading ? (
+              <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span className="animate-spin">⟳</span>
+                分析中...
+              </span>
+            ) : (
+              <>
+                <TrendingUp style={{ width: "16px", height: "16px" }} />
+                分析趋势
+              </>
+            )}
+          </button>
+        </div>
+      </Card>
+
+      {/* Trends Results */}
+      {trendsResult && (
+        <>
+          <Card
+            title="分析总结"
+            icon={<Lightbulb style={{ width: "18px", height: "18px" }} />}
+          >
+            <p
+              style={{
+                fontSize: "0.9375rem",
+                color: "var(--text-main)",
+                lineHeight: 1.8,
+                padding: "8px",
+              }}
+            >
+              {trendsResult.analysis.summary}
+            </p>
+            <p style={{ fontSize: "0.8125rem", color: "var(--text-muted)", marginTop: "12px" }}>
+              基于 {trendsResult.based_on_notes} 条笔记分析
+            </p>
+          </Card>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: "16px" }}>
+            <Card title="热门话题" icon={<Zap style={{ width: "18px", height: "18px" }} />}>
+              <ul style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {trendsResult.analysis.hot_topics.map((topic, i) => (
+                  <li
+                    key={i}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                      padding: "10px 12px",
+                      borderRadius: "var(--radius-md)",
+                      background: "var(--bg-hover)",
+                      fontSize: "0.875rem",
+                      color: "var(--text-main)",
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: "20px",
+                        height: "20px",
+                        borderRadius: "50%",
+                        background: i < 3 ? "var(--color-primary)" : "var(--border-light)",
+                        color: "white",
+                        fontSize: "0.75rem",
+                        fontWeight: 600,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      {i + 1}
+                    </span>
+                    {topic}
+                  </li>
+                ))}
+              </ul>
+            </Card>
+
+            <Card title="热门标签" icon={<Hash style={{ width: "18px", height: "18px" }} />}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                {trendsResult.analysis.trending_tags.map((tag, i) => (
+                  <span
+                    key={i}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: "var(--radius-full)",
+                      background: "var(--bg-hover)",
+                      border: "1px solid var(--border-light)",
+                      fontSize: "0.8125rem",
+                      color: "var(--color-primary)",
+                    }}
+                  >
+                    {tag.tag}
+                    <span style={{ color: "var(--text-muted)", marginLeft: "4px" }}>({tag.frequency})</span>
+                  </span>
                 ))}
               </div>
-            )}
+            </Card>
+
+            <Card title="内容模式" icon={<BookOpen style={{ width: "18px", height: "18px" }} />}>
+              <ul style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {trendsResult.analysis.content_patterns.map((pattern, i) => (
+                  <li
+                    key={i}
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: "var(--radius-md)",
+                      background: "var(--bg-hover)",
+                      fontSize: "0.875rem",
+                      color: "var(--text-main)",
+                    }}
+                  >
+                    {pattern}
+                  </li>
+                ))}
+              </ul>
+            </Card>
+
+            <Card title="高互动因素" icon={<Heart style={{ width: "18px", height: "18px" }} />}>
+              <ul style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {trendsResult.analysis.engagement_factors.map((factor, i) => (
+                  <li
+                    key={i}
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: "var(--radius-md)",
+                      background: "var(--bg-hover)",
+                      fontSize: "0.875rem",
+                      color: "var(--text-main)",
+                    }}
+                  >
+                    {factor}
+                  </li>
+                ))}
+              </ul>
+            </Card>
           </div>
-        )}
-      </div>
+        </>
+      )}
+
+      {!trendsResult && !loading && (
+        <EmptyState
+          icon={TrendingUp}
+          title="趋势分析"
+          description="输入关键词分析小红书热门趋势和内容模式"
+        />
+      )}
     </div>
+  );
+
+  const renderCommentsTab = () => (
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      {/* Comments Input */}
+      <Card title="获取评论" icon={<MessageCircle style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", gap: "12px" }}>
+          <input
+            type="text"
+            value={noteId}
+            onChange={(e) => setNoteId(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleComments()}
+            placeholder="输入小红书笔记 ID..."
+            style={{
+              flex: 1,
+              padding: "12px 16px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border-light)",
+              background: "var(--bg-card)",
+              color: "var(--text-main)",
+              fontSize: "0.9375rem",
+              outline: "none",
+            }}
+          />
+          <button
+            onClick={handleComments}
+            disabled={loading || !noteId.trim()}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "12px 24px",
+              borderRadius: "var(--radius-md)",
+              border: "none",
+              background: loading ? "var(--bg-hover)" : "var(--color-primary)",
+              color: "white",
+              fontSize: "0.9375rem",
+              fontWeight: 600,
+              cursor: loading || !noteId.trim() ? "not-allowed" : "pointer",
+              opacity: loading || !noteId.trim() ? 0.6 : 1,
+            }}
+          >
+            {loading ? (
+              <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span className="animate-spin">⟳</span>
+                获取中...
+              </span>
+            ) : (
+              <>
+                <MessageCircle style={{ width: "16px", height: "16px" }} />
+                获取评论
+              </>
+            )}
+          </button>
+        </div>
+      </Card>
+
+      {/* Comments Results */}
+      {commentsResult && (
+        <Card
+          title={`评论列表 (${commentsResult.total_comments})`}
+          icon={<Users style={{ width: "18px", height: "18px" }} />}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            {commentsResult.comments.map((comment) => (
+              <div
+                key={comment.id}
+                style={{
+                  padding: "16px",
+                  borderRadius: "var(--radius-lg)",
+                  background: "var(--bg-hover)",
+                  border: "1px solid var(--border-light)",
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                  <span
+                    style={{
+                      fontSize: "0.875rem",
+                      fontWeight: 600,
+                      color: "var(--color-primary)",
+                    }}
+                  >
+                    {comment.author}
+                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    {comment.is_top && (
+                      <span
+                        style={{
+                          padding: "2px 8px",
+                          borderRadius: "var(--radius-sm)",
+                          background: "var(--color-warning)20",
+                          color: "var(--color-warning)",
+                          fontSize: "0.75rem",
+                        }}
+                      >
+                        置顶
+                      </span>
+                    )}
+                    <span
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "4px",
+                        fontSize: "0.8125rem",
+                        color: "var(--color-danger)",
+                      }}
+                    >
+                      <Heart style={{ width: "14px", height: "14px" }} />
+                      {comment.likes.toLocaleString()}
+                    </span>
+                  </div>
+                </div>
+
+                <p
+                  style={{
+                    fontSize: "0.875rem",
+                    color: "var(--text-main)",
+                    lineHeight: 1.6,
+                  }}
+                >
+                  {expandedComments.has(comment.id)
+                    ? comment.content
+                    : comment.content.slice(0, 200) + (comment.content.length > 200 ? "..." : "")}
+                </p>
+
+                {comment.content.length > 200 && (
+                  <button
+                    onClick={() => {
+                      setExpandedComments((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(comment.id)) next.delete(comment.id);
+                        else next.add(comment.id);
+                        return next;
+                      });
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "4px",
+                      padding: "4px 0",
+                      background: "none",
+                      border: "none",
+                      color: "var(--color-primary)",
+                      fontSize: "0.8125rem",
+                      cursor: "pointer",
+                      marginTop: "8px",
+                    }}
+                  >
+                    {expandedComments.has(comment.id) ? (
+                      <>
+                        <ChevronUp style={{ width: "14px", height: "14px" }} />
+                        收起
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown style={{ width: "14px", height: "14px" }} />
+                        展开
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {!commentsResult && !loading && (
+        <EmptyState
+          icon={MessageCircle}
+          title="获取评论"
+          description="输入笔记 ID 获取小红书评论（按点赞排序）"
+        />
+      )}
+    </div>
+  );
+
+  return (
+    <PageContainer>
+      <PageHeader
+        title="小红书分析工具"
+        subtitle="搜索高赞内容、分析趋势、获取评论"
+        icon={Search}
+      />
+      <PageContent maxWidth="1200px">
+        <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+          {renderTabs()}
+
+          {loading && !searchResult && !trendsResult && !commentsResult ? (
+            <LoadingState message="加载中..." />
+          ) : (
+            <>
+              {activeTab === "search" && renderSearchTab()}
+              {activeTab === "trends" && renderTrendsTab()}
+              {activeTab === "comments" && renderCommentsTab()}
+            </>
+          )}
+        </div>
+      </PageContent>
+    </PageContainer>
   );
 }

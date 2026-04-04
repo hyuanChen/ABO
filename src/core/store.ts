@@ -12,7 +12,8 @@ export type ActiveTab =
   | "claude"
   | "vault"
   | "settings"
-  | "modules";
+  | "modules"
+  | "xiaohongshu";
 
 export type ToastKind = "info" | "error" | "success";
 

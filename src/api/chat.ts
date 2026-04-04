@@ -85,10 +85,10 @@ export async function deleteConversation(convId: string): Promise<void> {
 }
 
 export async function updateConversationTitle(convId: string, title: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/conversations/${convId}/title`, {
+  const res = await fetch(`${API_BASE}/conversations/${convId}/title?title=${encodeURIComponent(title)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title }),
+    body: JSON.stringify({}),
   });
   if (!res.ok) throw new Error('Failed to update title');
 }

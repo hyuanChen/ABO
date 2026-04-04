@@ -3,7 +3,7 @@ import PixelAvatar from "../profile/PixelAvatar";
 import {
   Inbox, BookOpen, FileText, MessageSquare,
   Rss, Heart, Settings, Zap, User, Menu, X, Moon, Sun, LayoutGrid, FolderOpen,
-  ChevronDown
+  ChevronDown, BookHeart
 } from "lucide-react";
 import { useState, useEffect } from "react";
 
@@ -588,6 +588,59 @@ export default function NavSidebar() {
           </div>
           <span style={{ fontWeight: 600, fontSize: "clamp(0.875rem, 1.2vw, 0.9375rem)", flex: 1, textAlign: "left" }}>
             健康管理
+          </span>
+        </button>
+
+        {/* Xiaohongshu Tool */}
+        <button
+          onClick={() => {
+            setActiveTab("xiaohongshu");
+            if (isMobile) setIsOpen(false);
+          }}
+          style={{
+            width: "100%",
+            padding: "clamp(10px, 1.5vw, 12px) clamp(14px, 2vw, 16px)",
+            borderRadius: "var(--radius-full)",
+            background: activeTab === "xiaohongshu"
+              ? "linear-gradient(135deg, rgba(255, 107, 107, 0.3), rgba(255, 107, 107, 0.2))"
+              : "linear-gradient(135deg, rgba(255, 107, 107, 0.2), rgba(255, 107, 107, 0.1))",
+            color: "#E85D5D",
+            transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+            border: "1px solid rgba(255, 107, 107, 0.4)",
+            cursor: "pointer",
+          }}
+          onMouseEnter={(e) => {
+            if (activeTab !== "xiaohongshu") {
+              e.currentTarget.style.background = "linear-gradient(135deg, rgba(255, 107, 107, 0.3), rgba(255, 107, 107, 0.2))";
+            }
+            e.currentTarget.style.transform = "scale(1.02)";
+          }}
+          onMouseLeave={(e) => {
+            if (activeTab !== "xiaohongshu") {
+              e.currentTarget.style.background = "linear-gradient(135deg, rgba(255, 107, 107, 0.2), rgba(255, 107, 107, 0.1))";
+            }
+            e.currentTarget.style.transform = "scale(1)";
+          }}
+        >
+          <div
+            style={{
+              width: "clamp(32px, 4vw, 36px)",
+              height: "clamp(32px, 4vw, 36px)",
+              borderRadius: "50%",
+              background: "rgba(255, 107, 107, 0.3)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <BookHeart className="w-[18px] h-[18px] shrink-0" style={{ color: "#E85D5D" }} aria-hidden />
+          </div>
+          <span style={{ fontWeight: 600, fontSize: "clamp(0.875rem, 1.2vw, 0.9375rem)", flex: 1, textAlign: "left" }}>
+            小红书工具
           </span>
         </button>
       </div>

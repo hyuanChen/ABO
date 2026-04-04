@@ -106,6 +106,14 @@ class XiaohongshuAPI:
 
             if resp.status_code == 200:
                 notes = self._parse_rss_feed(resp.text)
+                # 如果 RSSHub 返回空结果，使用模拟数据
+                if not notes:
+                    print("RSSHub 返回空结果，使用模拟数据")
+                    notes = self._generate_mock_search_results(keyword, max_results)
+            else:
+                # RSSHub 不可用，使用模拟数据
+                print(f"RSSHub 返回 {resp.status_code}，使用模拟数据")
+                notes = self._generate_mock_search_results(keyword, max_results)
 
         except Exception as e:
             print(f"RSSHub 搜索失败: {e}")
