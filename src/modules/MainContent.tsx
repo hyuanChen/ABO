@@ -9,6 +9,7 @@ import HealthDashboard from "./health/HealthDashboard";
 import Settings from "./settings/Settings";
 import BubbleVault from "./vault/BubbleVault";
 import ModulePanel from "./feed/ModulePanel";
+import { XiaohongshuTool } from "./xiaohongshu/XiaohongshuTool";
 
 export default function MainContent() {
   const activeTab = useStore((s) => s.activeTab);
@@ -50,6 +51,7 @@ export default function MainContent() {
       {activeTab === "health"     && <HealthDashboard />}
       {activeTab === "settings"   && <Settings />}
       {activeTab === "modules"    && <ModulePanel />}
+      {activeTab === "xiaohongshu" && <XiaohongshuTool />}
     </main>
   );
 }

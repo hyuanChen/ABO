@@ -19,6 +19,7 @@ from .config import get_vault_path, get_literature_path, load as load_config, sa
 from .preferences.engine import PreferenceEngine
 from .profile.routes import router as profile_router, init_routes as init_profile_routes
 from .rss import rss_router
+from .routes.tools import router as tools_router
 from .runtime.broadcaster import broadcaster
 from .runtime.discovery import ModuleRegistry, start_watcher
 from .runtime.runner import ModuleRunner
@@ -143,6 +144,7 @@ app.add_middleware(
 )
 app.include_router(profile_router)
 app.include_router(rss_router)
+app.include_router(tools_router)
 
 
 # ── Health ───────────────────────────────────────────────────────
@@ -1735,6 +1737,12 @@ async def get_module_config(module_id: str):
         "topics": module_prefs.get("topics", []),
         "podcast_ids": module_prefs.get("podcast_ids", []),
         "max_results": module_prefs.get("max_results", 20),
+        # Bilibili-specific config
+        "follow_feed": module_prefs.get("follow_feed", True),
+        "follow_feed_types": module_prefs.get("follow_feed_types", [8, 2, 4, 64]),
+        "fetch_follow_limit": module_prefs.get("fetch_follow_limit", 20),
+        "keyword_filter": module_prefs.get("keyword_filter", True),
+        "sessdata": module_prefs.get("sessdata", ""),
     }
 
     # Add module-specific defaults if empty
@@ -1775,6 +1783,17 @@ async def update_module_config(module_id: str, data: dict):
         module_prefs["podcast_ids"] = data["podcast_ids"]
     if "max_results" in data:
         module_prefs["max_results"] = data["max_results"]
+    # Bilibili-specific config
+    if "follow_feed" in data:
+        module_prefs["follow_feed"] = data["follow_feed"]
+    if "follow_feed_types" in data:
+        module_prefs["follow_feed_types"] = data["follow_feed_types"]
+    if "fetch_follow_limit" in data:
+        module_prefs["fetch_follow_limit"] = data["fetch_follow_limit"]
+    if "keyword_filter" in data:
+        module_prefs["keyword_filter"] = data["keyword_filter"]
+    if "sessdata" in data:
+        module_prefs["sessdata"] = data["sessdata"]
 
     # Save preferences
     _prefs.update(prefs)

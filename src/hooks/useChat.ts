@@ -3,7 +3,10 @@ import type { Conversation, Message, StreamEvent, CliConfig } from '../types/cha
 import {
   detectClis,
   createConversation,
+  listConversations,
   getMessages,
+  deleteConversation,
+  updateConversationTitle,
   createChatWebSocket,
 } from '../api/chat';
 
@@ -11,12 +14,17 @@ export interface UseChatReturn {
   // CLI
   availableClis: CliConfig[];
   selectedCli: CliConfig | null;
-  selectCli: (cli: CliConfig) => void;
 
-  // 对话
+  // 对话列表
+  conversations: Conversation[];
+  loadConversations: () => Promise<void>;
+
+  // 当前对话
   conversation: Conversation | null;
-  createNewConversation: () => Promise<void>;
-  loadConversation: (conv: Conversation) => Promise<void>;
+  createNewConversation: (cliType?: string) => Promise<void>;
+  switchConversation: (conv: Conversation) => Promise<void>;
+  deleteConv: (convId: string) => Promise<void>;
+  renameConv: (convId: string, title: string) => Promise<void>;
 
   // 消息
   messages: Message[];
@@ -26,6 +34,7 @@ export interface UseChatReturn {
   // 连接状态
   isConnected: boolean;
   isLoading: boolean;
+  isInitialized: boolean;
   error: string | null;
 }
 
@@ -35,8 +44,12 @@ export function useChat(): UseChatReturn {
   const [selectedCli, setSelectedCli] = useState<CliConfig | null>(null);
 
   // 对话状态
+  const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+
+  // 初始化状态
+  const [isInitialized, setIsInitialized] = useState(false);
 
   // 连接状态
   const [isConnected, setIsConnected] = useState(false);
@@ -47,31 +60,76 @@ export function useChat(): UseChatReturn {
   // Refs
   const wsRef = useRef<WebSocket | null>(null);
   const currentMsgIdRef = useRef<string>('');
+  const initializingRef = useRef(false);
 
-  // 检测 CLI
+  // 初始化：检测CLI并自动创建对话
   useEffect(() => {
-    detectClis()
-      .then(setAvailableClis)
-      .catch((e) => setError(e.message));
-  }, []);
+    if (initializingRef.current) return;
+    initializingRef.current = true;
 
-  // 清理 WebSocket
-  useEffect(() => {
+    const initialize = async () => {
+      try {
+        setIsLoading(true);
+
+        // 1. 检测可用CLI
+        const clis = await detectClis();
+        setAvailableClis(clis);
+
+        if (clis.length === 0) {
+          setError('未检测到可用的CLI工具，请安装Claude Code或Gemini CLI');
+          setIsInitialized(true);
+          setIsLoading(false);
+          return;
+        }
+
+        // 2. 加载历史对话列表
+        await loadConversations();
+
+        // 3. 如果没有活跃对话，自动创建一个
+        const activeConvs = await listConversations();
+        if (activeConvs.length === 0) {
+          // 使用第一个可用的CLI自动创建
+          const defaultCli = clis[0];
+          setSelectedCli(defaultCli);
+          await createNewConversation(defaultCli.id, false);
+        } else {
+          // 使用最新的对话
+          const latest = activeConvs[0];
+          await switchConversation(latest, false);
+        }
+
+        setIsInitialized(true);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : '初始化失败');
+        setIsInitialized(true);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    initialize();
+
+    // 清理
     return () => {
       wsRef.current?.close();
     };
   }, []);
 
-  // 选择 CLI
-  const selectCli = useCallback((cli: CliConfig) => {
-    setSelectedCli(cli);
-    setError(null);
+  // 加载对话列表
+  const loadConversations = useCallback(async () => {
+    try {
+      const convs = await listConversations();
+      setConversations(convs);
+    } catch (e) {
+      console.error('Failed to load conversations:', e);
+    }
   }, []);
 
   // 创建新对话
-  const createNewConversation = useCallback(async () => {
-    if (!selectedCli) {
-      setError('Please select a CLI first');
+  const createNewConversation = useCallback(async (cliType?: string, updateList: boolean = true) => {
+    const targetCliType = cliType || selectedCli?.id || availableClis[0]?.id;
+    if (!targetCliType) {
+      setError('没有可用的CLI');
       return;
     }
 
@@ -83,30 +141,41 @@ export function useChat(): UseChatReturn {
       wsRef.current?.close();
 
       // 创建新对话
-      const conv = await createConversation(selectedCli.id);
+      const conv = await createConversation(targetCliType);
       setConversation(conv);
       setMessages([]);
 
+      // 更新选中的CLI
+      const cli = availableClis.find(c => c.id === targetCliType);
+      if (cli) setSelectedCli(cli);
+
+      // 更新对话列表
+      if (updateList) {
+        await loadConversations();
+      }
+
       // 建立 WebSocket 连接
       const ws = createChatWebSocket({
-        cliType: selectedCli.id,
+        cliType: targetCliType,
         sessionId: conv.sessionId,
         onConnect: () => setIsConnected(true),
         onDisconnect: () => setIsConnected(false),
         onEvent: handleStreamEvent,
-        onError: () => setError('WebSocket connection failed'),
+        onError: () => setError('WebSocket连接失败'),
       });
 
       wsRef.current = ws;
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unknown error');
+      setError(e instanceof Error ? e.message : '创建对话失败');
     } finally {
       setIsLoading(false);
     }
-  }, [selectedCli]);
+  }, [availableClis, selectedCli, loadConversations]);
 
-  // 加载已有对话
-  const loadConversation = useCallback(async (conv: Conversation) => {
+  // 切换对话
+  const switchConversation = useCallback(async (conv: Conversation, updateList: boolean = true) => {
+    if (conversation?.id === conv.id) return;
+
     setIsLoading(true);
     setError(null);
 
@@ -133,12 +202,51 @@ export function useChat(): UseChatReturn {
       });
 
       wsRef.current = ws;
+
+      // 更新列表（确保顺序正确）
+      if (updateList) {
+        await loadConversations();
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unknown error');
+      setError(e instanceof Error ? e.message : '切换对话失败');
     } finally {
       setIsLoading(false);
     }
-  }, [availableClis]);
+  }, [availableClis, conversation?.id, loadConversations]);
+
+  // 删除对话
+  const deleteConv = useCallback(async (convId: string) => {
+    try {
+      await deleteConversation(convId);
+
+      // 如果删除的是当前对话，切换到其他对话或创建新对话
+      if (conversation?.id === convId) {
+        const remaining = conversations.filter(c => c.id !== convId);
+        if (remaining.length > 0) {
+          await switchConversation(remaining[0]);
+        } else {
+          await createNewConversation();
+        }
+      }
+
+      await loadConversations();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '删除失败');
+    }
+  }, [conversation?.id, conversations, createNewConversation, switchConversation, loadConversations]);
+
+  // 重命名对话
+  const renameConv = useCallback(async (convId: string, title: string) => {
+    try {
+      await updateConversationTitle(convId, title);
+      await loadConversations();
+      if (conversation?.id === convId) {
+        setConversation({ ...conversation, title });
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '重命名失败');
+    }
+  }, [conversation, loadConversations]);
 
   // 处理流式事件
   const handleStreamEvent = useCallback((event: StreamEvent) => {
@@ -207,7 +315,7 @@ export function useChat(): UseChatReturn {
             id: `error-${Date.now()}`,
             conversationId: conversation?.id || '',
             role: 'system',
-            content: `Error: ${event.data}`,
+            content: `错误: ${event.data}`,
             contentType: 'error',
             status: 'error',
             createdAt: Date.now(),
@@ -220,12 +328,12 @@ export function useChat(): UseChatReturn {
   // 发送消息
   const sendMessage = useCallback((content: string) => {
     if (!wsRef.current || !conversation) {
-      setError('Not connected');
+      setError('未连接');
       return;
     }
 
     if (wsRef.current.readyState !== WebSocket.OPEN) {
-      setError('WebSocket not connected');
+      setError('WebSocket未连接');
       return;
     }
 
@@ -253,15 +361,19 @@ export function useChat(): UseChatReturn {
   return {
     availableClis,
     selectedCli,
-    selectCli,
+    conversations,
+    loadConversations,
     conversation,
     createNewConversation,
-    loadConversation,
+    switchConversation,
+    deleteConv,
+    renameConv,
     messages,
     sendMessage,
     isStreaming,
     isConnected,
     isLoading,
+    isInitialized,
     error,
   };
 }

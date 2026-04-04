@@ -27,6 +27,12 @@ interface ModuleConfig {
   podcast_ids?: string[];
   user_ids?: string[];
   folder_path?: string;
+  up_uids?: string[];
+  follow_feed?: boolean;
+  follow_feed_types?: number[];
+  fetch_follow_limit?: number;
+  keyword_filter?: boolean;
+  sessdata?: string;
 }
 
 interface ModuleGuide {
@@ -133,30 +139,58 @@ const MODULE_CONFIGS: Record<string, {
   "bilibili-tracker": {
     name: "Bilibili",
     icon: "📺",
-    description: "追踪 B 站上的知识区、科技区视频，支持 UP 主和关键词追踪。",
+    description: "追踪 B 站关注动态和新视频，支持视频、图文、文字、专栏等多种内容类型。",
     fields: [
       {
-        key: "keywords",
-        label: "关键词",
-        placeholder: "机器学习, 编程, 教程",
-        type: "array",
-        description: "视频标题关键词"
+        key: "follow_feed",
+        label: "启用关注动态流",
+        placeholder: "true",
+        type: "boolean",
+        description: "自动获取你关注的UP主的最新动态和视频"
       },
       {
-        key: "users",
-        label: "UP主（可选）",
-        placeholder: "输入UP主ID，如：李沐",
+        key: "sessdata",
+        label: "SESSDATA Cookie",
+        placeholder: "从你的浏览器Cookie中复制SESSDATA值",
+        type: "string",
+        description: "B站登录凭证，用于获取关注动态。获取方式：登录bilibili.com → F12 → Application → Cookies → SESSDATA"
+      },
+      {
+        key: "follow_feed_types",
+        label: "动态类型",
+        placeholder: "8, 2, 4, 64",
         type: "array",
-        description: "追踪特定 UP 主的最新视频"
+        description: "要追踪的动态类型：8=视频投稿, 2=图文动态, 4=纯文字, 64=专栏文章"
+      },
+      {
+        key: "keywords",
+        label: "关键词过滤",
+        placeholder: "机器学习, 编程, 教程, 科研",
+        type: "array",
+        description: "只显示包含这些关键词的动态（留空则显示所有）"
+      },
+      {
+        key: "up_uids",
+        label: "指定UP主UID（可选）",
+        placeholder: "输入UP主UID，如：1567748478",
+        type: "array",
+        description: "除关注动态外，额外追踪特定UP主的视频"
       },
     ],
     guide: {
-      title: "B 站学习资源追踪",
-      description: "B 站有丰富的技术教程、学术报告、科普视频等内容。",
+      title: "Bilibili 关注动态追踪",
+      description: "自动获取你关注的UP主的最新动态，支持视频、图文、文字、专栏等多种内容类型。",
       tips: [
-        "推荐关注的分区：知识区、科技区、计算机技术",
-        "知名 UP 主：李沐、跟李沐学AI、同济子豪兄等",
-        "系统会监控你关注的 UP 主最新投稿"
+        "必须配置 SESSDATA 才能获取关注动态（在浏览器开发者工具中获取）",
+        "动态类型：8=视频, 2=图文, 4=文字, 64=专栏",
+        "可以设置关键词过滤，只关注感兴趣的内容",
+        "可以同时追踪指定UP主的视频（即使未关注）",
+        "系统会自动去重，不会重复显示已看过的动态"
+      ],
+      examples: [
+        { label: "科研学习", value: "科研, 学术, 读博, 论文, AI" },
+        { label: "编程技术", value: "编程, 教程, Python, 机器学习" },
+        { label: "全部动态类型", value: "8, 2, 4, 64" },
       ]
     }
   },
@@ -339,7 +373,14 @@ export default function ModuleDetail({ module, onBack }: Props) {
   function updateConfigField(key: string, value: string, type?: string) {
     if (type === "array") {
       const arrayValue = value.split(",").map((s) => s.trim()).filter(Boolean);
-      setModuleConfig((prev) => ({ ...prev, [key]: arrayValue }));
+      // Convert numeric strings to numbers for follow_feed_types
+      if (key === "follow_feed_types") {
+        setModuleConfig((prev) => ({ ...prev, [key]: arrayValue.map(v => parseInt(v) || v) }));
+      } else {
+        setModuleConfig((prev) => ({ ...prev, [key]: arrayValue }));
+      }
+    } else if (type === "boolean") {
+      setModuleConfig((prev) => ({ ...prev, [key]: value === "true" }));
     } else {
       setModuleConfig((prev) => ({ ...prev, [key]: value }));
     }
@@ -349,6 +390,9 @@ export default function ModuleDetail({ module, onBack }: Props) {
     const value = moduleConfig[key as keyof ModuleConfig];
     if (type === "array" && Array.isArray(value)) {
       return value.join(", ");
+    }
+    if (type === "boolean") {
+      return value === true ? "true" : "false";
     }
     return (value as string) || "";
   }
@@ -531,26 +575,65 @@ export default function ModuleDetail({ module, onBack }: Props) {
                     <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", marginBottom: "12px" }}>
                       {field.description}
                     </p>
-                    <input
-                      type="text"
-                      value={getConfigFieldValue(field.key, field.type)}
-                      onChange={(e) => updateConfigField(field.key, e.target.value, field.type)}
-                      placeholder={field.placeholder}
-                      style={{
-                        width: "100%",
-                        padding: "12px 16px",
-                        borderRadius: "var(--radius-full)",
-                        border: "1px solid var(--border-light)",
-                        background: "var(--bg-app)",
-                        color: "var(--text-main)",
-                        fontSize: "0.9375rem",
-                        outline: "none",
-                      }}
-                    />
-                    {field.type === "array" && (
-                      <p style={{ marginTop: "8px", fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                        多个值用逗号分隔
-                      </p>
+                    {field.type === "boolean" ? (
+                      <div style={{ display: "flex", gap: "12px" }}>
+                        <button
+                          onClick={() => updateConfigField(field.key, "true", field.type)}
+                          style={{
+                            padding: "10px 20px",
+                            borderRadius: "var(--radius-full)",
+                            border: "1px solid var(--border-light)",
+                            background: getConfigFieldValue(field.key, field.type) === "true" ? "var(--color-primary)" : "var(--bg-app)",
+                            color: getConfigFieldValue(field.key, field.type) === "true" ? "white" : "var(--text-main)",
+                            fontSize: "0.875rem",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            transition: "all 0.2s ease",
+                          }}
+                        >
+                          启用
+                        </button>
+                        <button
+                          onClick={() => updateConfigField(field.key, "false", field.type)}
+                          style={{
+                            padding: "10px 20px",
+                            borderRadius: "var(--radius-full)",
+                            border: "1px solid var(--border-light)",
+                            background: getConfigFieldValue(field.key, field.type) === "false" ? "var(--color-error)" : "var(--bg-app)",
+                            color: getConfigFieldValue(field.key, field.type) === "false" ? "white" : "var(--text-main)",
+                            fontSize: "0.875rem",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            transition: "all 0.2s ease",
+                          }}
+                        >
+                          禁用
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <input
+                          type="text"
+                          value={getConfigFieldValue(field.key, field.type)}
+                          onChange={(e) => updateConfigField(field.key, e.target.value, field.type)}
+                          placeholder={field.placeholder}
+                          style={{
+                            width: "100%",
+                            padding: "12px 16px",
+                            borderRadius: "var(--radius-full)",
+                            border: "1px solid var(--border-light)",
+                            background: "var(--bg-app)",
+                            color: "var(--text-main)",
+                            fontSize: "0.9375rem",
+                            outline: "none",
+                          }}
+                        />
+                        {field.type === "array" && (
+                          <p style={{ marginTop: "8px", fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+                            多个值用逗号分隔
+                          </p>
+                        )}
+                      </>
                     )}
                   </div>
                 ))}
