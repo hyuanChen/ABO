@@ -15,12 +15,18 @@ import {
   BookOpen,
   Cookie,
   AlertCircle,
-  Globe,
+  CheckCircle,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
 import { api } from "../../core/api";
 import { useToast } from "../../components/Toast";
 import { CookieGuide } from "../../components/ConfigHelp";
+import {
+  xiaohongshuVerifyCookie,
+  xiaohongshuGetConfig,
+  xiaohongshuSaveConfig,
+  xiaohongshuGetCookieFromBrowser,
+} from "../../api/xiaohongshu";
 
 interface XHSNote {
   id: string;
@@ -77,20 +83,16 @@ interface FollowingFeedResponse {
   notes: Array<XHSNote & { matched_keywords?: string[] }>;
 }
 
-interface ConfigResponse {
-  cookie_configured: boolean;
-  cookie_preview: string | null;
-}
-
 export function XiaohongshuTool() {
   const [activeTab, setActiveTab] = useState<TabType>("search");
   const [loading, setLoading] = useState(false);
   const toast = useToast();
 
   // Cookie config state
-  const [cookie, setCookie] = useState<string>("");
-  const [cookieConfigured, setCookieConfigured] = useState(false);
-  const [showCookieInput, setShowCookieInput] = useState(false);
+  const [cookieInput, setCookieInput] = useState("");
+  const [webSession, setWebSession] = useState(() => localStorage.getItem("xiaohongshu_websession") || "");
+  const [webSessionVerified, setWebSessionVerified] = useState(false);
+  const [verifying, setVerifying] = useState(false);
   const [cookiePreview, setCookiePreview] = useState<string | null>(null);
 
   // Search state
@@ -113,73 +115,135 @@ export function XiaohongshuTool() {
   const [followingKeywords, setFollowingKeywords] = useState("");
   const [followingResult, setFollowingResult] = useState<FollowingFeedResponse | null>(null);
 
-  // Load config on mount
+  // Persist webSession
+  useEffect(() => {
+    if (webSession) {
+      localStorage.setItem("xiaohongshu_websession", webSession);
+    } else {
+      localStorage.removeItem("xiaohongshu_websession");
+    }
+  }, [webSession]);
+
+  // Load config from backend on mount
   useEffect(() => {
     loadConfig();
   }, []);
 
   async function loadConfig() {
     try {
-      const config = await api.get<ConfigResponse>("/api/tools/xiaohongshu/config");
-      setCookieConfigured(config.cookie_configured);
-      setCookiePreview(config.cookie_preview);
-      if (config.cookie_configured) {
-        // Load cookie from localStorage as fallback
-        const savedCookie = localStorage.getItem("xiaohongshu_cookie");
-        if (savedCookie) {
-          setCookie(savedCookie);
+      const config = await xiaohongshuGetConfig();
+      if (config.cookie_configured && config.cookie_preview) {
+        setCookiePreview(config.cookie_preview);
+        // Load full cookie from backend config
+        const fullCookie = await fetch("/api/tools/xiaohongshu/config")
+          .then(r => r.json())
+          .then(d => d.cookie_preview)
+          .catch(() => null);
+        if (fullCookie) {
+          setCookieInput(fullCookie.replace("...", ""));
+        }
+        // Extract web_session from cookie
+        const extractedSession = extractWebSession(config.cookie_preview.replace("...", ""));
+        if (extractedSession && !webSession) {
+          setWebSession(extractedSession);
         }
       }
-    } catch (e) {
-      console.error("Failed to load config:", e);
+    } catch (err) {
+      console.error("Failed to load config:", err);
     }
   }
 
-  async function saveCookie() {
-    if (!cookie.trim()) {
+  function extractWebSession(cookieStr: string): string | null {
+    try {
+      // Try JSON format
+      if (cookieStr.startsWith("[") || cookieStr.startsWith("{")) {
+        const parsed = JSON.parse(cookieStr);
+        if (Array.isArray(parsed)) {
+          const sessionCookie = parsed.find((c: any) => c.name === "web_session");
+          if (sessionCookie) return sessionCookie.value;
+        }
+      }
+      // Try direct value
+      if (cookieStr.length > 20 && !cookieStr.includes("{") && !cookieStr.includes("[")) {
+        return cookieStr.trim();
+      }
+    } catch (e) {
+      console.error("Failed to parse cookie:", e);
+    }
+    return null;
+  }
+
+  async function handleSaveCookie(input: string) {
+    if (!input.trim()) {
       toast.error("请输入 Cookie");
       return;
     }
     try {
-      await api.post("/api/tools/xiaohongshu/config", { cookie: cookie.trim() });
-      localStorage.setItem("xiaohongshu_cookie", cookie.trim());
-      setCookieConfigured(true);
-      setCookiePreview(cookie.trim().slice(0, 50) + "...");
-      setShowCookieInput(false);
-      toast.success("Cookie 已保存");
-    } catch (e) {
-      toast.error("保存 Cookie 失败");
-    }
-  }
-
-  async function getCookieFromBrowser() {
-    try {
-      toast.info("正在从 Chrome 浏览器获取 Cookie...");
-      const result = await api.post<{
-        success: boolean;
-        cookie_count?: number;
-        cookie_preview?: string;
-        error?: string;
-        message?: string;
-      }>("/api/tools/xiaohongshu/config/from-browser", {});
-
-      if (result.success) {
-        setCookieConfigured(true);
-        setCookiePreview(result.cookie_preview || null);
-        toast.success(result.message || `成功获取 ${result.cookie_count} 个 Cookie`);
-        // 刷新配置
-        await loadConfig();
-      } else {
-        toast.error(result.error || "获取 Cookie 失败");
+      setCookieInput(input.trim());
+      const extractedSession = extractWebSession(input.trim());
+      if (extractedSession) {
+        setWebSession(extractedSession);
       }
-    } catch (e) {
-      toast.error("获取浏览器 Cookie 失败，请手动输入");
+      const res = await xiaohongshuSaveConfig({ cookie: input.trim() });
+      if (res.success) {
+        setCookiePreview(res.cookie_preview);
+        toast.success("Cookie 保存成功");
+      }
+    } catch (err) {
+      toast.error("保存失败", err instanceof Error ? err.message : "未知错误");
     }
   }
+
+  async function handleGetFromBrowser() {
+    try {
+      const res = await xiaohongshuGetCookieFromBrowser();
+      if (res.success && res.cookie_preview) {
+        const fullCookie = res.cookie_preview.replace("...", "");
+        setCookieInput(fullCookie);
+        const extractedSession = extractWebSession(fullCookie);
+        if (extractedSession) {
+          setWebSession(extractedSession);
+        }
+        toast.success("从浏览器获取 Cookie 成功", res.message || "");
+      } else {
+        toast.error("获取失败", res.error || "未找到 Cookie");
+      }
+    } catch (err) {
+      toast.error("获取失败", err instanceof Error ? err.message : "未知错误");
+    }
+  }
+
+  const handleVerifyWebSession = async () => {
+    if (!webSession.trim()) {
+      toast.error("请输入 web_session");
+      return;
+    }
+    setVerifying(true);
+    try {
+      const res = await xiaohongshuVerifyCookie({ web_session: webSession.trim() });
+      if (res.valid) {
+        setWebSessionVerified(true);
+        toast.success("web_session 验证成功", res.message);
+      } else {
+        setWebSessionVerified(false);
+        toast.error("web_session 验证失败", res.message);
+      }
+    } catch (err) {
+      setWebSessionVerified(false);
+      toast.error("验证失败", err instanceof Error ? err.message : "未知错误");
+    } finally {
+      setVerifying(false);
+    }
+  };
 
   const handleSearch = async () => {
     if (!searchKeyword.trim()) {
       toast.error("请输入关键词");
+      return;
+    }
+    const cookieToUse = cookieInput || webSession;
+    if (!cookieToUse.trim()) {
+      toast.error("请先配置 Cookie");
       return;
     }
     setLoading(true);
@@ -189,13 +253,13 @@ export function XiaohongshuTool() {
         max_results: 20,
         min_likes: minLikes,
         sort_by: sortBy,
-        cookie: cookie || undefined,
+        cookie: cookieToUse.trim(),
       });
       setSearchResult(result);
       toast.success(`找到 ${result.total_found} 条结果`);
     } catch (e) {
       console.error("Search failed:", e);
-      toast.error("搜索失败");
+      toast.error("搜索失败", e instanceof Error ? e.message : "请先配置有效的 web_session");
     } finally {
       setLoading(false);
     }
@@ -248,15 +312,15 @@ export function XiaohongshuTool() {
       toast.error("请输入关键词");
       return;
     }
-    if (!cookie) {
-      toast.error("请先配置 Cookie");
+    if (!webSession.trim()) {
+      toast.error("请先配置 web_session");
       return;
     }
     setLoading(true);
     try {
       const keywords = followingKeywords.split(/[,，]/).map(k => k.trim()).filter(Boolean);
       const result = await api.post<FollowingFeedResponse>("/api/tools/xiaohongshu/following-feed", {
-        cookie: cookie,
+        cookie: webSession.trim(),
         keywords: keywords,
         max_notes: 50,
       });
@@ -328,7 +392,7 @@ export function XiaohongshuTool() {
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
           <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
             监控你关注的用户发布的内容，筛选包含指定关键词的笔记。
-            {!cookieConfigured && (
+            {!webSessionVerified && (
               <span style={{ color: "var(--color-warning)" }}>（需先配置 Cookie）</span>
             )}
           </p>
@@ -340,7 +404,7 @@ export function XiaohongshuTool() {
               onChange={(e) => setFollowingKeywords(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleFollowingFeed()}
               placeholder="输入关键词，多个用逗号分隔..."
-              disabled={!cookieConfigured}
+              disabled={!webSessionVerified}
               style={{
                 flex: 1,
                 padding: "12px 16px",
@@ -350,12 +414,12 @@ export function XiaohongshuTool() {
                 color: "var(--text-main)",
                 fontSize: "0.9375rem",
                 outline: "none",
-                opacity: cookieConfigured ? 1 : 0.5,
+                opacity: webSessionVerified ? 1 : 0.5,
               }}
             />
             <button
               onClick={handleFollowingFeed}
-              disabled={loading || !followingKeywords.trim() || !cookieConfigured}
+              disabled={loading || !followingKeywords.trim() || !webSessionVerified}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -363,12 +427,12 @@ export function XiaohongshuTool() {
                 padding: "12px 24px",
                 borderRadius: "var(--radius-md)",
                 border: "none",
-                background: loading || !cookieConfigured ? "var(--bg-hover)" : "var(--color-primary)",
+                background: loading || !webSessionVerified ? "var(--bg-hover)" : "var(--color-primary)",
                 color: "white",
                 fontSize: "0.9375rem",
                 fontWeight: 600,
-                cursor: loading || !cookieConfigured ? "not-allowed" : "pointer",
-                opacity: loading || !cookieConfigured ? 0.6 : 1,
+                cursor: loading || !webSessionVerified ? "not-allowed" : "pointer",
+                opacity: loading || !webSessionVerified ? 0.6 : 1,
               }}
             >
               {loading ? (
@@ -470,140 +534,76 @@ export function XiaohongshuTool() {
   );
 
   const renderCookieConfig = () => (
-    <Card
-      title={`Cookie 配置 ${cookieConfigured ? "✓" : ""}`}
-      icon={<Cookie style={{ width: "18px", height: "18px" }} />}
-    >
-      <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-        <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
-          配置小红书登录 Cookie 后可获取真实搜索结果。
+    <Card title="web_session 配置" icon={<Cookie size={18} />}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+        <p style={{ fontSize: "0.8125rem", color: "var(--text-muted)", margin: 0 }}>
+          从浏览器 Cookie 中复制 web_session 值用于身份验证
         </p>
-        <CookieGuide platform="xiaohongshu" cookieName="Cookie" />
-
-        {cookiePreview && (
-          <div
-            style={{
-              padding: "8px 12px",
-              borderRadius: "var(--radius-sm)",
-              background: "var(--bg-hover)",
-              fontSize: "0.8125rem",
-              color: "var(--text-muted)",
-              fontFamily: "monospace",
-            }}
-          >
-            当前: {cookiePreview}
-          </div>
-        )}
-
-        {!showCookieInput ? (
-          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-            <button
-              onClick={() => setShowCookieInput(true)}
-              style={{
-                padding: "10px 20px",
-                borderRadius: "var(--radius-md)",
-                border: "1px solid var(--border-light)",
-                background: "var(--bg-card)",
-                color: "var(--text-main)",
-                fontSize: "0.875rem",
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-              }}
-            >
-              <Cookie style={{ width: "16px", height: "16px" }} />
-              {cookieConfigured ? "更新 Cookie" : "配置 Cookie"}
-            </button>
-            <button
-              onClick={getCookieFromBrowser}
-              style={{
-                padding: "10px 20px",
-                borderRadius: "var(--radius-md)",
-                border: "1px solid var(--border-light)",
-                background: "var(--bg-hover)",
-                color: "var(--text-main)",
-                fontSize: "0.875rem",
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-              }}
-            >
-              <Globe style={{ width: "16px", height: "16px" }} />
-              从 Chrome 获取
-            </button>
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-            <textarea
-              value={cookie}
-              onChange={(e) => setCookie(e.target.value)}
-              placeholder="请粘贴小红书 Cookie..."
-              style={{
-                width: "100%",
-                minHeight: "100px",
-                padding: "12px",
-                borderRadius: "var(--radius-md)",
-                border: "1px solid var(--border-light)",
-                background: "var(--bg-card)",
-                color: "var(--text-main)",
-                fontSize: "0.8125rem",
-                fontFamily: "monospace",
-                resize: "vertical",
-              }}
-            />
-            <div style={{ display: "flex", gap: "8px" }}>
-              <button
-                onClick={saveCookie}
+        <textarea
+          value={webSession}
+          onChange={(e) => {
+            setWebSession(e.target.value);
+            setWebSessionVerified(false);
+          }}
+          placeholder="粘贴 web_session..."
+          style={{
+            width: "100%",
+            padding: "12px",
+            borderRadius: "var(--radius-sm)",
+            border: "1px solid var(--border-light)",
+            background: "var(--bg-input)",
+            color: "var(--text-main)",
+            fontSize: "0.8125rem",
+            fontFamily: "monospace",
+            resize: "vertical",
+            minHeight: "80px",
+          }}
+        />
+        <CookieGuide platform="xiaohongshu" cookieName="web_session" />
+        <button
+          onClick={handleVerifyWebSession}
+          disabled={verifying || !webSession.trim()}
+          style={{
+            padding: "10px 16px",
+            borderRadius: "var(--radius-sm)",
+            border: "none",
+            background: verifying ? "var(--bg-muted)" : "var(--color-primary)",
+            color: "white",
+            fontSize: "0.875rem",
+            fontWeight: 600,
+            cursor: verifying || !webSession.trim() ? "not-allowed" : "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "8px",
+          }}
+        >
+          {verifying ? (
+            <>
+              <div
                 style={{
-                  padding: "10px 20px",
-                  borderRadius: "var(--radius-md)",
-                  border: "none",
-                  background: "var(--color-primary)",
-                  color: "white",
-                  fontSize: "0.875rem",
-                  cursor: "pointer",
+                  width: "16px",
+                  height: "16px",
+                  border: "2px solid rgba(255,255,255,0.3)",
+                  borderTopColor: "white",
+                  borderRadius: "50%",
+                  animation: "spin 1s linear infinite",
                 }}
-              >
-                保存
-              </button>
-              <button
-                onClick={() => setShowCookieInput(false)}
-                style={{
-                  padding: "10px 20px",
-                  borderRadius: "var(--radius-md)",
-                  border: "1px solid var(--border-light)",
-                  background: "var(--bg-hover)",
-                  color: "var(--text-main)",
-                  fontSize: "0.875rem",
-                  cursor: "pointer",
-                }}
-              >
-                取消
-              </button>
-            </div>
-          </div>
-        )}
-
-        {!cookieConfigured && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              padding: "12px",
-              borderRadius: "var(--radius-md)",
-              background: "var(--color-warning)10",
-              border: "1px solid var(--color-warning)30",
-            }}
-          >
-            <AlertCircle style={{ width: "16px", height: "16px", color: "var(--color-warning)" }} />
-            <span style={{ fontSize: "0.8125rem", color: "var(--color-warning)" }}>
-              未配置 Cookie，将使用模拟数据或搜索引擎结果
-            </span>
-          </div>
-        )}
+              />
+              验证中...
+            </>
+          ) : webSessionVerified ? (
+            <>
+              <CheckCircle size={16} />
+              已验证
+            </>
+          ) : (
+            <>
+              <AlertCircle size={16} />
+              验证 web_session
+            </>
+          )}
+        </button>
       </div>
     </Card>
   );

@@ -309,12 +309,36 @@ class XiaohongshuAPI:
                 import json
                 data = json.loads(cookie_str)
                 if isinstance(data, list):
-                    return data
+                    # 清理每个 cookie 对象，只保留必要的字段
+                    for item in data:
+                        if isinstance(item, dict) and 'name' in item and 'value' in item:
+                            clean_cookie = {
+                                "name": item["name"],
+                                "value": item["value"],
+                                "domain": item.get("domain") or ".xiaohongshu.com",
+                                "path": item.get("path") or "/",
+                            }
+                            # 只添加非 null 的可选字段
+                            if item.get("httpOnly") is not None:
+                                clean_cookie["httpOnly"] = item["httpOnly"]
+                            if item.get("secure") is not None:
+                                clean_cookie["secure"] = item["secure"]
+                            if item.get("expires") is not None:
+                                clean_cookie["expires"] = item["expires"]
+                            if item.get("sameSite") is not None:
+                                clean_cookie["sameSite"] = item["sameSite"]
+                            cookies.append(clean_cookie)
+                    return cookies
                 elif isinstance(data, dict):
                     # 转换 {name: value} 格式
                     for name, value in data.items():
                         if isinstance(value, dict):
-                            cookies.append(value)
+                            cookies.append({
+                                "name": value.get("name", name),
+                                "value": value.get("value", str(value.get("value", ""))),
+                                "domain": value.get("domain") or ".xiaohongshu.com",
+                                "path": value.get("path") or "/",
+                            })
                         else:
                             cookies.append({
                                 "name": name,
@@ -323,7 +347,8 @@ class XiaohongshuAPI:
                                 "path": "/",
                             })
                     return cookies
-            except:
+            except Exception as e:
+                print(f"JSON 解析失败: {e}")
                 pass
 
         # 解析 a=b; c=d 格式
@@ -476,67 +501,32 @@ class XiaohongshuAPI:
     ) -> list[XHSNote]:
         """
         根据关键词搜索小红书笔记
-        优先使用 Cookie 访问，然后是 Playwright，最后回退到模拟数据
+        需要配置 Cookie 才能访问，未配置时直接报错
         """
-        # 如果有 Cookie，优先使用
-        if cookie:
-            try:
-                print(f"使用 Cookie 搜索: {keyword}")
-                notes = await self.search_by_keyword_with_cookie(
-                    keyword=keyword,
-                    cookie=cookie,
-                    max_results=max_results,
-                    min_likes=min_likes,
-                )
-                if notes:
-                    print(f"Cookie 搜索成功，找到 {len(notes)} 条结果")
-                    if sort_by == "likes":
-                        notes.sort(key=lambda x: x.likes, reverse=True)
-                    return notes[:max_results]
-                else:
-                    print("Cookie 搜索返回空结果，尝试其他方式")
-            except Exception as e:
-                print(f"Cookie 搜索失败: {e}")
+        # 检查是否配置了 Cookie
+        if not cookie:
+            raise ValueError("未配置小红书 Cookie，请先配置 web_session")
 
-        # 尝试 Playwright 无 Cookie 搜索（通过搜索引擎）
+        # 使用 Cookie 搜索
         try:
-            print(f"使用 Playwright 搜索: {keyword}")
-            notes = await self.search_by_keyword_playwright(
+            print(f"使用 Cookie 搜索: {keyword}")
+            notes = await self.search_by_keyword_with_cookie(
                 keyword=keyword,
+                cookie=cookie,
                 max_results=max_results,
                 min_likes=min_likes,
             )
             if notes:
-                print(f"Playwright 搜索成功，找到 {len(notes)} 条结果")
+                print(f"Cookie 搜索成功，找到 {len(notes)} 条结果")
                 if sort_by == "likes":
                     notes.sort(key=lambda x: x.likes, reverse=True)
                 return notes[:max_results]
+            else:
+                print("Cookie 搜索返回空结果")
+                return []
         except Exception as e:
-            print(f"Playwright 搜索失败: {e}")
-
-        # 尝试 RSSHub
-        try:
-            encoded_keyword = quote(keyword)
-            url = f"{self.RSSHUB_BASE}/xiaohongshu/search/{encoded_keyword}"
-            resp = await self.client.get(url, headers={"User-Agent": "ABO-Research/1.0"})
-            if resp.status_code == 200:
-                notes = self._parse_rss_feed(resp.text)
-                if notes:
-                    print(f"RSSHub 搜索成功，找到 {len(notes)} 条结果")
-                    filtered = [n for n in notes if n.likes >= min_likes]
-                    if sort_by == "likes":
-                        filtered.sort(key=lambda x: x.likes, reverse=True)
-                    return filtered[:max_results]
-        except Exception as e:
-            print(f"RSSHub 搜索失败: {e}")
-
-        # 回退到模拟数据
-        print("使用模拟数据")
-        notes = self._generate_mock_search_results(keyword, max_results)
-        filtered = [n for n in notes if n.likes >= min_likes]
-        if sort_by == "likes":
-            filtered.sort(key=lambda x: x.likes, reverse=True)
-        return filtered[:max_results]
+            print(f"Cookie 搜索失败: {e}")
+            raise ValueError(f"搜索失败: {e}")
 
     def _parse_rss_feed(self, xml_content: str) -> list[XHSNote]:
         """解析 RSS feed 返回 XHSNote 列表"""
@@ -919,3 +909,54 @@ async def xiaohongshu_analyze_trends(
         "analysis": result,
         "based_on_notes": len(notes_data),
     }
+
+
+async def xiaohongshu_verify_cookie(web_session: str) -> dict:
+    """
+    验证小红书 web_session 是否有效
+
+    通过尝试访问用户主页或搜索接口来验证 Cookie 有效性
+    """
+    api = XiaohongshuAPI()
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Cookie": f"web_session={web_session}",
+            "Referer": "https://www.xiaohongshu.com/",
+        }
+
+        # 尝试访问小红书首页验证 Cookie
+        resp = await api.client.get(
+            "https://www.xiaohongshu.com/explore",
+            headers=headers,
+            follow_redirects=True,
+        )
+
+        # 检查响应状态
+        if resp.status_code == 200:
+            # 检查页面内容是否包含登录状态指示
+            content = resp.text
+            # 如果返回内容包含某些用户特定的标记，说明 Cookie 有效
+            if "web_session" in content or len(content) > 10000:  # 正常页面应该有较多内容
+                return {
+                    "valid": True,
+                    "message": "Cookie 验证成功",
+                }
+            else:
+                return {
+                    "valid": False,
+                    "message": "Cookie 可能已过期或无效",
+                }
+        else:
+            return {
+                "valid": False,
+                "message": f"请求失败，状态码: {resp.status_code}",
+            }
+
+    except Exception as e:
+        return {
+            "valid": False,
+            "message": f"验证过程出错: {str(e)}",
+        }
+    finally:
+        await api.close()

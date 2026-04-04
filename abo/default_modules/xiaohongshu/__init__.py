@@ -1,8 +1,29 @@
 """
 小红书 (Xiaohongshu) 笔记追踪模块
 
-由于小红书有反爬机制，此模块使用 RSSHub 或第三方 API 获取公开笔记。
-用户需要提供关注的博主主页链接或关键词。
+由于小红书有反爬机制，此模块需要用户登录 Cookie 才能获取内容。
+
+配置方法:
+1. 访问 xiaohongshu.com 并登录
+2. 使用浏览器开发者工具或 EditThisCookie 扩展导出 Cookie
+3. 将 Cookie JSON 粘贴到模块配置的 Cookie 输入框
+
+Cookie 格式示例:
+[
+    {
+        "name": "web_session",
+        "value": "040069b05e586b57b240d72e833b4b9cd16a46",
+        "domain": ".xiaohongshu.com"
+    },
+    {
+        "name": "id_token",
+        "value": "VjEAALliLV2OS874D54VGvzyYfv9rxvHnBJjuLWo...",
+        "domain": ".xiaohongshu.com"
+    }
+]
+
+简化格式（仅 web_session 值）:
+040069b05e586b57b240d72e833b4b9cd16a46
 """
 import asyncio
 import json
@@ -31,6 +52,59 @@ class XiaohongshuTracker(Module):
     # Alternative: use searx or other aggregators
     RSSHUB_BASE = "https://rsshub.app"
 
+    def _parse_cookie(self, cookie_value: str) -> str:
+        """Parse cookie from various formats.
+
+        Supports:
+        1. JSON array format: [{"name": "web_session", "value": "..."}, ...]
+        2. Simple string: just the web_session value
+        3. Netscape format: name=value; name2=value2
+
+        Returns a simple cookie string suitable for HTTP headers.
+        """
+        if not cookie_value:
+            return ""
+
+        cookie_value = cookie_value.strip()
+
+        # Try JSON array format
+        if cookie_value.startswith("["):
+            try:
+                cookies = json.loads(cookie_value)
+                if isinstance(cookies, list):
+                    # Extract name=value pairs
+                    pairs = []
+                    for c in cookies:
+                        if isinstance(c, dict) and "name" in c and "value" in c:
+                            pairs.append(f"{c['name']}={c['value']}")
+                    return "; ".join(pairs)
+            except json.JSONDecodeError:
+                pass
+
+        # Try JSON object format {name: value}
+        if cookie_value.startswith("{"):
+            try:
+                cookies = json.loads(cookie_value)
+                if isinstance(cookies, dict):
+                    # Could be {name: value} or {name: {value: ...}}
+                    pairs = []
+                    for name, val in cookies.items():
+                        if isinstance(val, str):
+                            pairs.append(f"{name}={val}")
+                        elif isinstance(val, dict) and "value" in val:
+                            pairs.append(f"{name}={val['value']}")
+                    return "; ".join(pairs)
+            except json.JSONDecodeError:
+                pass
+
+        # If it's a simple string without spaces or special chars,
+        # treat it as just the web_session value
+        if cookie_value and not any(c in cookie_value for c in [" ", "=", ";", "{"]):
+            return f"web_session={cookie_value}"
+
+        # Return as-is (assume it's already in cookie header format)
+        return cookie_value
+
     async def fetch(
         self,
         user_ids: list[str] = None,
@@ -56,12 +130,26 @@ class XiaohongshuTracker(Module):
         prefs_path = Path.home() / ".abo" / "preferences.json"
         config_keywords = []
         config_users = []
-        config_cookie = self._module_cookie()
+
+        # Build cookie from web_session and id_token (new format) or legacy cookie field
+        config_cookie = ""
         if prefs_path.exists():
             data = json.loads(prefs_path.read_text())
             xhs_config = data.get("modules", {}).get("xiaohongshu-tracker", {})
             config_keywords = xhs_config.get("keywords", [])
             config_users = xhs_config.get("user_ids", [])
+
+            # New format: web_session and id_token as separate fields
+            web_session = xhs_config.get("web_session", "")
+            id_token = xhs_config.get("id_token", "")
+            if web_session:
+                config_cookie = f"web_session={web_session}"
+                if id_token:
+                    config_cookie += f"; id_token={id_token}"
+            else:
+                # Legacy format: single cookie field
+                raw_cookie = xhs_config.get("cookie", "")
+                config_cookie = self._parse_cookie(raw_cookie)
 
         keywords = keywords or config_keywords or ["科研", "读博", "学术"]
         user_ids = user_ids or config_users

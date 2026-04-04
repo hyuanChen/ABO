@@ -3,6 +3,30 @@ export interface SearchRequest {
   max_results?: number;
   min_likes?: number;
   sort_by?: 'likes' | 'time';
+  cookie?: string;
+}
+
+export interface CookieConfigResponse {
+  cookie_configured: boolean;
+  cookie_preview: string | null;
+}
+
+export interface CookieSaveRequest {
+  cookie: string;
+}
+
+export interface CookieSaveResponse {
+  success: boolean;
+  cookie_configured: boolean;
+  cookie_preview: string;
+}
+
+export interface BrowserCookieResponse {
+  success: boolean;
+  cookie_count?: number;
+  cookie_preview?: string;
+  message?: string;
+  error?: string;
 }
 
 export interface SearchResponse {
@@ -57,6 +81,15 @@ export interface TrendsResponse {
   based_on_notes: number;
 }
 
+export interface VerifyCookieRequest {
+  web_session: string;
+}
+
+export interface VerifyCookieResponse {
+  valid: boolean;
+  message: string;
+}
+
 const API_BASE = 'http://127.0.0.1:8765/api/tools';
 
 export async function xiaohongshuSearch(req: SearchRequest): Promise<SearchResponse> {
@@ -86,5 +119,42 @@ export async function xiaohongshuTrends(req: TrendsRequest): Promise<TrendsRespo
     body: JSON.stringify(req),
   });
   if (!res.ok) throw new Error('Analyze trends failed');
+  return res.json();
+}
+
+export async function xiaohongshuVerifyCookie(
+  req: VerifyCookieRequest
+): Promise<VerifyCookieResponse> {
+  const res = await fetch(`${API_BASE}/xiaohongshu/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw new Error('Verification failed');
+  return res.json();
+}
+
+export async function xiaohongshuGetConfig(): Promise<CookieConfigResponse> {
+  const res = await fetch(`${API_BASE}/xiaohongshu/config`);
+  if (!res.ok) throw new Error('Failed to get config');
+  return res.json();
+}
+
+export async function xiaohongshuSaveConfig(req: CookieSaveRequest): Promise<CookieSaveResponse> {
+  const res = await fetch(`${API_BASE}/xiaohongshu/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw new Error('Failed to save config');
+  return res.json();
+}
+
+export async function xiaohongshuGetCookieFromBrowser(): Promise<BrowserCookieResponse> {
+  const res = await fetch(`${API_BASE}/xiaohongshu/config/from-browser`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) throw new Error('Failed to get cookie from browser');
   return res.json();
 }

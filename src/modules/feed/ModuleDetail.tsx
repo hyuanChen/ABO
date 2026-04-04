@@ -75,6 +75,8 @@ interface ModuleConfig {
   sessdata?: string;
   api_key?: string;
   cookie?: string;
+  web_session?: string;
+  id_token?: string;
 }
 
 interface SubscriptionDetail {
@@ -789,21 +791,27 @@ export default function ModuleDetail({ module, onBack }: Props) {
           {module.id === "bilibili-tracker" && (
             <Card title="B站登录" icon={<User style={{ width: "18px", height: "18px", color: "var(--color-secondary)" }} />}>
               <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                <input
-                  type="password"
-                  value={moduleConfig.sessdata || ""}
-                  onChange={(e) => setModuleConfig({ ...moduleConfig, sessdata: e.target.value })}
-                  placeholder="粘贴 SESSDATA Cookie..."
-                  style={{
-                    padding: "10px 14px",
-                    borderRadius: "var(--radius-md)",
-                    border: "1px solid var(--border-light)",
-                    background: "var(--bg-app)",
-                    color: "var(--text-main)",
-                    fontSize: "0.875rem",
-                    outline: "none",
-                  }}
-                />
+                <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                    SESSDATA
+                  </label>
+                  <input
+                    type="password"
+                    value={moduleConfig.sessdata || ""}
+                    onChange={(e) => setModuleConfig({ ...moduleConfig, sessdata: e.target.value })}
+                    placeholder="从 Cookie-Editor 复制 SESSDATA 的值"
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: "var(--radius-md)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-app)",
+                      color: "var(--text-main)",
+                      fontSize: "0.875rem",
+                      outline: "none",
+                      fontFamily: "monospace",
+                    }}
+                  />
+                </div>
                 <CookieGuide platform="bilibili" cookieName="SESSDATA" />
                 <button
                   onClick={async () => {
@@ -941,26 +949,56 @@ export default function ModuleDetail({ module, onBack }: Props) {
           {module.id === "xiaohongshu-tracker" && (
             <Card title="小红书登录" icon={<span style={{ fontSize: "18px" }}>📕</span>}>
               <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-                <input
-                  type="password"
-                  value={moduleConfig.cookie || ""}
-                  onChange={(e) => setModuleConfig({ ...moduleConfig, cookie: e.target.value })}
-                  placeholder="粘贴小红书 Cookie..."
-                  style={{
-                    padding: "10px 14px",
-                    borderRadius: "var(--radius-md)",
-                    border: "1px solid var(--border-light)",
-                    background: "var(--bg-app)",
-                    color: "var(--text-main)",
-                    fontSize: "0.875rem",
-                    outline: "none",
-                  }}
-                />
+                <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                    web_session
+                  </label>
+                  <input
+                    type="password"
+                    value={moduleConfig.web_session || ""}
+                    onChange={(e) => setModuleConfig({ ...moduleConfig, web_session: e.target.value })}
+                    placeholder="从 Cookie-Editor 复制 web_session 的值"
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: "var(--radius-md)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-app)",
+                      color: "var(--text-main)",
+                      fontSize: "0.875rem",
+                      outline: "none",
+                      fontFamily: "monospace",
+                    }}
+                  />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                    id_token <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontWeight: 400 }}>(可选)</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={moduleConfig.id_token || ""}
+                    onChange={(e) => setModuleConfig({ ...moduleConfig, id_token: e.target.value })}
+                    placeholder="从 Cookie-Editor 复制 id_token 的值"
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: "var(--radius-md)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-app)",
+                      color: "var(--text-main)",
+                      fontSize: "0.875rem",
+                      outline: "none",
+                      fontFamily: "monospace",
+                    }}
+                  />
+                </div>
                 <CookieGuide platform="xiaohongshu" cookieName="Cookie" />
                 <button
                   onClick={async () => {
                     try {
-                      await api.post("/api/preferences", { modules: { [module.id]: { cookie: moduleConfig.cookie } } });
+                      const cookieData: Record<string, string> = {};
+                      if (moduleConfig.web_session) cookieData.web_session = moduleConfig.web_session;
+                      if (moduleConfig.id_token) cookieData.id_token = moduleConfig.id_token;
+                      await api.post("/api/preferences", { modules: { [module.id]: cookieData } });
                       toast.success("已保存");
                     } catch {
                       toast.error("保存失败");

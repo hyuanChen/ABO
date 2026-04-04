@@ -34,6 +34,29 @@ export interface VerifySessdataResponse {
   message: string;
 }
 
+export interface CookieConfigResponse {
+  cookie_configured: boolean;
+  cookie_preview: string | null;
+}
+
+export interface CookieSaveRequest {
+  cookie: string;
+}
+
+export interface CookieSaveResponse {
+  success: boolean;
+  cookie_configured: boolean;
+  cookie_preview: string;
+}
+
+export interface BrowserCookieResponse {
+  success: boolean;
+  cookie_count?: number;
+  cookie_preview?: string;
+  message?: string;
+  error?: string;
+}
+
 const API_BASE = "http://127.0.0.1:8765/api/tools";
 
 export async function bilibiliFetchFollowed(
@@ -60,5 +83,30 @@ export async function bilibiliVerifySessdata(
     body: JSON.stringify(req),
   });
   if (!res.ok) throw new Error("Verification failed");
+  return res.json();
+}
+
+export async function bilibiliGetConfig(): Promise<CookieConfigResponse> {
+  const res = await fetch(`${API_BASE}/bilibili/config`);
+  if (!res.ok) throw new Error("Failed to get config");
+  return res.json();
+}
+
+export async function bilibiliSaveConfig(req: CookieSaveRequest): Promise<CookieSaveResponse> {
+  const res = await fetch(`${API_BASE}/bilibili/config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw new Error("Failed to save config");
+  return res.json();
+}
+
+export async function bilibiliGetCookieFromBrowser(): Promise<BrowserCookieResponse> {
+  const res = await fetch(`${API_BASE}/bilibili/config/from-browser`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) throw new Error("Failed to get cookie from browser");
   return res.json();
 }

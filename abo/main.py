@@ -1765,6 +1765,8 @@ async def get_module_config(module_id: str):
         "keyword_filter": module_prefs.get("keyword_filter", True),
         "sessdata": module_prefs.get("sessdata", ""),
         "cookie": module_prefs.get("cookie", ""),
+        "web_session": module_prefs.get("web_session", ""),
+        "id_token": module_prefs.get("id_token", ""),
         # UI hints for adding subscriptions
         "subscription_types": subscription_types,
     }

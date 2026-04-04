@@ -19,11 +19,22 @@
     }
 }
 
-获取 SESSDATA:
+获取 SESSDATA (推荐方式):
+1. 安装 Cookie-Editor 浏览器扩展 (Chrome/Edge 商店)
+2. 登录 bilibili.com
+3. 点击 Cookie-Editor 图标 → 导出 Cookie
+4. 粘贴完整 JSON 数组到配置框
+
+备选方式:
 1. 登录 bilibili.com
-2. 打开浏览器开发者工具 (F12)
-3. 切换到 Application/Storage > Cookies
+2. 按 F12 打开开发者工具
+3. Application/Storage > Cookies > bilibili.com
 4. 找到 SESSDATA 字段并复制值
+
+支持的 Cookie 格式:
+1. Cookie-Editor JSON: [{"name": "SESSDATA", "value": "..."}, ...]
+2. 仅 SESSDATA 值: a1b2c3d4e5f6...
+3. 标准 Cookie 字符串: SESSDATA=...; bili_jct=...
 
 动态类型说明:
 - 8: 视频投稿 (默认启用)
@@ -100,6 +111,65 @@ class BilibiliTracker(Module):
         tmp.write_text(json.dumps(list(seen), ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, self._STATE_PATH)
 
+    def _parse_sessdata(self, cookie_value: str) -> str:
+        """Parse SESSDATA from various formats.
+
+        Supports:
+        1. Cookie-Editor JSON: [{"name": "SESSDATA", "value": "..."}, ...]
+        2. Simple string: just the SESSDATA value
+        3. Netscape format: name=value; name2=value2
+
+        Returns the SESSDATA value suitable for HTTP Cookie header.
+        """
+        if not cookie_value:
+            return ""
+
+        cookie_value = cookie_value.strip()
+
+        # Try JSON array format (Cookie-Editor/EditThisCookie export)
+        if cookie_value.startswith("["):
+            try:
+                cookies = json.loads(cookie_value)
+                if isinstance(cookies, list):
+                    # Look for SESSDATA in the array
+                    for c in cookies:
+                        if isinstance(c, dict) and c.get("name") == "SESSDATA":
+                            return c.get("value", "")
+                    # If no SESSDATA found, try to construct from all cookies
+                    pairs = []
+                    for c in cookies:
+                        if isinstance(c, dict) and "name" in c and "value" in c:
+                            pairs.append(f"{c['name']}={c['value']}")
+                    return "; ".join(pairs)
+            except json.JSONDecodeError:
+                pass
+
+        # Try JSON object format {name: value}
+        if cookie_value.startswith("{"):
+            try:
+                cookies = json.loads(cookie_value)
+                if isinstance(cookies, dict):
+                    # Could be {SESSDATA: value} format
+                    if "SESSDATA" in cookies:
+                        return cookies["SESSDATA"]
+                    # Or {name: {value: ...}} format
+                    for name, val in cookies.items():
+                        if name == "SESSDATA":
+                            if isinstance(val, str):
+                                return val
+                            elif isinstance(val, dict) and "value" in val:
+                                return val["value"]
+            except json.JSONDecodeError:
+                pass
+
+        # If it's a simple string without spaces or special chars,
+        # treat it as just the SESSDATA value (usually starts with a number)
+        if cookie_value and not any(c in cookie_value for c in [" ", "=", ";", "{", "["]):
+            return cookie_value
+
+        # Return as-is (assume it's already in cookie header format)
+        return cookie_value
+
     async def fetch(
         self,
         up_uids: list[str] = None,
@@ -136,10 +206,14 @@ class BilibiliTracker(Module):
         dynamic_types = dynamic_types or config.get("follow_feed_types", [8, 2, 4, 64])
         use_follow_feed = use_follow_feed and config.get("follow_feed", True)
 
+        # Parse SESSDATA from various formats (Cookie-Editor JSON, simple string, etc.)
+        raw_sessdata = config.get("sessdata", "")
+        parsed_sessdata = self._parse_sessdata(raw_sessdata)
+
         # Method 1: Followed users feed (if enabled and has SESSDATA)
-        if use_follow_feed and config.get("sessdata"):
+        if use_follow_feed and parsed_sessdata:
             follow_items = await self._fetch_follow_feed(
-                sessdata=config["sessdata"],
+                sessdata=parsed_sessdata,
                 dynamic_types=dynamic_types,
                 keywords=keywords if config.get("keyword_filter", True) else [],
                 limit=min(max_results, config.get("fetch_follow_limit", 20)),
