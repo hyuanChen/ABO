@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
 import { useToast } from "../../components/Toast";
+import { CookieGuide } from "../../components/ConfigHelp";
 import {
   BiliDynamic,
   bilibiliFetchFollowed,
@@ -233,6 +234,7 @@ export function BilibiliTool() {
                     minHeight: "80px",
                   }}
                 />
+                <CookieGuide platform="bilibili" cookieName="SESSDATA" />
                 <button
                   onClick={handleVerifySessdata}
                   disabled={verifying || !sessdata.trim()}

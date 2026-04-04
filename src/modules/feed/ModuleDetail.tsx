@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Play, Clock, Calendar, User, Plus, X, Trash2, HelpCircle, History } from "lucide-react";
+import { ArrowLeft, Play, Clock, Calendar, User, Plus, X, Trash2, HelpCircle, History, Info } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, FeedModule } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
 import { useToast } from "../../components/Toast";
+import { CookieGuide } from "../../components/ConfigHelp";
 
 const SCHEDULE_OPTIONS = [
   { label: "8:00", value: "0 8 * * *" },
@@ -72,6 +73,7 @@ interface ModuleConfig {
   up_uids?: string[];
   follow_feed?: boolean;
   sessdata?: string;
+  api_key?: string;
 }
 
 interface SubscriptionDetail {
@@ -85,9 +87,9 @@ interface SubscriptionDetail {
 }
 
 interface SubDetailData {
+  module_id: string;
+  module_name: string;
   subscriptions: SubscriptionDetail[];
-  total: number;
-  active_count: number;
 }
 
 const TYPE_LABELS: Record<string, string> = {
@@ -130,6 +132,16 @@ export default function ModuleDetail({ module, onBack }: Props) {
         setModuleConfig(config);
       })
       .catch(() => setModuleConfig({}));
+
+    // Load global config for semantic-scholar-tracker (for API key)
+    if (module.id === "semantic-scholar-tracker") {
+      api.get<{ semantic_scholar_api_key?: string }>("/api/config")
+        .then((globalConfig) => {
+          setModuleConfig((prev) => ({ ...prev, api_key: globalConfig.semantic_scholar_api_key || "" }));
+        })
+        .catch(() => {});
+    }
+
     fetchSubscriptionDetails();
   }, [module.id]);
 
@@ -295,6 +307,31 @@ export default function ModuleDetail({ module, onBack }: Props) {
       <PageContent maxWidth="700px">
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
 
+          {/* 使用指南小卡片 */}
+          <div style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: "10px",
+            padding: "10px 14px",
+            borderRadius: "var(--radius-md)",
+            background: "rgba(99, 205, 218, 0.1)",
+            border: "1px solid rgba(99, 205, 218, 0.3)",
+          }}>
+            <Info style={{ width: "16px", height: "16px", color: "#63CDDA", flexShrink: 0, marginTop: "2px" }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-main)", marginBottom: "2px" }}>
+                {subConfig.desc || `${module.name}模块`}
+              </div>
+              {subConfig.types.length > 0 && (
+                <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                  支持类型:{subConfig.types.map(t => (
+                    <span key={t.type} style={{ color: "var(--text-secondary)" }}>· {t.label}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* 运行设置行 */}
           <div style={{
             display: "flex",
@@ -381,7 +418,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
           </div>
 
           {/* 正在订阅卡片 */}
-          <Card title={`正在订阅 (${subDetails?.active_count || 0})`} icon={<Calendar style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}>
+          <Card title={`正在订阅 (${subDetails?.subscriptions?.filter(s => s.is_active !== false).length || 0})`} icon={<Calendar style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}>
             <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
 
               {/* 添加订阅按钮 */}
@@ -511,7 +548,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
                   )}
 
                   {/* 历史订阅快捷恢复 */}
-                  {subDetails && subDetails.subscriptions.filter(s => !s.is_active).length > 0 && (
+                  {subDetails && subDetails.subscriptions.filter(s => s.is_active === false).length > 0 && (
                     <div style={{ marginTop: "12px" }}>
                       <div style={{
                         fontSize: "0.75rem",
@@ -526,7 +563,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
                       </div>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
                         {subDetails.subscriptions
-                          .filter(s => !s.is_active)
+                          .filter(s => s.is_active === false)
                           .slice(0, 5)
                           .map((sub, idx) => (
                             <button
@@ -560,14 +597,14 @@ export default function ModuleDetail({ module, onBack }: Props) {
                 <div style={{ textAlign: "center", padding: "20px", color: "var(--text-muted)", fontSize: "0.875rem" }}>
                   加载中...
                 </div>
-              ) : !subDetails || subDetails.subscriptions.filter(s => s.is_active).length === 0 ? (
+              ) : !subDetails || subDetails.subscriptions.filter(s => s.is_active !== false).length === 0 ? (
                 <div style={{ textAlign: "center", padding: "20px", color: "var(--text-muted)", fontSize: "0.875rem" }}>
                   暂无订阅，点击上方添加
                 </div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                   {subDetails.subscriptions
-                    .filter(s => s.is_active)
+                    .filter(s => s.is_active !== false)
                     .map((sub, idx) => (
                       <div
                         key={idx}
@@ -583,12 +620,12 @@ export default function ModuleDetail({ module, onBack }: Props) {
                       >
                         {/* 开关按钮 */}
                         <div
-                          onClick={() => toggleSubscription(sub.type, sub.value, sub.is_active)}
+                          onClick={() => toggleSubscription(sub.type, sub.value, true)}
                           style={{
                             width: "36px",
                             height: "20px",
                             borderRadius: "10px",
-                            background: sub.is_active ? "#10B981" : "var(--text-muted)",
+                            background: "#10B981",
                             position: "relative",
                             cursor: "pointer",
                             transition: "background 0.2s",
@@ -602,7 +639,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
                             background: "white",
                             position: "absolute",
                             top: "2px",
-                            left: sub.is_active ? "18px" : "2px",
+                            left: "18px",
                             transition: "left 0.2s",
                           }} />
                         </div>
@@ -665,7 +702,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
           </Card>
 
           {/* 历史订阅折叠 */}
-          {subDetails && subDetails.total > (subDetails.active_count || 0) && (
+          {subDetails && subDetails.subscriptions.filter(s => s.is_active === false).length > 0 && (
             <Card>
               <div
                 onClick={() => setShowHistory(!showHistory)}
@@ -679,14 +716,14 @@ export default function ModuleDetail({ module, onBack }: Props) {
                 }}
               >
                 <History style={{ width: "16px", height: "16px" }} />
-                <span>已移除的订阅 ({subDetails.total - subDetails.active_count})</span>
+                <span>已移除的订阅 ({subDetails.subscriptions.filter(s => s.is_active === false).length})</span>
                 <span style={{ marginLeft: "auto", transform: showHistory ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s" }}>▼</span>
               </div>
 
               {showHistory && (
                 <div style={{ marginTop: "16px", display: "flex", flexDirection: "column", gap: "8px" }}>
                   {subDetails.subscriptions
-                    .filter(s => !s.is_active)
+                    .filter(s => s.is_active === false)
                     .map((sub, idx) => (
                       <div
                         key={idx}
@@ -702,7 +739,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
                       >
                         {/* 开关按钮 - 可恢复 */}
                         <div
-                          onClick={() => toggleSubscription(sub.type, sub.value, sub.is_active)}
+                          onClick={() => toggleSubscription(sub.type, sub.value, false)}
                           style={{
                             width: "36px",
                             height: "20px",
@@ -766,9 +803,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
                     outline: "none",
                   }}
                 />
-                <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: 0 }}>
-                  从浏览器开发者工具获取 SESSDATA，用于读取关注动态
-                </p>
+                <CookieGuide platform="bilibili" cookieName="SESSDATA" />
                 <button
                   onClick={async () => {
                     try {
@@ -840,6 +875,62 @@ export default function ModuleDetail({ module, onBack }: Props) {
                   }}
                 >
                   保存关键词
+                </button>
+              </div>
+            </Card>
+          )}
+
+          {/* Semantic Scholar API Key 配置 */}
+          {module.id === "semantic-scholar-tracker" && (
+            <Card title="API 配置" icon={<span style={{ fontSize: "14px" }}>🔑</span>}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                    Semantic Scholar API Key
+                  </label>
+                  <input
+                    type="password"
+                    value={moduleConfig.api_key || ""}
+                    onChange={(e) => setModuleConfig({ ...moduleConfig, api_key: e.target.value })}
+                    placeholder="输入你的 API Key（可选）"
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: "var(--radius-md)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-app)",
+                      color: "var(--text-main)",
+                      fontSize: "0.875rem",
+                      outline: "none",
+                    }}
+                  />
+                  <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: 0 }}>
+                    留空将使用默认 API Key。如需使用自己的 Key，请从
+                    <a href="https://www.semanticscholar.org/product/api" target="_blank" rel="noopener noreferrer" style={{ color: "var(--color-primary)", textDecoration: "underline" }}>Semantic Scholar</a>
+                    申请
+                  </p>
+                </div>
+                <button
+                  onClick={async () => {
+                    try {
+                      await api.post("/api/config", { semantic_scholar_api_key: moduleConfig.api_key || "" });
+                      toast.success("API Key 已保存");
+                    } catch {
+                      toast.error("保存失败");
+                    }
+                  }}
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--color-primary)",
+                    color: "white",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    border: "none",
+                    cursor: "pointer",
+                    alignSelf: "flex-start",
+                  }}
+                >
+                  保存 API Key
                 </button>
               </div>
             </Card>

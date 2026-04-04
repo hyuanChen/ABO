@@ -20,6 +20,7 @@ import {
 import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
 import { api } from "../../core/api";
 import { useToast } from "../../components/Toast";
+import { CookieGuide } from "../../components/ConfigHelp";
 
 interface XHSNote {
   id: string;
@@ -476,17 +477,8 @@ export function XiaohongshuTool() {
       <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
         <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
           配置小红书登录 Cookie 后可获取真实搜索结果。
-          <a
-            href="#"
-            onClick={(e) => {
-              e.preventDefault();
-              toast.info("请在小红书网页版登录后，从浏览器开发者工具复制 Cookie");
-            }}
-            style={{ color: "var(--color-primary)", marginLeft: "8px" }}
-          >
-            如何获取？
-          </a>
         </p>
+        <CookieGuide platform="xiaohongshu" cookieName="Cookie" />
 
         {cookiePreview && (
           <div

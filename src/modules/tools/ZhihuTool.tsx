@@ -23,6 +23,7 @@ import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState 
 import { api } from "../../core/api";
 import { useToast } from "../../components/Toast";
 import { Search as SearchIcon } from "lucide-react";
+import { CookieGuide } from "../../components/ConfigHelp";
 
 interface ZhihuContent {
   id: string;
@@ -528,6 +529,10 @@ export function ZhihuTool() {
                     Cookie 仅存储在本地，用于访问知乎 API。请勿分享您的 Cookie。
                   </p>
                 </div>
+              </div>
+
+              <div className="mb-4">
+                <CookieGuide platform="zhihu" cookieName="Cookie" />
               </div>
 
               <div className="mb-4">
