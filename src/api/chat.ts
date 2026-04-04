@@ -2,18 +2,36 @@ import type { CliConfig, Conversation, Message, StreamEvent } from '../types/cha
 
 const API_BASE = 'http://127.0.0.1:8765/api/chat';
 
+// Helper function to convert snake_case to camelCase
+function toCamelCase<T>(obj: unknown): T {
+  if (obj === null || typeof obj !== 'object') {
+    return obj as T;
+  }
+
+  if (Array.isArray(obj)) {
+    return obj.map((item) => toCamelCase(item)) as T;
+  }
+
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const camelKey = key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+    result[camelKey] = toCamelCase(value);
+  }
+  return result as T;
+}
+
 // === CLI Detection ===
 
 export async function detectClis(force = false): Promise<CliConfig[]> {
   const res = await fetch(`${API_BASE}/cli/detect?force=${force}`);
   if (!res.ok) throw new Error('Failed to detect CLIs');
-  return res.json();
+  return toCamelCase<CliConfig[]>(await res.json());
 }
 
 export async function getCliInfo(cliId: string): Promise<CliConfig> {
   const res = await fetch(`${API_BASE}/cli/${cliId}`);
   if (!res.ok) throw new Error('CLI not found');
-  return res.json();
+  return toCamelCase<CliConfig>(await res.json());
 }
 
 // === Conversation Management ===
@@ -29,7 +47,7 @@ export async function createConversation(
     body: JSON.stringify({ cli_type: cliType, title, workspace }),
   });
   if (!res.ok) throw new Error('Failed to create conversation');
-  return res.json();
+  return toCamelCase<Conversation>(await res.json());
 }
 
 export async function listConversations(cliType?: string): Promise<Conversation[]> {
@@ -38,13 +56,13 @@ export async function listConversations(cliType?: string): Promise<Conversation[
     : `${API_BASE}/conversations`;
   const res = await fetch(url);
   if (!res.ok) throw new Error('Failed to list conversations');
-  return res.json();
+  return toCamelCase<Conversation[]>(await res.json());
 }
 
 export async function getConversation(convId: string): Promise<Conversation> {
   const res = await fetch(`${API_BASE}/conversations/${convId}`);
   if (!res.ok) throw new Error('Conversation not found');
-  return res.json();
+  return toCamelCase<Conversation>(await res.json());
 }
 
 export async function deleteConversation(convId: string): Promise<void> {
@@ -73,7 +91,7 @@ export async function getMessages(
 
   const res = await fetch(url);
   if (!res.ok) throw new Error('Failed to get messages');
-  return res.json();
+  return toCamelCase<Message[]>(await res.json());
 }
 
 // === WebSocket ===

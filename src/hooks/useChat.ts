@@ -245,7 +245,8 @@ export function useChat(): UseChatReturn {
     // Send message
     wsRef.current.send(
       JSON.stringify({
-        message: content,
+        type: 'message',
+        content: content,
         conversation_id: conversation.id,
       })
     );
