@@ -23,6 +23,9 @@ class XiaoyuzhouTracker(Module):
     schedule = "0 10 * * *"  # Daily at 10 AM
     icon = "headphones"
     output = ["obsidian", "ui"]
+    subscription_types = [
+        {"type": "podcast_id", "label": "播客节目", "placeholder": "输入播客ID或链接"},
+    ]
 
     # RSSHub endpoint for Xiaoyuzhou
     RSSHUB_BASE = "https://rsshub.app"

@@ -1725,24 +1725,7 @@ async def get_module_config(module_id: str):
     prefs = _prefs.all_data()
     module_prefs = prefs.get("modules", {}).get(module_id, {})
 
-    subscription_types = {
-        "bilibili-tracker": [
-            {"type": "up_uid", "label": "UP主 UID", "placeholder": "输入UP主UID或空间链接"},
-        ],
-        "xiaohongshu-tracker": [
-            {"type": "user_id", "label": "小红书用户ID", "placeholder": "输入用户主页链接或ID"},
-        ],
-        "zhihu-tracker": [
-            {"type": "topic", "label": "知乎话题", "placeholder": "输入话题ID或链接"},
-            {"type": "user", "label": "知乎用户", "placeholder": "输入用户主页链接"},
-        ],
-        "xiaoyuzhou-tracker": [
-            {"type": "podcast_id", "label": "播客节目", "placeholder": "输入播客ID或链接"},
-        ],
-        "arxiv-tracker": [],
-        "semantic-scholar-tracker": [],
-        "folder-monitor": [],
-    }.get(module_id, [])
+    subscription_types = getattr(module, "subscription_types", [])
 
     config = {
         "module_id": module_id,
@@ -1761,6 +1744,7 @@ async def get_module_config(module_id: str):
         "keyword_filter": module_prefs.get("keyword_filter", True),
         "sessdata": module_prefs.get("sessdata", ""),
         "cookie": module_prefs.get("cookie", ""),
+        # UI hints for adding subscriptions
         "subscription_types": subscription_types,
     }
 

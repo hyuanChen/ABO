@@ -21,8 +21,11 @@ class XiaohongshuTracker(Module):
     id = "xiaohongshu-tracker"
     name = "小红书"
     schedule = "0 10 * * *"  # Daily at 10 AM
-    icon = "book-heart"
+    icon = "book-open"
     output = ["obsidian", "ui"]
+    subscription_types = [
+        {"type": "user_id", "label": "小红书用户ID", "placeholder": "输入用户主页链接或ID"},
+    ]
 
     # RSSHub endpoint for Xiaohongshu (if available)
     # Alternative: use searx or other aggregators

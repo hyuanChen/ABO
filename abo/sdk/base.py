@@ -9,6 +9,7 @@ class Module(ABC):
     schedule: str = "0 8 * * *"
     icon: str = "rss"
     enabled: bool = True
+    subscription_types: list[dict] = []
 
     def __init_subclass__(cls, **kwargs):
         """子类未显式声明 output 时，默认同时输出到 obsidian 和 ui"""

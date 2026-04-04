@@ -73,6 +73,9 @@ class BilibiliTracker(Module):
     schedule = "0 11 * * *"  # Daily at 11 AM
     icon = "play-circle"
     output = ["obsidian", "ui"]
+    subscription_types = [
+        {"type": "up_uid", "label": "UP主 UID", "placeholder": "输入UP主UID或空间链接"},
+    ]
 
     # Bilibili API endpoints
     API_BASE = "https://api.bilibili.com"

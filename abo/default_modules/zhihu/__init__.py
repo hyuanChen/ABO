@@ -23,6 +23,10 @@ class ZhihuTracker(Module):
     schedule = "0 13 * * *"  # Daily at 1 PM
     icon = "help-circle"
     output = ["obsidian", "ui"]
+    subscription_types = [
+        {"type": "topic", "label": "知乎话题", "placeholder": "输入话题ID或链接"},
+        {"type": "user", "label": "知乎用户", "placeholder": "输入用户主页链接"},
+    ]
 
     # RSSHub endpoint for Zhihu
     RSSHUB_BASE = "https://rsshub.app"
