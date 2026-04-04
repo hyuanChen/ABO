@@ -13,18 +13,35 @@ interface SchedulerJob {
 export default function SchedulerTimeline() {
   const [jobs, setJobs] = useState<SchedulerJob[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    loadJobs();
+    let cancelled = false;
+    async function fetchJobs() {
+      try {
+        setLoading(true);
+        const data = await api.get<{ jobs: SchedulerJob[] }>("/api/scheduler/jobs");
+        if (!cancelled) setJobs(data.jobs);
+      } catch (e) {
+        console.error("Failed to load scheduler jobs:", e);
+        if (!cancelled) setError("加载失败，请稍后重试");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    fetchJobs();
+    return () => { cancelled = true; };
   }, []);
 
   async function loadJobs() {
+    setError(null);
     try {
       setLoading(true);
       const data = await api.get<{ jobs: SchedulerJob[] }>("/api/scheduler/jobs");
       setJobs(data.jobs);
     } catch (e) {
       console.error("Failed to load scheduler jobs:", e);
+      setError("加载失败，请稍后重试");
     } finally {
       setLoading(false);
     }
@@ -40,11 +57,36 @@ export default function SchedulerTimeline() {
     return <div style={{ color: "var(--text-muted)", fontSize: "0.875rem" }}>加载定时任务...</div>;
   }
 
+  if (error) {
+    return (
+      <div style={{ color: "var(--color-error)", fontSize: "0.875rem" }}>
+        {error}
+        <button
+          type="button"
+          onClick={loadJobs}
+          className="timeline-refresh-btn"
+          style={{
+            marginLeft: "12px",
+            fontSize: "0.75rem",
+            color: "var(--text-muted)",
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+          }}
+        >
+          重试
+        </button>
+      </div>
+    );
+  }
+
   if (jobs.length === 0) {
     return <div style={{ color: "var(--text-muted)", fontSize: "0.875rem" }}>暂无定时任务</div>;
   }
 
   return (
+    <>
+
     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
       {jobs.map((job) => (
         <div
@@ -77,7 +119,9 @@ export default function SchedulerTimeline() {
         </div>
       ))}
       <button
+        type="button"
         onClick={loadJobs}
+        className="timeline-refresh-btn"
         style={{
           alignSelf: "flex-start",
           fontSize: "0.75rem",
@@ -89,6 +133,13 @@ export default function SchedulerTimeline() {
       >
         刷新
       </button>
+      <style>{`
+        .timeline-refresh-btn:focus-visible {
+          outline: 2px solid var(--color-primary);
+          outline-offset: 2px;
+        }
+      `}</style>
     </div>
+    </>
   );
 }
