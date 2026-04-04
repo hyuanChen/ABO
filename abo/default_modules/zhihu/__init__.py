@@ -49,7 +49,6 @@ class ZhihuTracker(Module):
         config_keywords = []
         config_topics = []
         config_users = []
-        config_cookie = ""
 
         if prefs_path.exists():
             data = json.loads(prefs_path.read_text())
@@ -57,7 +56,6 @@ class ZhihuTracker(Module):
             config_keywords = zhihu_config.get("keywords", [])
             config_topics = zhihu_config.get("topics", [])
             config_users = zhihu_config.get("users", [])
-            config_cookie = zhihu_config.get("cookie", "")
 
         keywords = keywords or config_keywords or [
             "科研",
