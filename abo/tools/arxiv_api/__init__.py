@@ -3,8 +3,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal, Optional
 import asyncio
+import logging
 
 import arxiv
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["ArxivAPITool", "ArxivPaper", "arxiv_api_search"]
 
 
 @dataclass
@@ -77,6 +82,22 @@ class ArxivAPITool:
         author: Optional[str] = None,
         title: Optional[str] = None,
     ) -> list[ArxivPaper]:
+        """Search arXiv for papers matching the given criteria.
+
+        Args:
+            keywords: List of search keywords
+            categories: Optional list of arXiv categories (e.g., ["cs.AI", "cs.LG"])
+            mode: "AND" or "OR" for combining keywords
+            max_results: Maximum number of results to return
+            days_back: Optional filter for papers published within N days
+            sort_by: Sort criterion ("submittedDate", "relevance", "lastUpdatedDate")
+            sort_order: Sort direction ("descending" or "ascending")
+            author: Optional author name filter
+            title: Optional title filter
+
+        Returns:
+            List of ArxivPaper objects matching the search criteria
+        """
         query = self._build_query(keywords, categories, mode, author, title)
 
         sort_map = {
@@ -85,12 +106,16 @@ class ArxivAPITool:
             "lastUpdatedDate": arxiv.SortCriterion.LastUpdatedDate,
         }
         sort_criterion = sort_map.get(sort_by, arxiv.SortCriterion.SubmittedDate)
+        if sort_by not in sort_map:
+            logger.warning(f"Invalid sort_by value: {sort_by}, using 'submittedDate'")
 
         sort_dir_map = {
             "descending": arxiv.SortOrder.Descending,
             "ascending": arxiv.SortOrder.Ascending,
         }
         sort_direction = sort_dir_map.get(sort_order, arxiv.SortOrder.Descending)
+        if sort_order not in sort_dir_map:
+            logger.warning(f"Invalid sort_order value: {sort_order}, using 'descending'")
 
         search = arxiv.Search(
             query=query,
@@ -99,8 +124,12 @@ class ArxivAPITool:
             sort_order=sort_direction,
         )
 
-        loop = asyncio.get_event_loop()
-        results = await loop.run_in_executor(None, lambda: list(self.client.results(search)))
+        try:
+            loop = asyncio.get_event_loop()
+            results = await loop.run_in_executor(None, lambda: list(self.client.results(search)))
+        except Exception as e:
+            logger.error(f"[arxiv_api] Failed to search arXiv: {e}")
+            return []
 
         papers = []
         cutoff = datetime.utcnow() - timedelta(days=days_back) if days_back else None
@@ -128,6 +157,14 @@ class ArxivAPITool:
         return papers
 
     def to_dict(self, paper: ArxivPaper) -> dict:
+        """Convert an ArxivPaper to a dictionary.
+
+        Args:
+            paper: ArxivPaper instance to convert
+
+        Returns:
+            Dictionary representation of the paper
+        """
         return {
             "id": paper.id,
             "title": paper.title,
@@ -153,7 +190,25 @@ async def arxiv_api_search(
     days_back: Optional[int] = None,
     sort_by: Literal["submittedDate", "relevance", "lastUpdatedDate"] = "submittedDate",
     sort_order: Literal["descending", "ascending"] = "descending",
+    author: Optional[str] = None,
+    title: Optional[str] = None,
 ) -> list[dict]:
+    """Convenience function to search arXiv and return results as dictionaries.
+
+    Args:
+        keywords: List of search keywords
+        categories: Optional list of arXiv categories (e.g., ["cs.AI", "cs.LG"])
+        mode: "AND" or "OR" for combining keywords
+        max_results: Maximum number of results to return
+        days_back: Optional filter for papers published within N days
+        sort_by: Sort criterion ("submittedDate", "relevance", "lastUpdatedDate")
+        sort_order: Sort direction ("descending" or "ascending")
+        author: Optional author name filter
+        title: Optional title filter
+
+    Returns:
+        List of dictionaries containing paper information
+    """
     tool = ArxivAPITool()
     papers = await tool.search(
         keywords=keywords,
@@ -163,5 +218,7 @@ async def arxiv_api_search(
         days_back=days_back,
         sort_by=sort_by,
         sort_order=sort_order,
+        author=author,
+        title=title,
     )
     return [tool.to_dict(p) for p in papers]
