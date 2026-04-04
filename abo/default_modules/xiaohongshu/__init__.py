@@ -67,7 +67,7 @@ class XiaohongshuTracker(Module):
         # If user IDs are provided, try to fetch their notes
         if user_ids:
             for user_id in user_ids[:3]:  # Limit to 3 users
-                user_items = await self._fetch_user_notes(user_id, max_results // len(user_ids))
+                user_items = await self._fetch_user_notes(user_id, config_cookie, max_results // len(user_ids))
                 items.extend(user_items)
 
         # If keywords are provided, search for matching notes
@@ -79,16 +79,10 @@ class XiaohongshuTracker(Module):
 
         return items[:max_results]
 
-    async def _fetch_user_notes(self, user_id: str, limit: int) -> list[Item]:
+    async def _fetch_user_notes(self, user_id: str, cookie: str, limit: int) -> list[Item]:
         items = []
         clean_id = self._extract_user_id(user_id)
         url = f"{self.RSSHUB_BASE}/xiaohongshu/user/{clean_id}"
-
-        prefs_path = Path.home() / ".abo" / "preferences.json"
-        cookie = ""
-        if prefs_path.exists():
-            data = json.loads(prefs_path.read_text())
-            cookie = data.get("modules", {}).get("xiaohongshu-tracker", {}).get("cookie", "")
 
         headers = {"User-Agent": "ABO-Tracker/1.0"}
         if cookie:

@@ -67,11 +67,13 @@ class ZhihuTracker(Module):
         topics = topics or config_topics
         users = users or config_users
 
+        cookie = self._module_cookie()
+
         # Fetch from topics
         if topics:
             for topic in topics[:3]:
                 topic_items = await self._fetch_topic_content(
-                    topic, keywords, max_results // len(topics)
+                    topic, keywords, cookie, max_results // len(topics)
                 )
                 items.extend(topic_items)
 
@@ -79,7 +81,7 @@ class ZhihuTracker(Module):
         if users:
             for user in users[:3]:
                 user_items = await self._fetch_user_content(
-                    user, keywords, max_results // len(users)
+                    user, keywords, cookie, max_results // len(users)
                 )
                 items.extend(user_items)
 
@@ -150,7 +152,7 @@ class ZhihuTracker(Module):
         return items
 
     async def _fetch_topic_content(
-        self, topic: str, keywords: list[str], limit: int
+        self, topic: str, keywords: list[str], cookie: str, limit: int
     ) -> list[Item]:
         """Fetch content from a specific topic."""
         items = []
@@ -158,12 +160,6 @@ class ZhihuTracker(Module):
 
         # Try RSSHub endpoint for topic hot list
         url = f"{self.RSSHUB_BASE}/zhihu/topic/{clean_topic}/hot"
-
-        prefs_path = Path.home() / ".abo" / "preferences.json"
-        cookie = ""
-        if prefs_path.exists():
-            data = json.loads(prefs_path.read_text())
-            cookie = data.get("modules", {}).get("zhihu-tracker", {}).get("cookie", "")
 
         headers = {"User-Agent": "ABO-Tracker/1.0"}
         if cookie:
@@ -182,7 +178,7 @@ class ZhihuTracker(Module):
         return items
 
     async def _fetch_user_content(
-        self, user: str, keywords: list[str], limit: int
+        self, user: str, keywords: list[str], cookie: str, limit: int
     ) -> list[Item]:
         """Fetch content from a specific user."""
         items = []
@@ -190,12 +186,6 @@ class ZhihuTracker(Module):
 
         # Try RSSHub endpoint for user activities
         url = f"{self.RSSHUB_BASE}/zhihu/people/activities/{clean_user}"
-
-        prefs_path = Path.home() / ".abo" / "preferences.json"
-        cookie = ""
-        if prefs_path.exists():
-            data = json.loads(prefs_path.read_text())
-            cookie = data.get("modules", {}).get("zhihu-tracker", {}).get("cookie", "")
 
         headers = {"User-Agent": "ABO-Tracker/1.0"}
         if cookie:

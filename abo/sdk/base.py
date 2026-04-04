@@ -30,6 +30,15 @@ class Module(ABC):
         """用户操作回调，子类可重写以实现自定义逻辑"""
         pass
 
+    def _module_cookie(self) -> str:
+        import json
+        from pathlib import Path
+        prefs_path = Path.home() / ".abo" / "preferences.json"
+        if prefs_path.exists():
+            data = json.loads(prefs_path.read_text())
+            return data.get("modules", {}).get(self.id, {}).get("cookie", "")
+        return ""
+
     def get_status(self) -> dict:
         return {
             "id": self.id,
