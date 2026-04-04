@@ -268,18 +268,16 @@ class BilibiliTracker(Module):
         limit: int,
         seen: set[str],
     ) -> list[Item]:
-        """Fetch followed users' dynamics from Bilibili API."""
-        items = []
+        """Fetch followed users' dynamics from Bilibili API.
 
-        # Build type_list bitmask (268435455 = all types)
-        type_list = 268435455
-        if dynamic_types:
-            type_list = sum(1 << (t - 1) for t in dynamic_types)
+        Note: Bilibili API doesn't support combined type_list, must fetch each type separately.
+        """
+        items = []
+        VALID_TYPES = {1, 2, 4, 8, 64}
+
+        valid_types = [t for t in dynamic_types if t in VALID_TYPES] if dynamic_types else [8, 2, 4, 64]
 
         url = "https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/dynamic_new"
-        params = {
-            "type_list": type_list,
-        }
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -287,29 +285,31 @@ class BilibiliTracker(Module):
             "Referer": "https://t.bilibili.com/",
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                resp = await client.get(url, params=params, headers=headers)
+        # Fetch each type separately (API doesn't support combined type_list)
+        for type_val in valid_types:
+            try:
+                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                    resp = await client.get(url, params={"type_list": type_val}, headers=headers)
 
-            if resp.status_code != 200:
-                print(f"[bilibili] Follow feed API error: {resp.status_code}")
-                return items
+                if resp.status_code != 200:
+                    print(f"[bilibili] Follow feed API error for type={type_val}: {resp.status_code}")
+                    continue
 
-            data = resp.json()
-            if data.get("code") != 0:
-                print(f"[bilibili] API error: {data.get('message')}")
-                return items
+                data = resp.json()
+                if data.get("code") != 0:
+                    print(f"[bilibili] API error for type={type_val}: {data.get('message')}")
+                    continue
 
-            cards = data.get("data", {}).get("cards", [])
+                cards = data.get("data", {}).get("cards", [])
 
-            for card in cards[:limit]:
-                item = self._parse_dynamic_card(card, keywords, seen)
-                if item:
-                    items.append(item)
-                    seen.add(item.id)
+                for card in cards[:limit // len(valid_types) + 2]:
+                    item = self._parse_dynamic_card(card, keywords, seen)
+                    if item:
+                        items.append(item)
+                        seen.add(item.id)
 
-        except Exception as e:
-            print(f"[bilibili] Failed to fetch follow feed: {e}")
+            except Exception as e:
+                print(f"[bilibili] Failed to fetch type={type_val}: {e}")
 
         return items
 
@@ -396,7 +396,7 @@ class BilibiliTracker(Module):
         keywords: list[str],
     ) -> Item | None:
         """Parse an image/text dynamic."""
-        item_content = card.get("item", {})
+        item_content = card.get("item") or {}
         description = item_content.get("description", "")
 
         # Keyword filtering
@@ -436,7 +436,7 @@ class BilibiliTracker(Module):
         keywords: list[str],
     ) -> Item | None:
         """Parse a plain text dynamic."""
-        item_content = card.get("item", {})
+        item_content = card.get("item") or {}
         content = item_content.get("content", "")
 
         # Keyword filtering

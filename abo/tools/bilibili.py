@@ -49,6 +49,57 @@ class BilibiliToolAPI:
         self.timeout = timeout
         self.client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
 
+    async def _fetch_single_type(
+        self,
+        type_list: int,
+        keywords: list[str] = None,
+        limit: int = 20,
+        days_back: int = 7,
+    ) -> list[BiliDynamic]:
+        """获取单个类型的动态（内部方法）"""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Cookie": f"SESSDATA={self.sessdata}",
+            "Referer": "https://t.bilibili.com/",
+        }
+
+        params = {"type_list": type_list}
+
+        try:
+            resp = await self.client.get(
+                self.DYNAMIC_API, params=params, headers=headers
+            )
+
+            if resp.status_code != 200:
+                print(f"[bilibili-tool] API error for type_list={type_list}: {resp.status_code}")
+                return []
+
+            data = resp.json()
+
+            if data.get("code") != 0:
+                print(f"[bilibili-tool] API error for type_list={type_list}: {data.get('message')}")
+                return []
+
+            cards = data.get("data", {}).get("cards", [])
+            dynamics = []
+            cutoff = datetime.now() - timedelta(days=days_back)
+
+            for card in cards[:limit]:
+                dynamic = self._parse_dynamic_card(card, keywords)
+                if dynamic:
+                    # 时间过滤
+                    if dynamic.published_at and dynamic.published_at < cutoff:
+                        continue
+                    dynamics.append(dynamic)
+                    if len(dynamics) >= limit:
+                        break
+
+            return dynamics
+
+        except Exception as e:
+            print(f"[bilibili-tool] Failed to fetch type_list={type_list}: {e}")
+            return []
+
     async def fetch_followed_dynamics(
         self,
         dynamic_types: list[int] = None,
@@ -58,6 +109,9 @@ class BilibiliToolAPI:
     ) -> list[BiliDynamic]:
         """
         获取关注列表的动态
+
+        Note: Bilibili API 不支持组合 type_list，只能传单个类型或 268435455 (all)
+        所以我们需要分别获取每种类型，然后合并
 
         Args:
             dynamic_types: 动态类型 [8=视频, 2=图文, 4=文字, 64=专栏]
@@ -75,77 +129,37 @@ class BilibiliToolAPI:
         if dynamic_types is None:
             dynamic_types = [8, 2, 4, 64]
 
-        # Build type_list bitmask (0x0FFFFFFF = all types = 268435455)
-        # This is the bitmask Bilibili API expects for fetching all dynamic types
-        type_list = 0x0FFFFFFF
-        if dynamic_types:
-            # Filter out 0 values and validate
-            valid_types = [t for t in dynamic_types if t > 0]
-            print(f"[bilibili-tool] Requested dynamic_types: {dynamic_types}, valid: {valid_types}")
-            if valid_types:
-                type_list = sum(1 << (t - 1) for t in valid_types)
-        print(f"[bilibili-tool] Using type_list: {type_list} (hex: {hex(type_list)})")
+        VALID_TYPES = {1, 2, 4, 8, 64}
+        valid_types = [t for t in dynamic_types if t in VALID_TYPES]
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Cookie": f"SESSDATA={self.sessdata}",
-            "Referer": "https://t.bilibili.com/",
-        }
+        print(f"[bilibili-tool] Fetching types: {valid_types}, limit={limit}, days_back={days_back}")
 
-        params = {"type_list": type_list}
+        all_dynamics = []
 
-        try:
-            print(f"[bilibili-tool] Request URL: {self.DYNAMIC_API}")
-            print(f"[bilibili-tool] Headers: Cookie=SESSDATA={self.sessdata[:20]}... Referer={headers['Referer']}")
-            print(f"[bilibili-tool] Params: {params}")
-
-            resp = await self.client.get(
-                self.DYNAMIC_API, params=params, headers=headers
+        # Bilibili API 不支持组合 type_list，需要分别获取每种类型
+        for type_val in valid_types:
+            type_dynamics = await self._fetch_single_type(
+                type_list=type_val,
+                keywords=keywords,
+                limit=limit // len(valid_types) + 5,  # 每种类型分配限额
+                days_back=days_back,
             )
+            print(f"[bilibili-tool] Type {type_val}: got {len(type_dynamics)} dynamics")
+            all_dynamics.extend(type_dynamics)
 
-            print(f"[bilibili-tool] Response status: {resp.status_code}")
+        # 按时间排序
+        all_dynamics.sort(key=lambda x: x.published_at or datetime.min, reverse=True)
 
-            if resp.status_code != 200:
-                print(f"[bilibili-tool] API error: {resp.status_code}")
-                return []
+        # 去重（按 dynamic_id）
+        seen_ids = set()
+        unique_dynamics = []
+        for d in all_dynamics:
+            if d.dynamic_id not in seen_ids:
+                seen_ids.add(d.dynamic_id)
+                unique_dynamics.append(d)
 
-            data = resp.json()
-            print(f"[bilibili-tool] API response code: {data.get('code')}, message: {data.get('message')}")
-            if data.get("code") != 0:
-                print(f"[bilibili-tool] API error: {data.get('message')}")
-                return []
-
-            cards = data.get("data", {}).get("cards", [])
-            print(f"[bilibili-tool] Got {len(cards)} cards from API")
-
-            # Debug: 打印返回数据的结构
-            if data.get("data"):
-                data_keys = list(data["data"].keys())
-                print(f"[bilibili-tool] Response data keys: {data_keys}")
-            else:
-                print(f"[bilibili-tool] No data field in response")
-            dynamics = []
-            cutoff = datetime.now() - timedelta(days=days_back)
-
-            for card in cards[:limit * 2]:  # 获取更多用于过滤
-                dynamic = self._parse_dynamic_card(card, keywords)
-                if dynamic:
-                    # 时间过滤
-                    if dynamic.published_at and dynamic.published_at < cutoff:
-                        print(f"[bilibili-tool] Skipping {dynamic.dynamic_id} - too old")
-                        continue
-                    dynamics.append(dynamic)
-                    print(f"[bilibili-tool] Added: {dynamic.title[:50]}... by {dynamic.author}")
-
-                    if len(dynamics) >= limit:
-                        break
-
-            print(f"[bilibili-tool] Returning {len(dynamics)} dynamics (keyword filter: {keywords if keywords else 'none'})")
-            return dynamics
-
-        except Exception as e:
-            print(f"[bilibili-tool] Failed to fetch dynamics: {e}")
-            return []
+        print(f"[bilibili-tool] Total: {len(unique_dynamics)} unique dynamics (after dedup)")
+        return unique_dynamics[:limit]
 
     def _parse_dynamic_card(
         self,
@@ -210,7 +224,7 @@ class BilibiliToolAPI:
         self, dynamic_id: str, desc: dict, card: dict, keywords: list[str]
     ) -> BiliDynamic | None:
         """解析图文动态"""
-        item = card.get("item", {})
+        item = card.get("item") or {}
         description = item.get("description", "")
 
         # 关键词过滤
@@ -242,7 +256,7 @@ class BilibiliToolAPI:
         self, dynamic_id: str, desc: dict, card: dict, keywords: list[str]
     ) -> BiliDynamic | None:
         """解析纯文字动态"""
-        item = card.get("item", {})
+        item = card.get("item") or {}
         content = item.get("content", "")
 
         # 关键词过滤

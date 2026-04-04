@@ -213,7 +213,7 @@ class XiaohongshuAPI:
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(
-                headless=False,  # 有头模式更难被检测
+                headless=True,
                 args=[
                     '--disable-blink-features=AutomationControlled',
                     '--disable-web-security',
@@ -221,23 +221,17 @@ class XiaohongshuAPI:
                 ]
             )
 
-            # 设置更真实的浏览器上下文
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800},
                 locale="zh-CN",
                 timezone_id="Asia/Shanghai",
-                permissions=["geolocation"],
             )
 
             # 注入脚本绕过 webdriver 检测
             await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5]
-                });
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
                 window.chrome = { runtime: {} };
             """)
 
@@ -265,47 +259,72 @@ class XiaohongshuAPI:
 
                 # 检查是否需要登录或验证
                 page_content = await page.content()
-                if "login" in current_url.lower() or "扫码" in page_content or "APP" in page_content or "请使用小红书APP" in page_content:
-                    print("\n" + "="*50)
-                    print("需要登录验证！")
-                    print("请在弹出的浏览器窗口中完成小红书登录/扫码")
-                    print("等待 30 秒...")
-                    print("="*50 + "\n")
-                    await asyncio.sleep(30)  # 给用户时间扫码
+                if "login" in current_url.lower():
+                    raise ValueError("Cookie 已过期，请重新获取 web_session")
 
-                    # 再次检查
-                    current_url = page.url
-                    page_content = await page.content()
-                    if "login" in current_url.lower() or "扫码" in page_content:
-                        print("30秒后仍未完成验证，请手动登录后再试")
-                        return []
-
-                    # 验证完成后刷新页面
-                    await page.reload(wait_until="domcontentloaded")
-                    await asyncio.sleep(5)
+                # 检查是否触发反爬（要求扫码/用APP访问）
+                anti_bot_keywords = ["扫码", "APP访问", "请使用小红书APP", "请在手机查看", "安全验证"]
+                if any(kw in page_content for kw in anti_bot_keywords):
+                    print(f"触发反爬验证: {[kw for kw in anti_bot_keywords if kw in page_content]}")
+                    raise ValueError("触发小红书反爬验证，请更新 Cookie 或稍后再试")
 
                 # 尝试多种方式提取数据
                 # 方式1: 直接执行 JavaScript 获取页面数据
                 notes_data = await page.evaluate('''() => {
                     const results = [];
-                    // 小红书的笔记卡片通常有这些特征
-                    const cards = document.querySelectorAll('[data-v-] > div, section, article');
+                    // 小红书的笔记卡片 - 尝试多种可能的选择器
+                    const selectors = [
+                        '[data-v-] > div',
+                        'section.note-item',
+                        '[class*="note-item"]',
+                        '[class*="feeds-item"]',
+                        'article',
+                        'a[href*="/explore/"]',
+                    ];
+
+                    let cards = [];
+                    for (const sel of selectors) {
+                        cards = document.querySelectorAll(sel);
+                        if (cards.length > 0) {
+                            console.log('找到选择器:', sel, '数量:', cards.length);
+                            break;
+                        }
+                    }
 
                     for (const card of cards) {
-                        // 查找标题
+                        // 查找标题 - 尝试多个选择器
                         let title = '';
-                        const titleSelectors = ['span[class*="title"]', 'a[class*="title"]', '.title', 'h3', 'h4'];
+                        const titleSelectors = [
+                            'span[class*="title"]',
+                            'a[class*="title"]',
+                            '.title',
+                            'h3',
+                            'h4',
+                            '[class*="desc"]',
+                            'span'
+                        ];
                         for (const sel of titleSelectors) {
                             const el = card.querySelector(sel);
-                            if (el && el.textContent.trim().length > 5) {
+                            if (el && el.textContent.trim().length > 3) {
                                 title = el.textContent.trim();
                                 break;
                             }
                         }
 
+                        // 如果没有标题，尝试获取整个卡片的文本
+                        if (!title && card.textContent) {
+                            const text = card.textContent.trim().substring(0, 100);
+                            if (text.length > 5) title = text;
+                        }
+
                         // 查找作者
                         let author = '未知';
-                        const authorSelectors = ['[class*="author"]', '[class*="nickname"]', '[class*="user"]'];
+                        const authorSelectors = [
+                            '[class*="author"]',
+                            '[class*="nickname"]',
+                            '[class*="user"]',
+                            '[class*="name"]'
+                        ];
                         for (const sel of authorSelectors) {
                             const el = card.querySelector(sel);
                             if (el && el.textContent.trim().length > 0 && el.textContent.trim().length < 50) {
@@ -320,13 +339,19 @@ class XiaohongshuAPI:
                         if (linkEl) {
                             href = linkEl.getAttribute('href');
                         }
+                        // 如果卡片本身就是链接
+                        if (!href && card.getAttribute && card.getAttribute('href')) {
+                            href = card.getAttribute('href');
+                        }
 
                         // 查找点赞数
                         let likes = 0;
-                        const text = card.textContent;
-                        const match = text.match(/(\d+\.?\d*)\s*[万k]?\s*赞/) || text.match(/赞\s*(\d+\.?\d*[万k]?)/);
-                        if (match) {
-                            likes = match[1];
+                        const text = card.textContent || '';
+                        const likeMatch = text.match(/(\d+\.?\d*)\s*[万k]?\s*赞/i) ||
+                                         text.match(/赞\s*(\d+\.?\d*[万k]?)/i) ||
+                                         text.match(/(\d+)\s*万?\s*喜欢/);
+                        if (likeMatch) {
+                            likes = likeMatch[1];
                         }
 
                         if (title || href) {

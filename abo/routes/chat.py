@@ -51,7 +51,18 @@ class SendMessageRequest(BaseModel):
     conversation_id: str
 
 
+class UpdateTitleRequest(BaseModel):
+    title: Optional[str] = None
+
+
 # === 连接管理器 ===
+
+class ConnectionInfo:
+    """连接信息"""
+    def __init__(self):
+        self.is_alive = True
+        self.last_pong = 0
+
 
 class ConnectionManager:
     """WebSocket 连接管理器 - 严格遵循 AionUi 协议"""
@@ -59,19 +70,34 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: dict = {}  # session_id -> WebSocket
         self.runners: dict = {}  # session_id -> runner
+        self.connection_info: dict = {}  # session_id -> ConnectionInfo
+        self._heartbeat_tasks: dict = {}  # session_id -> Task
 
-    async def connect(self, websocket: WebSocket, session_id: str):
+    async def connect(self, websocket: WebSocket, session_id: str, cli_type: str = None, raw_session_id: str = None):
         """建立连接"""
         await websocket.accept()
         self.active_connections[session_id] = websocket
+        self.connection_info[session_id] = ConnectionInfo()
+        # Send connected message immediately
+        await websocket.send_json({"type": "connected"})
         logger.info(f"WebSocket connected: {session_id}")
 
     def disconnect(self, session_id: str):
         """断开连接"""
         self.active_connections.pop(session_id, None)
+        self.connection_info.pop(session_id, None)
+        if session_id in self._heartbeat_tasks:
+            task = self._heartbeat_tasks.pop(session_id, None)
+            if task:
+                task.cancel()
         if session_id in self.runners:
             runner = self.runners.pop(session_id)
-            asyncio.create_task(runner.close())
+            try:
+                loop = asyncio.get_running_loop()
+                asyncio.create_task(runner.close())
+            except RuntimeError:
+                # No running event loop - sync context
+                pass
         logger.info(f"WebSocket disconnected: {session_id}")
 
     async def send_json(self, session_id: str, data: dict):
@@ -81,6 +107,12 @@ class ConnectionManager:
                 await self.active_connections[session_id].send_json(data)
             except Exception as e:
                 logger.error(f"Failed to send to {session_id}: {e}")
+
+    def handle_pong(self, session_id: str, timestamp: float):
+        """处理 pong 响应"""
+        if session_id in self.connection_info:
+            self.connection_info[session_id].last_pong = timestamp
+            self.connection_info[session_id].is_alive = True
 
 
 manager = ConnectionManager()
@@ -98,7 +130,7 @@ async def detect_clis(force: bool = False):
             "name": cli.name,
             "command": cli.command,
             "version": cli.version,
-            "is_available": cli.is_available,
+            "isAvailable": cli.is_available,
             "protocol": cli.protocol
         }
         for cli in clis
@@ -117,7 +149,7 @@ async def get_cli_info(cli_id: str):
         "name": info.name,
         "command": info.command,
         "version": info.version,
-        "is_available": info.is_available,
+        "isAvailable": info.is_available,
         "protocol": info.protocol
     }
 
@@ -214,10 +246,27 @@ async def delete_conversation(conv_id: str):
     return {"success": True}
 
 
+@router.get("/connections")
+async def get_connections():
+    """获取活跃的 WebSocket 连接列表"""
+    connections = []
+    for session_id in manager.active_connections.keys():
+        info = manager.connection_info.get(session_id)
+        connections.append({
+            "session_id": session_id,
+            "connected": True,
+            "is_alive": info.is_alive if info else True
+        })
+    return {
+        "connections": connections,
+        "count": len(connections)
+    }
+
+
 @router.patch("/conversations/{conv_id}/title")
-async def update_title(conv_id: str, title: str):
+async def update_title(conv_id: str, req: UpdateTitleRequest):
     """更新对话标题"""
-    conversation_store.update_conversation_title(conv_id, title)
+    conversation_store.update_conversation_title(conv_id, req.title or "")
     return {"success": True}
 
 

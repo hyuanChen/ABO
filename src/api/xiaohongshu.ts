@@ -83,6 +83,7 @@ export interface TrendsResponse {
 
 export interface VerifyCookieRequest {
   web_session: string;
+  id_token?: string;
 }
 
 export interface VerifyCookieResponse {
