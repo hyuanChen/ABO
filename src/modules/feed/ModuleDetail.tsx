@@ -34,6 +34,7 @@ interface ModuleConfig {
   fetch_follow_limit?: number;
   keyword_filter?: boolean;
   sessdata?: string;
+  subscription_types?: SubType[];
 }
 
 interface ModuleGuide {
@@ -308,6 +309,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
   const [updatingRuntime, setUpdatingRuntime] = useState(false);
   const [subscriptions, setSubscriptions] = useState<Record<string, string[]>>({});
   const [subTypes, setSubTypes] = useState<SubType[]>([]);
+  const [savingSubscriptions, setSavingSubscriptions] = useState(false);
 
   const configSchema = MODULE_CONFIGS[module.id];
 
@@ -315,7 +317,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
     api.get<ModuleConfig>(`/api/modules/${module.id}/config`)
       .then((config) => {
         setModuleConfig(config);
-        setSubTypes((config as any).subscription_types || []);
+        setSubTypes(config.subscription_types || []);
         setSubscriptions({
           up_uids: config.up_uids || [],
           user_ids: config.user_ids || [],
@@ -381,6 +383,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
   }
 
   async function saveSubscriptions(next: Record<string, string[]>) {
+    setSavingSubscriptions(true);
     try {
       const body: Record<string, any> = {};
       if ("up_uids" in next) body.up_uids = next.up_uids;
@@ -391,9 +394,11 @@ export default function ModuleDetail({ module, onBack }: Props) {
       await api.post(`/api/modules/${module.id}/config`, body);
       setModuleConfig((prev) => ({ ...prev, ...body }));
       setSubscriptions(next);
-      toast.success("订阅已更新", "");
+      toast.success("订阅已更新");
     } catch {
       toast.error("订阅保存失败", "");
+    } finally {
+      setSavingSubscriptions(false);
     }
   }
 
@@ -586,10 +591,10 @@ export default function ModuleDetail({ module, onBack }: Props) {
 
             <Card title="订阅管理" icon={<BookOpen style={{ width: "20px", height: "20px", color: "var(--color-primary)" }} />}>
               <SubscriptionManager
-                moduleId={module.id}
                 types={subTypes}
                 subscriptions={subscriptions}
                 onChange={saveSubscriptions}
+                disabled={savingSubscriptions}
               />
             </Card>
 

@@ -8,10 +8,10 @@ export interface SubType {
 }
 
 interface Props {
-  moduleId: string;
   types: SubType[];
   subscriptions: Record<string, string[]>; // e.g. { up_uids: ["123", "456"] }
   onChange: (next: Record<string, string[]>) => void;
+  disabled?: boolean;
 }
 
 const keyMap: Record<string, string> = {
@@ -22,7 +22,7 @@ const keyMap: Record<string, string> = {
   podcast_id: "podcast_ids",
 };
 
-export default function SubscriptionManager({ moduleId: _moduleId, types, subscriptions, onChange }: Props) {
+export default function SubscriptionManager({ types, subscriptions, onChange, disabled }: Props) {
   const [adding, setAdding] = useState<Record<string, string>>({});
 
   if (!types || types.length === 0) return null;
@@ -71,6 +71,7 @@ export default function SubscriptionManager({ moduleId: _moduleId, types, subscr
                   {value}
                   <button
                     onClick={() => remove(subType, value)}
+                    className="sub-remove-btn"
                     style={{
                       display: "inline-flex",
                       alignItems: "center",
@@ -96,6 +97,7 @@ export default function SubscriptionManager({ moduleId: _moduleId, types, subscr
             <div style={{ display: "flex", gap: "8px" }}>
               <input
                 type="text"
+                disabled={disabled || false}
                 value={adding[subType.type] || ""}
                 onChange={(e) => setAdding((prev) => ({ ...prev, [subType.type]: e.target.value }))}
                 onKeyDown={(e) => e.key === "Enter" && add(subType)}
@@ -113,6 +115,7 @@ export default function SubscriptionManager({ moduleId: _moduleId, types, subscr
               />
               <button
                 onClick={() => add(subType)}
+                disabled={disabled || false}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -134,6 +137,12 @@ export default function SubscriptionManager({ moduleId: _moduleId, types, subscr
           </div>
         );
       })}
+      <style>{`
+        .sub-remove-btn:focus-visible {
+          outline: 2px solid var(--color-primary);
+          outline-offset: 2px;
+        }
+      `}</style>
     </div>
   );
 }
