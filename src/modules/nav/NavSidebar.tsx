@@ -697,6 +697,59 @@ export default function NavSidebar() {
             哔哩哔哩工具
           </span>
         </button>
+
+        {/* ArXiv API Tool */}
+        <button
+          onClick={() => {
+            setActiveTab("arxiv-api");
+            if (isMobile) setIsOpen(false);
+          }}
+          style={{
+            width: "100%",
+            padding: "clamp(10px, 1.5vw, 12px) clamp(14px, 2vw, 16px)",
+            borderRadius: "var(--radius-full)",
+            background: activeTab === "arxiv-api"
+              ? "linear-gradient(135deg, rgba(188, 164, 227, 0.3), rgba(188, 164, 227, 0.2))"
+              : "linear-gradient(135deg, rgba(188, 164, 227, 0.2), rgba(188, 164, 227, 0.1))",
+            color: "var(--color-primary-dark)",
+            transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+            border: "1px solid rgba(188, 164, 227, 0.4)",
+            cursor: "pointer",
+          }}
+          onMouseEnter={(e) => {
+            if (activeTab !== "arxiv-api") {
+              e.currentTarget.style.background = "linear-gradient(135deg, rgba(188, 164, 227, 0.3), rgba(188, 164, 227, 0.2))";
+            }
+            e.currentTarget.style.transform = "scale(1.02)";
+          }}
+          onMouseLeave={(e) => {
+            if (activeTab !== "arxiv-api") {
+              e.currentTarget.style.background = "linear-gradient(135deg, rgba(188, 164, 227, 0.2), rgba(188, 164, 227, 0.1))";
+            }
+            e.currentTarget.style.transform = "scale(1)";
+          }}
+        >
+          <div
+            style={{
+              width: "clamp(32px, 4vw, 36px)",
+              height: "clamp(32px, 4vw, 36px)",
+              borderRadius: "50%",
+              background: "rgba(188, 164, 227, 0.3)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <BookOpen className="w-[18px] h-[18px] shrink-0" style={{ color: "var(--color-primary-dark)" }} aria-hidden />
+          </div>
+          <span style={{ fontWeight: 600, fontSize: "clamp(0.875rem, 1.2vw, 0.9375rem)", flex: 1, textAlign: "left" }}>
+            arXiv API
+          </span>
+        </button>
       </div>
 
       {/* Spacer to push bottom section down */}

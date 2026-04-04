@@ -11,6 +11,7 @@ import BubbleVault from "./vault/BubbleVault";
 import ModulePanel from "./feed/ModulePanel";
 import { XiaohongshuTool } from "./xiaohongshu/XiaohongshuTool";
 import { BilibiliTool } from "./bilibili/BilibiliTool";
+import ArxivAPITool from "./arxiv/ArxivAPITool";
 
 export default function MainContent() {
   const activeTab = useStore((s) => s.activeTab);
@@ -55,6 +56,7 @@ export default function MainContent() {
       {activeTab === "modules"    && <ModulePanel />}
       {activeTab === "xiaohongshu" && <XiaohongshuTool />}
       {activeTab === "bilibili" && <BilibiliTool />}
+      {activeTab === "arxiv-api" && <ArxivAPITool />}
     </main>
   );
 }

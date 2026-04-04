@@ -15,7 +15,8 @@ export type ActiveTab =
   | "settings"
   | "modules"
   | "xiaohongshu"
-  | "bilibili";
+  | "bilibili"
+  | "arxiv-api";
 
 export type ToastKind = "info" | "error" | "success";
 
