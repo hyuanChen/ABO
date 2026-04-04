@@ -231,12 +231,13 @@ async def api_xiaohongshu_trends(req: TrendsRequest):
 
 class XiaohongshuVerifyRequest(BaseModel):
     web_session: str
+    id_token: Optional[str] = None
 
 
 @router.post("/xiaohongshu/verify")
 async def api_xiaohongshu_verify(req: XiaohongshuVerifyRequest):
     """验证小红书 web_session 是否有效"""
-    result = await xiaohongshu_verify_cookie(req.web_session)
+    result = await xiaohongshu_verify_cookie(req.web_session, req.id_token)
     return result
 
 

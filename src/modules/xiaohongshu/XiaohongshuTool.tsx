@@ -128,31 +128,6 @@ export function XiaohongshuTool() {
     }
   }, [idToken]);
 
-    if (!webSession.trim()) {
-      toast.error("请输入 web_session");
-      return;
-    }
-    setVerifying(true);
-    try {
-      const res = await xiaohongshuVerifyCookie({
-        web_session: webSession.trim(),
-        id_token: idToken.trim() || undefined,
-      });
-      if (res.valid) {
-        setCookieVerified(true);
-        toast.success("Cookie 验证成功", res.message);
-      } else {
-        setCookieVerified(false);
-        toast.error("Cookie 验证失败", res.message);
-      }
-    } catch (err) {
-      setCookieVerified(false);
-      toast.error("验证失败", err instanceof Error ? err.message : "未知错误");
-    } finally {
-      setVerifying(false);
-    }
-  };
-
   const buildCookie = () => {
     const parts = [];
     if (webSession.trim()) parts.push(`web_session=${webSession.trim()}`);
@@ -341,7 +316,7 @@ export function XiaohongshuTool() {
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
           <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
             监控你关注的用户发布的内容，筛选包含指定关键词的笔记。
-            {!webSessionVerified && (
+            {!cookieVerified && (
               <span style={{ color: "var(--color-warning)" }}>（需先配置 Cookie）</span>
             )}
           </p>
@@ -353,7 +328,7 @@ export function XiaohongshuTool() {
               onChange={(e) => setFollowingKeywords(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleFollowingFeed()}
               placeholder="输入关键词，多个用逗号分隔..."
-              disabled={!webSessionVerified}
+              disabled={!cookieVerified}
               style={{
                 flex: 1,
                 padding: "12px 16px",
@@ -363,12 +338,12 @@ export function XiaohongshuTool() {
                 color: "var(--text-main)",
                 fontSize: "0.9375rem",
                 outline: "none",
-                opacity: webSessionVerified ? 1 : 0.5,
+                opacity: cookieVerified ? 1 : 0.5,
               }}
             />
             <button
               onClick={handleFollowingFeed}
-              disabled={loading || !followingKeywords.trim() || !webSessionVerified}
+              disabled={loading || !followingKeywords.trim() || !cookieVerified}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -376,12 +351,12 @@ export function XiaohongshuTool() {
                 padding: "12px 24px",
                 borderRadius: "var(--radius-md)",
                 border: "none",
-                background: loading || !webSessionVerified ? "var(--bg-hover)" : "var(--color-primary)",
+                background: loading || !cookieVerified ? "var(--bg-hover)" : "var(--color-primary)",
                 color: "white",
                 fontSize: "0.9375rem",
                 fontWeight: 600,
-                cursor: loading || !webSessionVerified ? "not-allowed" : "pointer",
-                opacity: loading || !webSessionVerified ? 0.6 : 1,
+                cursor: loading || !cookieVerified ? "not-allowed" : "pointer",
+                opacity: loading || !cookieVerified ? 0.6 : 1,
               }}
             >
               {loading ? (

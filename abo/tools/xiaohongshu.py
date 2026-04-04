@@ -1043,7 +1043,7 @@ async def xiaohongshu_analyze_trends(
     }
 
 
-async def xiaohongshu_verify_cookie(web_session: str) -> dict:
+async def xiaohongshu_verify_cookie(web_session: str, id_token: str = None) -> dict:
     """
     验证小红书 web_session 是否有效
 
@@ -1051,9 +1051,15 @@ async def xiaohongshu_verify_cookie(web_session: str) -> dict:
     """
     api = XiaohongshuAPI()
     try:
+        # 构建 cookie 字符串
+        cookie_parts = [f"web_session={web_session}"]
+        if id_token:
+            cookie_parts.append(f"id_token={id_token}")
+        cookie_str = "; ".join(cookie_parts)
+
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            "Cookie": f"web_session={web_session}",
+            "Cookie": cookie_str,
             "Referer": "https://www.xiaohongshu.com/",
         }
 
