@@ -74,6 +74,7 @@ interface ModuleConfig {
   follow_feed?: boolean;
   sessdata?: string;
   api_key?: string;
+  cookie?: string;
 }
 
 interface SubscriptionDetail {
@@ -931,6 +932,100 @@ export default function ModuleDetail({ module, onBack }: Props) {
                   }}
                 >
                   保存 API Key
+                </button>
+              </div>
+            </Card>
+          )}
+
+          {/* 小红书 Cookie 配置 */}
+          {module.id === "xiaohongshu-tracker" && (
+            <Card title="小红书登录" icon={<span style={{ fontSize: "18px" }}>📕</span>}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                <input
+                  type="password"
+                  value={moduleConfig.cookie || ""}
+                  onChange={(e) => setModuleConfig({ ...moduleConfig, cookie: e.target.value })}
+                  placeholder="粘贴小红书 Cookie..."
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: "var(--radius-md)",
+                    border: "1px solid var(--border-light)",
+                    background: "var(--bg-app)",
+                    color: "var(--text-main)",
+                    fontSize: "0.875rem",
+                    outline: "none",
+                  }}
+                />
+                <CookieGuide platform="xiaohongshu" cookieName="Cookie" />
+                <button
+                  onClick={async () => {
+                    try {
+                      await api.post("/api/preferences", { modules: { [module.id]: { cookie: moduleConfig.cookie } } });
+                      toast.success("已保存");
+                    } catch {
+                      toast.error("保存失败");
+                    }
+                  }}
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--color-primary)",
+                    color: "white",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    border: "none",
+                    cursor: "pointer",
+                    alignSelf: "flex-start",
+                  }}
+                >
+                  保存 Cookie
+                </button>
+              </div>
+            </Card>
+          )}
+
+          {/* 知乎 Cookie 配置 */}
+          {module.id === "zhihu-tracker" && (
+            <Card title="知乎登录" icon={<span style={{ fontSize: "18px" }}>❓</span>}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                <input
+                  type="password"
+                  value={moduleConfig.cookie || ""}
+                  onChange={(e) => setModuleConfig({ ...moduleConfig, cookie: e.target.value })}
+                  placeholder="粘贴知乎 Cookie..."
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: "var(--radius-md)",
+                    border: "1px solid var(--border-light)",
+                    background: "var(--bg-app)",
+                    color: "var(--text-main)",
+                    fontSize: "0.875rem",
+                    outline: "none",
+                  }}
+                />
+                <CookieGuide platform="zhihu" cookieName="Cookie" />
+                <button
+                  onClick={async () => {
+                    try {
+                      await api.post("/api/preferences", { modules: { [module.id]: { cookie: moduleConfig.cookie } } });
+                      toast.success("已保存");
+                    } catch {
+                      toast.error("保存失败");
+                    }
+                  }}
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--color-primary)",
+                    color: "white",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    border: "none",
+                    cursor: "pointer",
+                    alignSelf: "flex-start",
+                  }}
+                >
+                  保存 Cookie
                 </button>
               </div>
             </Card>

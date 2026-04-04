@@ -1869,6 +1869,14 @@ async def add_module_subscription(module_id: str, data: dict):
         module_prefs[key] = current
         _prefs.update(prefs)
 
+        # Record in subscription store
+        _subscription_store.add_subscription(
+            module_id=module_id,
+            sub_type=sub_type,
+            value=sub_value,
+            added_by="user",
+        )
+
     result = {"ok": True}
     result[key] = current
     return result
@@ -1911,9 +1919,113 @@ async def remove_module_subscription(module_id: str, data: dict):
         module_prefs[key] = current
         _prefs.update(prefs)
 
+        # Remove from subscription store
+        _subscription_store.remove_subscription(
+            module_id=module_id,
+            sub_type=sub_type,
+            value=sub_value,
+        )
+
     result = {"ok": True}
     result[key] = current
     return result
+
+
+@app.get("/api/modules/{module_id}/subscriptions/detail")
+async def get_module_subscriptions_detail(module_id: str):
+    """Get detailed subscription info for a module (with timestamps)."""
+    module = _registry.get(module_id)
+    if not module:
+        raise HTTPException(404, "Module not found")
+
+    # Get current subscriptions from preferences
+    prefs = _prefs.all_data()
+    module_prefs = prefs.get("modules", {}).get(module_id, {})
+
+    # Map keys to subscription types
+    key_to_type = {
+        "up_uids": "up_uid",
+        "user_ids": "user_id",
+        "users": "user",
+        "topics": "topic",
+        "podcast_ids": "podcast_id",
+    }
+
+    # Build current subscriptions list
+    current_subs = []
+    for key, sub_type in key_to_type.items():
+        for value in module_prefs.get(key, []):
+            current_subs.append({"type": sub_type, "value": value})
+
+    # Get subscription details from store
+    stored_subs = _subscription_store.get_subscriptions(module_id)
+    stored_map = {(s["type"], s["value"]): s for s in stored_subs}
+
+    # Build set of current subscription keys
+    current_set = {(s["type"], s["value"]) for s in current_subs}
+
+    # Mark all stored subscriptions
+    for sub in stored_subs:
+        sub["is_active"] = (sub["type"], sub["value"]) in current_set
+
+    # Merge current subscriptions with stored details
+    detailed_subs = []
+    for sub in current_subs:
+        key = (sub["type"], sub["value"])
+        stored = stored_map.get(key, {})
+        detailed_subs.append({
+            "type": sub["type"],
+            "value": sub["value"],
+            "added_at": stored.get("added_at"),
+            "added_by": stored.get("added_by", "user"),
+            "last_fetched": stored.get("last_fetched"),
+            "fetch_count": stored.get("fetch_count", 0),
+            "is_active": True,
+        })
+
+    # Add inactive stored subscriptions (history)
+    for stored in stored_subs:
+        if not stored.get("is_active", True):
+            detailed_subs.append({
+                "type": stored["type"],
+                "value": stored["value"],
+                "added_at": stored.get("added_at"),
+                "added_by": stored.get("added_by", "user"),
+                "last_fetched": stored.get("last_fetched"),
+                "fetch_count": stored.get("fetch_count", 0),
+                "is_active": False,
+            })
+
+    # Sort by added_at (newest first)
+    detailed_subs.sort(key=lambda x: x.get("added_at") or "", reverse=True)
+
+    return {
+        "module_id": module_id,
+        "module_name": getattr(module, "name", module_id),
+        "subscriptions": detailed_subs,
+    }
+
+
+@app.get("/api/subscriptions/summary")
+async def get_subscriptions_summary():
+    """Get a summary of all subscriptions across all modules."""
+    summary = _subscription_store.get_summary()
+
+    # Enrich with module names
+    modules_info = {}
+    for module_id in summary.get("modules", {}):
+        module = _registry.get(module_id)
+        modules_info[module_id] = {
+            "name": getattr(module, "name", module_id),
+            "icon": getattr(module, "icon", "rss"),
+        }
+
+    return {
+        "total_modules": summary["total_modules"],
+        "total_subscriptions": summary["total_subscriptions"],
+        "modules": summary["modules"],
+        "modules_info": modules_info,
+    }
 
 
 def get_default_keywords_for_module(module_id: str) -> list[str]:

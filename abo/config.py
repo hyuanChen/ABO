@@ -49,3 +49,8 @@ def get_literature_path() -> Path | None:
 def get_abo_dir() -> Path:
     _ABO_DIR.mkdir(parents=True, exist_ok=True)
     return _ABO_DIR
+
+
+def get_semantic_scholar_api_key() -> str:
+    """Return Semantic Scholar API key, or empty string if not configured."""
+    return load().get("semantic_scholar_api_key", "")

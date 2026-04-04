@@ -39,6 +39,14 @@ class CliDetector:
             acp_args=["--print"],
             protocol="raw"
         ),
+        "echo": CliInfo(
+            id="echo",
+            name="Echo Test",
+            command="cat",
+            check_cmd="cat --version",
+            acp_args=[],
+            protocol="raw"
+        ),
     }
 
     def __init__(self, db_path: str = "~/.abo/data/cli_configs.json"):

@@ -171,3 +171,13 @@ os.replace(tmp, path)
 **Health:** `GET /api/health`
 **WebSocket:** `ws://127.0.0.1:8765/ws/feed`
 
+---
+
+## 爬虫开发方案
+
+> 开发优先级：先使用 Playwright 实现，如遇反爬或稳定性问题，再考虑备选方案或者上网搜索。
+
+### 方案一：Playwright + Cookie（首选）
+
+**原理：**
+使用 Playwright 模拟浏览器行为，通过 `page.on("response")` 拦截知乎搜索 API 的 XHR 响应，获取结构化 JSON 数据。

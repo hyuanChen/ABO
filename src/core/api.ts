@@ -1,6 +1,7 @@
 /** Typed HTTP client → http://127.0.0.1:8765 */
 
-const BASE = "http://127.0.0.1:8765";
+export const API_BASE_URL = "http://127.0.0.1:8765";
+const BASE = API_BASE_URL;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, {

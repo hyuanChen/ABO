@@ -19,9 +19,16 @@ class SemanticScholarTracker(Module):
     icon     = "git-branch"
     output   = ["obsidian", "ui"]
 
-    # Semantic Scholar API Key
-    API_KEY = "fxlcd3addOaOHGTwYCVLF1kmJBA0hYVy62KShAP4"
+    # Default Semantic Scholar API Key (embedded fallback)
+    DEFAULT_API_KEY = "fxlcd3addOaOHGTwYCVLF1kmJBA0hYVy62KShAP4"
     BASE_URL = "https://api.semanticscholar.org/graph/v1"
+
+    @property
+    def API_KEY(self) -> str:
+        """Get API key from config or use default."""
+        from abo.config import get_semantic_scholar_api_key
+        user_key = get_semantic_scholar_api_key()
+        return user_key if user_key else self.DEFAULT_API_KEY
 
     # Rate limiting
     _last_request_time = 0

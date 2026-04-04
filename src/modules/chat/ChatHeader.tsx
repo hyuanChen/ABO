@@ -6,7 +6,7 @@ import { Settings, X, Plug } from 'lucide-react';
 
 interface ChatHeaderProps {
   cliName: string;
-  isOnline: boolean;
+  isOnline?: boolean;
   onSettings?: () => void;
   onClose?: () => void;
 }
@@ -24,8 +24,8 @@ export function ChatHeader({ cliName, isOnline, onSettings, onClose }: ChatHeade
           {cliName}
         </span>
         <div className="flex items-center gap-1.5 ml-2">
-          <span className="w-2 h-2 rounded-full bg-green-500" />
-          <span className="text-sm text-[#666666]">在线</span>
+          <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-gray-400'}`} />
+          <span className="text-sm text-[#666666]">{isOnline ? '在线' : '离线'}</span>
         </div>
       </div>
 

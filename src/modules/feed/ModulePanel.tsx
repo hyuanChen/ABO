@@ -1,9 +1,10 @@
 import { useEffect, useState, useRef } from "react";
-import { LayoutGrid, Play, Terminal, ArrowRight, Clock } from "lucide-react";
+import { LayoutGrid, Play, Terminal, ArrowRight, Clock, Rss } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, FeedModule } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Grid } from "../../components/Layout";
 import ModuleDetail from "./ModuleDetail";
+import SubscriptionSummary from "./SubscriptionSummary";
 
 const MODULE_DESCRIPTIONS: Record<string, string> = {
   "arxiv-tracker": "自动追踪 arXiv 上最新的学术论文",
@@ -18,6 +19,7 @@ const MODULE_DESCRIPTIONS: Record<string, string> = {
 export default function ModulePanel() {
   const { feedModules, setFeedModules, unreadCounts, moduleToConfigure } = useStore();
   const [selectedModule, setSelectedModule] = useState<FeedModule | null>(null);
+  const [showSummary, setShowSummary] = useState(false);
 
   useEffect(() => {
     api.get<{ modules: FeedModule[] }>("/api/modules")
@@ -51,6 +53,10 @@ export default function ModulePanel() {
     await api.post(`/api/modules/${moduleId}/run`, {}).catch(() => {});
   }
 
+  if (showSummary) {
+    return <SubscriptionSummary onBack={() => setShowSummary(false)} />;
+  }
+
   if (selectedModule) {
     return <ModuleDetail module={selectedModule} onBack={() => setSelectedModule(null)} />;
   }
@@ -62,30 +68,51 @@ export default function ModulePanel() {
         subtitle="配置自动化模块的参数与运行方式"
         icon={LayoutGrid}
         actions={
-          <button
-            onClick={() => alert(
-              "在终端运行 Claude Code，告诉它：\n\n" +
-              "「帮我写一个 ABO 模块，放在 ~/.abo/modules/ 目录下」\n\n" +
-              "ABO 会自动检测并加载新模块。"
-            )}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              padding: "10px 16px",
-              borderRadius: "var(--radius-full)",
-              background: "linear-gradient(135deg, var(--color-primary), var(--color-secondary))",
-              color: "white",
-              fontSize: "0.875rem",
-              fontWeight: 600,
-              border: "none",
-              cursor: "pointer",
-              boxShadow: "0 4px 16px rgba(188, 164, 227, 0.35)",
-            }}
-          >
-            <Terminal style={{ width: "16px", height: "16px" }} />
-            新建模块
-          </button>
+          <>
+            <button
+              onClick={() => setShowSummary(true)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "10px 16px",
+                borderRadius: "var(--radius-full)",
+                background: "var(--bg-hover)",
+                color: "var(--text-secondary)",
+                fontSize: "0.875rem",
+                fontWeight: 600,
+                border: "1px solid var(--border-light)",
+                cursor: "pointer",
+              }}
+            >
+              <Rss style={{ width: "16px", height: "16px" }} />
+              订阅总表
+            </button>
+            <button
+              onClick={() => alert(
+                "在终端运行 Claude Code，告诉它：\n\n" +
+                "「帮我写一个 ABO 模块，放在 ~/.abo/modules/ 目录下」\n\n" +
+                "ABO 会自动检测并加载新模块。"
+              )}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "10px 16px",
+                borderRadius: "var(--radius-full)",
+                background: "linear-gradient(135deg, var(--color-primary), var(--color-secondary))",
+                color: "white",
+                fontSize: "0.875rem",
+                fontWeight: 600,
+                border: "none",
+                cursor: "pointer",
+                boxShadow: "0 4px 16px rgba(188, 164, 227, 0.35)",
+              }}
+            >
+              <Terminal style={{ width: "16px", height: "16px" }} />
+              新建模块
+            </button>
+          </>
         }
       />
       <PageContent maxWidth="1200px">
