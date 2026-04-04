@@ -355,6 +355,25 @@ async def list_modules():
     return {"modules": modules}
 
 
+@app.get("/api/scheduler/jobs")
+async def get_scheduler_jobs():
+    if not _scheduler:
+        return {"jobs": []}
+    jobs = _scheduler.job_info()
+    registry_modules = {m.id: m for m in _registry.all()}
+    return {
+        "jobs": [
+            {
+                **j,
+                "name": registry_modules.get(j["id"], object()).name if j["id"] in registry_modules else j["id"],
+                "enabled": getattr(registry_modules.get(j["id"]), "enabled", True) if j["id"] in registry_modules else True,
+                "schedule": getattr(registry_modules.get(j["id"]), "schedule", "") if j["id"] in registry_modules else "",
+            }
+            for j in jobs
+        ]
+    }
+
+
 @app.post("/api/modules/{module_id}/run")
 async def run_module(module_id: str):
     if not _scheduler:
