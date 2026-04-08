@@ -20,6 +20,7 @@ from .preferences.engine import PreferenceEngine
 from .profile.routes import router as profile_router, init_routes as init_profile_routes
 from .rss import rss_router
 from .routes.tools import router as tools_router
+from .modules.routes import router as modules_router
 from .runtime.broadcaster import broadcaster
 from .runtime.discovery import ModuleRegistry, start_watcher
 from .runtime.runner import ModuleRunner
@@ -147,6 +148,7 @@ app.add_middleware(
 app.include_router(profile_router)
 app.include_router(rss_router)
 app.include_router(tools_router)
+app.include_router(modules_router)
 
 
 # ── Health ───────────────────────────────────────────────────────

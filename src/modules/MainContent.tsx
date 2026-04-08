@@ -8,7 +8,7 @@ import ArxivTracker from "./arxiv/ArxivTracker";
 import HealthDashboard from "./health/HealthDashboard";
 import Settings from "./settings/Settings";
 import BubbleVault from "./vault/BubbleVault";
-import ModulePanel from "./feed/ModulePanel";
+import { ModuleManagementPanel } from "./modules/ModuleManagementPanel";
 import { XiaohongshuTool } from "./xiaohongshu/XiaohongshuTool";
 import { BilibiliTool } from "./bilibili/BilibiliTool";
 import { ArxivAPITool } from "./arxiv/ArxivAPITool";
@@ -53,7 +53,7 @@ export default function MainContent() {
       {activeTab === "arxiv"      && <ArxivTracker />}
       {activeTab === "health"     && <HealthDashboard />}
       {activeTab === "settings"   && <Settings />}
-      {activeTab === "modules"    && <ModulePanel />}
+      {activeTab === "modules"    && <ModuleManagementPanel />}
       {activeTab === "xiaohongshu" && <XiaohongshuTool />}
       {activeTab === "bilibili" && <BilibiliTool />}
       {activeTab === "arxiv-api" && <ArxivAPITool />}
