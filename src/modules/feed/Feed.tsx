@@ -342,6 +342,28 @@ export default function Feed() {
   }
 
   async function handleFeedback(cardId: string, action: string) {
+    if (action === "wiki") {
+      // 摘录到 Wiki（情报库）
+      const card = feedCards.find((c) => c.id === cardId);
+      if (card) {
+        try {
+          await api.post("/api/wiki/intel/ingest", {
+            source_type: "card",
+            source_id: card.id,
+            source_content: JSON.stringify({
+              id: card.id,
+              title: card.title,
+              summary: card.summary,
+              tags: card.tags,
+              source_url: card.source_url,
+            }),
+          });
+        } catch {
+          // ignore errors silently
+        }
+      }
+      return;
+    }
     await api.post(`/api/cards/${cardId}/feedback`, { action }).catch(() => {});
     if (action === "skip") {
       setFeedCards(feedCards.filter((c) => c.id !== cardId));

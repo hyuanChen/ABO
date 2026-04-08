@@ -4,6 +4,12 @@ import { PageContainer, PageHeader, LoadingState } from "../../components/Layout
 import { api } from "../../core/api";
 import type { WikiType } from "./Wiki";
 
+interface WikiStatsResponse {
+  total: number;
+  by_category: Record<string, number>;
+  wiki_type: string;
+}
+
 interface WikiStats {
   page_count: number;
   entity_count?: number;
@@ -16,6 +22,18 @@ interface WikiStats {
     wiki_type: string;
     updated: string;
   }>;
+}
+
+function parseStats(raw: WikiStatsResponse, _wikiType: string): WikiStats {
+  const bc = raw.by_category ?? {};
+  return {
+    page_count: raw.total ?? 0,
+    entity_count: bc.entity ?? 0,
+    concept_count: bc.concept ?? 0,
+    paper_count: bc.paper ?? 0,
+    topic_count: bc.topic ?? 0,
+    recent_pages: [],
+  };
 }
 
 interface Props {
@@ -48,12 +66,12 @@ export default function WikiHome({ onSelectWiki }: Props) {
       setLoading(true);
       try {
         const [intel, lit] = await Promise.allSettled([
-          api.get<WikiStats>("/api/wiki/intel/stats"),
-          api.get<WikiStats>("/api/wiki/lit/stats"),
+          api.get<WikiStatsResponse>("/api/wiki/intel/stats"),
+          api.get<WikiStatsResponse>("/api/wiki/lit/stats"),
         ]);
         if (!cancelled) {
-          setIntelStats(intel.status === "fulfilled" ? intel.value : { page_count: 0, entity_count: 0, concept_count: 0, recent_pages: [] });
-          setLitStats(lit.status === "fulfilled" ? lit.value : { page_count: 0, paper_count: 0, topic_count: 0, recent_pages: [] });
+          setIntelStats(intel.status === "fulfilled" ? parseStats(intel.value, "intel") : { page_count: 0, entity_count: 0, concept_count: 0, recent_pages: [] });
+          setLitStats(lit.status === "fulfilled" ? parseStats(lit.value, "lit") : { page_count: 0, paper_count: 0, topic_count: 0, recent_pages: [] });
         }
       } catch {
         // Use empty defaults on failure

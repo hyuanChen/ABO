@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from .activity import ActivityTracker, ActivityType
 from .config import get_vault_path, get_literature_path, load as load_config, save as save_config
 from .insights.routes import router as insights_router
+from .wiki.routes import router as wiki_router
 from .preferences.engine import PreferenceEngine
 from .profile.routes import router as profile_router, init_routes as init_profile_routes
 from .rss import rss_router
@@ -151,6 +152,7 @@ app.include_router(rss_router)
 app.include_router(tools_router)
 app.include_router(modules_router)
 app.include_router(insights_router)
+app.include_router(wiki_router)
 
 
 # ── Health ───────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { Star, ChevronDown, ExternalLink } from "lucide-react";
+import { Star, ChevronDown, ExternalLink, BookHeart } from "lucide-react";
 import type { FeedCard } from "../../core/store";
 
 interface Props {
@@ -76,6 +76,14 @@ const EXT_ACTIONS = [
     Icon: ChevronDown,
     gradient: "linear-gradient(135deg, #E8E8E8, #D0D0D0)",
     shadow: "rgba(200, 200, 200, 0.3)",
+  },
+  {
+    key: "wiki",
+    label: "摘录Wiki",
+    shortcut: "W",
+    Icon: BookHeart,
+    gradient: "linear-gradient(135deg, #C4B5FD, #A78BFA)",
+    shadow: "rgba(196, 181, 253, 0.4)",
   },
 ];
 
