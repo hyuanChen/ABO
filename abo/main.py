@@ -150,6 +150,7 @@ app.include_router(profile_router)
 app.include_router(rss_router)
 app.include_router(tools_router)
 app.include_router(modules_router)
+app.include_router(insights_router)
 
 
 # ── Health ───────────────────────────────────────────────────────
