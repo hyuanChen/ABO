@@ -570,3 +570,131 @@ async def get_arxiv_categories():
             for code, name in ALL_SUBCATEGORIES.items()
         ]
     }
+
+
+class ArxivFiguresRequest(BaseModel):
+    arxiv_id: str
+
+
+@router.post("/arxiv/figures")
+async def api_arxiv_figures(req: ArxivFiguresRequest):
+    """获取arXiv论文的图片（模型架构图等）"""
+    from abo.tools.arxiv_api import ArxivAPITool
+    tool = ArxivAPITool()
+    try:
+        figures = await tool.fetch_figures(req.arxiv_id)
+        return {"figures": figures}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch figures: {str(e)}")
+
+
+class ArxivSaveRequest(BaseModel):
+    arxiv_id: str
+    title: str
+    authors: list[str]
+    summary: str
+    pdf_url: str
+    arxiv_url: str
+    primary_category: str
+    published: str
+    comment: Optional[str] = None
+    figures: list[dict] = []
+
+
+@router.post("/arxiv/save")
+async def api_arxiv_save(req: ArxivSaveRequest):
+    """保存arXiv论文为markdown格式，同时下载PDF到文献库/arxiv目录"""
+    from pathlib import Path
+    import httpx
+    import aiofiles
+    import re
+    import base64
+    from mimetypes import guess_extension
+    from abo.config import get_literature_path
+
+    # 获取文献库路径，如果不存在则报错
+    lit_path = get_literature_path()
+    if not lit_path:
+        raise HTTPException(status_code=400, detail="未配置文献库路径，请先在设置中配置")
+
+    # 保存到文献库/arxiv目录
+    base_dir = lit_path / "arxiv"
+    try:
+        base_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"无法创建目录: {str(e)}")
+
+    # 清理标题作为文件名 (标题在前，arxiv id 在后)
+    safe_title = re.sub(r'[^\w\s-]', '', req.title)[:50].strip().replace(' ', '_')
+    md_file_name = f"{safe_title}_{req.arxiv_id}.md"
+    pdf_file_name = f"{safe_title}_{req.arxiv_id}.pdf"
+    md_file_path = base_dir / md_file_name
+    pdf_file_path = base_dir / pdf_file_name
+
+    # 构建markdown内容
+    md_content = f"""# {req.title}
+
+**Authors:** {', '.join(req.authors)}
+
+**arXiv ID:** [{req.arxiv_id}]({req.arxiv_url})
+
+**Category:** {req.primary_category}
+
+**Published:** {req.published}
+
+**PDF:** [[{pdf_file_name}]]
+
+{req.comment and f"**Comment:** {req.comment}" or ""}
+
+## Abstract
+
+{req.summary}
+
+"""
+
+    # 下载图片并嵌入base64
+    if req.figures:
+        md_content += "## Figures\n\n"
+        async with httpx.AsyncClient(timeout=30) as client:
+            for i, fig in enumerate(req.figures[:6]):  # 最多6张图
+                try:
+                    img_url = fig.get("url", "")
+                    if not img_url:
+                        continue
+                    img_resp = await client.get(img_url)
+                    if img_resp.status_code == 200:
+                        # 获取图片格式
+                        content_type = img_resp.headers.get("content-type", "image/png")
+                        ext = guess_extension(content_type) or ".png"
+                        ext = ext.lstrip(".") or "png"
+                        # 转base64
+                        b64_data = base64.b64encode(img_resp.content).decode("utf-8")
+                        caption = fig.get("caption", f"Figure {i+1}")
+                        md_content += f"### {caption}\n\n"
+                        md_content += f"<img src=\"data:{content_type};base64,{b64_data}\" width=\"600\" />\n\n"
+                except Exception as e:
+                    md_content += f"*Figure {i+1}: [图片链接]({fig.get('url', '')})*\n\n"
+
+    # 同时执行：写入markdown + 下载PDF
+    async with httpx.AsyncClient(timeout=120) as client:
+        # 下载PDF
+        pdf_downloaded = False
+        try:
+            pdf_resp = await client.get(req.pdf_url, follow_redirects=True)
+            if pdf_resp.status_code == 200:
+                async with aiofiles.open(pdf_file_path, "wb") as f:
+                    await f.write(pdf_resp.content)
+                pdf_downloaded = True
+        except Exception as e:
+            print(f"Failed to download PDF: {e}")
+
+    # 写入markdown文件
+    async with aiofiles.open(md_file_path, "w", encoding="utf-8") as f:
+        await f.write(md_content)
+
+    return {
+        "success": True,
+        "saved_to": str(md_file_path),
+        "pdf_path": str(pdf_file_path) if pdf_downloaded else None,
+        "files": [md_file_name, pdf_file_name] if pdf_downloaded else [md_file_name],
+    }

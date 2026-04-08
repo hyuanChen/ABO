@@ -55,8 +55,12 @@ class BaseRunner(ABC):
                 self.process = None
 
     def _get_env(self) -> dict:
-        """获取环境变量"""
-        return dict(os.environ)
+        """获取环境变量 - 移除 CLAUDECODE 避免嵌套会话检测"""
+        env = dict(os.environ)
+        # 移除 Claude Code 环境变量，允许在 Claude Code 会话中启动子 Claude 进程
+        env.pop('CLAUDECODE', None)
+        env.pop('CLAUDE_CODE', None)
+        return env
 
 
 class RawRunner(BaseRunner):
@@ -77,28 +81,38 @@ class RawRunner(BaseRunner):
         # 发送开始事件
         await on_event(StreamEvent(type="start", data="", msg_id=msg_id))
 
-        try:
-            # 构建命令: claude --print
-            cmd = [self.cli_info.command] + getattr(self.cli_info, 'acp_args', [])
+        logger.info(f"RawRunner: cli_info={self.cli_info}, acp_args={getattr(self.cli_info, 'acp_args', 'N/A')}")
 
-            logger.info(f"Starting process: {' '.join(cmd)}")
+        try:
+            # 构建命令
+            # 如果 acp_args 包含 --print，将消息作为命令行参数传递
+            # 否则使用 stdin 传递（如 echo/cat 命令）
+            acp_args = getattr(self.cli_info, 'acp_args', [])
+            use_stdin = not ('--print' in acp_args or '-p' in acp_args)
+
+            if use_stdin:
+                cmd = [self.cli_info.command] + acp_args
+            else:
+                cmd = [self.cli_info.command] + acp_args + [message]
+
+            logger.info(f"Starting process: {' '.join(cmd[:3])}...")
 
             # 启动进程
             self.process = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.PIPE if use_stdin else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.workspace,
                 env=self._get_env()
             )
 
-            # 发送消息到 stdin
-            assert self.process.stdin
-            input_data = f"{message}\n\n".encode('utf-8')
-            self.process.stdin.write(input_data)
-            await self.process.stdin.drain()
-            self.process.stdin.close()
+            # 如果需要，通过 stdin 发送消息
+            if use_stdin and self.process.stdin:
+                input_data = f"{message}\n\n".encode('utf-8')
+                self.process.stdin.write(input_data)
+                await self.process.stdin.drain()
+                self.process.stdin.close()
 
             # 实时读取 stdout 流式输出
             assert self.process.stdout

@@ -11,7 +11,13 @@ _ABO_DIR = Path.home() / ".abo"
 
 def load() -> dict:
     """Load config from disk. Missing keys get empty-string defaults (not fake paths)."""
-    defaults = {"vault_path": "", "literature_path": "", "version": "1.0.0"}
+    defaults = {
+        "vault_path": "",
+        "literature_path": "",
+        "version": "1.0.0",
+        "onboarding_completed": False,
+        "onboarding_step": 0,
+    }
     if _CONFIG_PATH.exists():
         try:
             saved = json.loads(_CONFIG_PATH.read_text())

@@ -359,11 +359,15 @@ async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
 
     # 创建 Runner
     cli_info = detector.get_cli_info(cli_type)
+    logger.info(f"CLI info for {cli_type}: {cli_info}")
     runner = None
     if cli_info:
         workspace = conv.workspace if conv else ""
         runner = RunnerFactory.create(cli_info, session_id, workspace)
         manager.runners[session_id] = runner
+        logger.info(f"Runner created for {cli_type}")
+    else:
+        logger.error(f"CLI info not found for {cli_type}")
 
     try:
         while True:
@@ -385,9 +389,23 @@ async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
             elif msg_type == "message":
                 # 处理聊天消息
                 message = data.get("content", "")
-                conv_id = data.get("conversation_id", conv.id if conv else None)
+                logger.info(f"Received message: {message[:50]}...")
 
-                if not message or not conv_id:
+                # 优先使用通过 session_id 查找到的 conversation
+                if not conv:
+                    logger.error(f"Conversation not found for session {session_id}")
+                    await manager.send_json(session_id, {
+                        "type": "error",
+                        "data": "Conversation not found for this session",
+                        "msg_id": str(uuid.uuid4())
+                    })
+                    continue
+
+                conv_id = conv.id
+                logger.info(f"Using conversation: {conv_id}")
+
+                if not message:
+                    logger.warning("Empty message, skipping")
                     continue
 
                 # 保存用户消息
@@ -396,6 +414,7 @@ async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
                     role="user",
                     content=message
                 )
+                logger.info("User message saved")
 
                 # 流式处理
                 msg_id = str(uuid.uuid4())
@@ -416,7 +435,9 @@ async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
                 # 执行 Runner
                 if runner:
                     try:
+                        logger.info(f"Starting runner for message: {message[:50]}...")
                         await runner.send_message(message, msg_id, on_event)
+                        logger.info(f"Runner completed, response length: {len(''.join(full_response))}")
 
                         # 保存完整响应
                         conversation_store.add_message(
@@ -432,6 +453,13 @@ async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
                             "data": str(e),
                             "msg_id": msg_id
                         })
+                else:
+                    logger.error(f"No runner available for cli_type: {cli_type}")
+                    await manager.send_json(session_id, {
+                        "type": "error",
+                        "data": f"CLI runner not available for {cli_type}",
+                        "msg_id": msg_id
+                    })
 
     except WebSocketDisconnect:
         logger.info(f"Client {session_id} disconnected")

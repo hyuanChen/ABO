@@ -1,266 +1,275 @@
 /**
- * ChatPanel - 完整集成 useChat hook
- * 布局: Header (CLI选择器 + 连接状态 + 设置) + 消息列表 + 输入框
- * 设计: AionUi - 背景 #FCFAF2, 全高度 flex 布局
+ * ChatPanel - 聊天主面板 (带多对话标签页)
+ * 流程: ChatHome -> 开始对话 -> ChatSession (平滑过渡)
+ * 支持多个对话标签页，像浏览器一样切换
  */
-import { useEffect, useRef, useCallback } from 'react';
-import { Plus, AlertCircle, Loader2 } from 'lucide-react';
-import { MessageList, Message as MessageListMessage } from './MessageList';
-import { ChatInput } from './ChatInput';
+import { useState, useCallback, useEffect } from 'react';
+import { ChatHome } from './ChatHome';
+import { ChatSession } from './ChatSession';
 import { useChat } from '../../hooks/useChat';
-import type { Message } from '../../types/chat';
-
-// 将 useChat 的 Message 转换为 MessageList 的 Message
-function convertMessages(messages: Message[]): MessageListMessage[] {
-  return messages.map((msg) => ({
-    id: msg.id,
-    role: msg.role === 'system' ? 'assistant' : msg.role,
-    content: msg.content,
-    timestamp: new Date(msg.createdAt).toLocaleTimeString('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit',
-    }),
-    isStreaming: msg.status === 'streaming',
-  }));
-}
+import { X, Plus, MessageSquare, Wifi, WifiOff } from 'lucide-react';
+import type { CliConfig, Message } from '../../types/chat';
 
 export function ChatPanel() {
   const {
-    // CLI
     availableClis,
     selectedCli,
     selectCli,
-
-    // Conversation
-    conversation,
+    conversations,
+    activeConversation,
     createNewConversation,
-
-    // Messages
+    switchConversation,
+    closeConversation,
     messages,
     sendMessage,
-    isStreaming,
-
-    // Connection state
     isConnected,
-    isLoading,
+    isStreaming,
     error,
+    clearError,
   } = useChat();
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  // 本地状态
+  const [hasStarted, setHasStarted] = useState(false);
+  const [localMessages, setLocalMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
 
-  // 自动滚动到底部
-  const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // 同步消息到本地状态
+  useEffect(() => {
+    setLocalMessages(messages);
+  }, [messages]);
+
+  // 同步活动对话状态
+  useEffect(() => {
+    if (activeConversation) {
+      setHasStarted(true);
+    }
+  }, [activeConversation]);
+
+  // 开始新对话
+  const handleStartChat = useCallback(async (initialMessage: string) => {
+    if (!selectedCli && availableClis.length === 0) {
+      return;
+    }
+
+    setIsCreating(true);
+
+    try {
+      // 先创建对话（这会连接 WebSocket）
+      const conv = await createNewConversation(
+        selectedCli?.id,
+        initialMessage.slice(0, 30)
+      );
+
+      if (conv) {
+        // 添加用户消息到本地显示
+        const userMsg: Message = {
+          id: `user-${Date.now()}`,
+          conversationId: conv.id,
+          role: 'user',
+          content: initialMessage,
+          contentType: 'text',
+          status: 'completed',
+          createdAt: Date.now(),
+        };
+        setLocalMessages([userMsg]);
+
+        // 发送消息（此时 WebSocket 应该已连接）
+        await sendMessage(initialMessage);
+      }
+    } catch (e) {
+      console.error('Failed to start chat:', e);
+    } finally {
+      setIsCreating(false);
+    }
+  }, [selectedCli, availableClis, createNewConversation, sendMessage]);
+
+  // 继续对话
+  const handleSend = useCallback(async () => {
+    if (!input.trim() || !activeConversation) return;
+
+    const content = input;
+    setInput('');
+
+    // 添加用户消息到本地
+    const userMsg: Message = {
+      id: `user-${Date.now()}`,
+      conversationId: activeConversation.id,
+      role: 'user',
+      content: content,
+      contentType: 'text',
+      status: 'completed',
+      createdAt: Date.now(),
+    };
+    setLocalMessages((prev) => [...prev, userMsg]);
+
+    // 发送到后端
+    await sendMessage(content);
+  }, [input, activeConversation, sendMessage]);
+
+  // 切换对话
+  const handleSwitchConversation = useCallback(async (convId: string) => {
+    await switchConversation(convId);
+  }, [switchConversation]);
+
+  // 关闭对话
+  const handleCloseConversation = useCallback((e: React.MouseEvent, convId: string) => {
+    e.stopPropagation();
+    closeConversation(convId);
+
+    // 如果关闭的是最后一个对话，返回主页
+    if (conversations.length <= 1) {
+      setHasStarted(false);
+      setLocalMessages([]);
+    }
+  }, [closeConversation, conversations.length]);
+
+  // 新建对话
+  const handleNewConversation = useCallback(async () => {
+    if (!selectedCli && availableClis.length === 0) return;
+
+    setIsCreating(true);
+    try {
+      await createNewConversation(selectedCli?.id, '新对话');
+    } finally {
+      setIsCreating(false);
+    }
+  }, [selectedCli, availableClis, createNewConversation]);
+
+  // 返回主页
+  const handleBack = useCallback(() => {
+    setHasStarted(false);
+    setLocalMessages([]);
   }, []);
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages, scrollToBottom]);
+  // 清除当前对话
+  const handleClear = useCallback(() => {
+    setLocalMessages([]);
+  }, []);
 
-  // 处理 CLI 选择
-  const handleCliSelect = useCallback(
-    (cliId: string) => {
-      const cli = availableClis.find((c) => c.id === cliId);
-      if (cli) {
-        selectCli(cli);
-      }
-    },
-    [availableClis, selectCli]
-  );
+  // 选择CLI
+  const handleSelectCli = useCallback((cli: CliConfig) => {
+    selectCli(cli);
+  }, [selectCli]);
 
-  // 处理新建对话
-  const handleNewChat = useCallback(async () => {
-    await createNewConversation();
-  }, [createNewConversation]);
-
-  // 处理发送消息
-  const handleSend = useCallback(
-    (content: string) => {
-      sendMessage(content);
-    },
-    [sendMessage]
-  );
-
-  // 获取可用的 CLI 列表（只显示可用的）
-  const availableCliList = availableClis.filter((cli) => cli.isAvailable);
-
-  // 头部渲染：CLI 选择器 + 新建对话按钮 + 连接状态
-  const renderHeader = () => {
+  // 如果有错误，显示错误提示
+  if (error) {
     return (
-      <div className="flex items-center justify-between px-4 h-[60px] border-b border-[#E6DDF2] bg-[#FCFAF2]">
-        {/* 左侧: CLI 选择器 + 新建对话按钮 */}
-        <div className="flex items-center gap-3">
-          {/* CLI 选择器 */}
-          <div className="flex items-center gap-2">
-            <select
-              value={selectedCli?.id || ''}
-              onChange={(e) => handleCliSelect(e.target.value)}
-              disabled={isLoading || availableCliList.length === 0}
-              className="px-3 py-1.5 rounded-md border border-[#E6DDF2] bg-white
-                         text-sm text-[#1a1a1a] focus:outline-none focus:border-[#D8B4E2]
-                         disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <option value="">
-                {availableCliList.length === 0 ? '无可用 CLI' : '选择 CLI'}
-              </option>
-              {availableCliList.map((cli) => (
-                <option key={cli.id} value={cli.id}>
-                  {cli.name}
-                </option>
-              ))}
-            </select>
-
-            {/* 新建对话按钮 */}
-            <button
-              onClick={handleNewChat}
-              disabled={!selectedCli || isLoading}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md
-                         bg-[#7B5EA7] text-white text-sm
-                         hover:bg-[#6B4E97] disabled:opacity-50 disabled:cursor-not-allowed
-                         transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              新对话
-            </button>
-          </div>
-
-          {/* 连接状态指示器 */}
-          {conversation && (
-            <div className="flex items-center gap-1.5 ml-2">
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  isConnected ? 'bg-green-500' : 'bg-gray-400'
-                }`}
-              />
-              <span className="text-sm text-[#666666]">
-                {isConnected ? '已连接' : '未连接'}
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* 右侧: 设置按钮 */}
-        <div className="flex items-center gap-2">
+      <div className="flex h-full items-center justify-center bg-[var(--bg-app)]">
+        <div className="text-center p-8">
+          <p className="text-red-500 mb-4">{error}</p>
           <button
-            onClick={() => console.log('Settings clicked')}
-            className="p-2 rounded-md hover:bg-[#F5F5F0] transition-colors"
-            aria-label="Settings"
+            onClick={clearError}
+            className="px-4 py-2 rounded-xl bg-[var(--color-primary)] text-white"
           >
-            <svg
-              className="w-5 h-5 text-[#666666]"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
-              />
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-              />
-            </svg>
+            重试
           </button>
         </div>
       </div>
     );
-  };
+  }
 
-  // 错误提示
-  const renderError = () => {
-    if (!error) return null;
-
-    return (
-      <div className="px-4 py-2 bg-red-50 border-b border-red-100">
-        <div className="flex items-center gap-2 text-red-600 text-sm">
-          <AlertCircle className="w-4 h-4" />
-          <span>{error}</span>
-        </div>
-      </div>
-    );
-  };
-
-  // 加载状态
-  const renderLoading = () => {
-    if (!isLoading) return null;
-
-    return (
-      <div className="absolute inset-0 bg-[#FCFAF2]/80 flex items-center justify-center z-10">
-        <div className="flex items-center gap-2 text-[#7B5EA7]">
-          <Loader2 className="w-5 h-5 animate-spin" />
-          <span className="text-sm">连接中...</span>
-        </div>
-      </div>
-    );
-  };
-
-  // 空状态提示
-  const renderEmptyState = () => {
-    if (conversation || isLoading) return null;
-
-    return (
-      <div className="flex-1 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-[#F3EDFA] flex items-center justify-center">
-            <svg
-              className="w-8 h-8 text-[#7B5EA7]"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-              />
-            </svg>
-          </div>
-          <p className="text-[#666666] text-sm mb-2">选择一个 CLI 开始新对话</p>
-          {availableCliList.length === 0 && (
-            <p className="text-[#999999] text-xs">未检测到可用的 CLI</p>
-          )}
-        </div>
-      </div>
-    );
-  };
+  const currentCli = selectedCli || availableClis[0];
 
   return (
-    <div className="flex flex-col h-full bg-[#FCFAF2] relative">
-      {/* 头部: CLI 选择器 + 连接状态 + 设置 */}
-      {renderHeader()}
+    <div className="h-full flex flex-col bg-[var(--bg-app)]">
+      {/* 对话标签栏 - 浏览器风格 */}
+      {conversations.length > 0 && (
+        <div className="flex items-center gap-1 px-2 py-2 bg-white/60 backdrop-blur-xl border-b border-[var(--border-color)] overflow-x-auto">
+          {conversations.map((conv) => {
+            const isActive = activeConversation?.id === conv.id;
+            return (
+              <div
+                key={conv.id}
+                onClick={() => handleSwitchConversation(conv.id)}
+                className={`
+                  group flex items-center gap-2 px-3 py-1.5 rounded-lg cursor-pointer
+                  transition-all duration-200 min-w-[120px] max-w-[200px]
+                  ${isActive
+                    ? 'bg-white shadow-soft border border-[var(--border-color)]'
+                    : 'bg-transparent hover:bg-white/40 border border-transparent'
+                  }
+                `}
+              >
+                <MessageSquare className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                <span className="flex-1 text-sm truncate text-[var(--text-main)]">
+                  {conv.title}
+                </span>
+                <button
+                  onClick={(e) => handleCloseConversation(e, conv.id)}
+                  className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--bg-hover)] transition-all"
+                >
+                  <X className="w-3 h-3 text-[var(--text-muted)]" />
+                </button>
+              </div>
+            );
+          })}
 
-      {/* 错误提示 */}
-      {renderError()}
+          {/* 新建对话按钮 */}
+          <button
+            onClick={handleNewConversation}
+            disabled={isCreating}
+            className="flex items-center justify-center w-7 h-7 rounded-lg hover:bg-white/60 transition-colors shrink-0"
+          >
+            <Plus className="w-4 h-4 text-[var(--text-muted)]" />
+          </button>
 
-      {/* 加载遮罩 */}
-      {renderLoading()}
-
-      {/* 消息列表区域 */}
-      {conversation ? (
-        <>
-          <div className="flex-1 overflow-hidden relative">
-            <div className="absolute inset-0 overflow-y-auto">
-              <MessageList messages={convertMessages(messages)} />
-              <div ref={messagesEndRef} />
-            </div>
+          {/* 连接状态指示器 */}
+          <div className="ml-auto flex items-center gap-2 px-3">
+            {isConnected ? (
+              <>
+                <Wifi className="w-3.5 h-3.5 text-green-500" />
+                <span className="text-xs text-green-600">已连接</span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="w-3.5 h-3.5 text-red-400" />
+                <span className="text-xs text-red-500">未连接</span>
+              </>
+            )}
           </div>
-
-          {/* 输入区域 */}
-          <ChatInput
-            onSend={handleSend}
-            disabled={!isConnected || isStreaming}
-            placeholder={isConnected ? '输入消息...' : '等待连接...'}
-          />
-        </>
-      ) : (
-        renderEmptyState()
+        </div>
       )}
+
+      {/* 主内容区 */}
+      <div className="flex-1 relative overflow-hidden">
+        {/* ChatHome - 输入界面 */}
+        <div
+          className={`absolute inset-0 transition-all duration-500 ease-out ${
+            hasStarted ? 'opacity-0 scale-95 pointer-events-none' : 'opacity-100 scale-100'
+          }`}
+        >
+          <ChatHome
+            clis={availableClis}
+            selectedCli={selectedCli}
+            onSelectCli={handleSelectCli}
+            onStartChat={handleStartChat}
+            isLoading={isCreating}
+          />
+        </div>
+
+        {/* ChatSession - 对话界面 */}
+        {hasStarted && activeConversation && (
+          <div
+            className={`absolute inset-0 transition-all duration-500 ease-out ${
+              hasStarted ? 'opacity-100 scale-100' : 'opacity-0 scale-105 pointer-events-none'
+            }`}
+          >
+            <ChatSession
+              cli={currentCli}
+              conversation={activeConversation}
+              messages={localMessages}
+              isConnected={isConnected}
+              isStreaming={isStreaming}
+              input={input}
+              onInputChange={setInput}
+              onSend={handleSend}
+              onBack={handleBack}
+              onClear={handleClear}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

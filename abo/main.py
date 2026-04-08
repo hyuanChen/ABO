@@ -1666,6 +1666,41 @@ async def update_config(data: dict):
     return load_config()
 
 
+class VaultValidationRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/config/validate-vault")
+async def validate_vault_path(request: VaultValidationRequest):
+    """Validate that the provided path is a valid vault directory."""
+    from pathlib import Path
+
+    path = Path(request.path).expanduser().resolve()
+
+    # Check if path exists
+    if not path.exists():
+        return {"valid": False, "message": "路径不存在"}
+
+    # Check if it's a directory
+    if not path.is_dir():
+        return {"valid": False, "message": "所选路径不是文件夹"}
+
+    # Check if we have read/write permissions
+    try:
+        # Try to list directory contents
+        next(path.iterdir(), None)
+        # Try to create a test file
+        test_file = path / ".abo_test"
+        test_file.touch()
+        test_file.unlink()
+    except PermissionError:
+        return {"valid": False, "message": "没有该文件夹的读写权限"}
+    except Exception as e:
+        return {"valid": False, "message": f"无法访问该文件夹: {str(e)}"}
+
+    return {"valid": True, "message": "路径验证成功"}
+
+
 # ── Preferences ──────────────────────────────────────────────────
 
 @app.get("/api/preferences")

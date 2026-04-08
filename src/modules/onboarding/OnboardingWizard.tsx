@@ -1,0 +1,242 @@
+import { useState, useEffect } from "react";
+import { api } from "../../core/api";
+import { useStore } from "../../core/store";
+import ProgressIndicator from "./ProgressIndicator";
+import WelcomeStep from "./steps/WelcomeStep";
+import VaultSetupStep from "./steps/VaultSetupStep";
+import QuickConfigStep from "./steps/QuickConfigStep";
+import TutorialStep from "./steps/TutorialStep";
+
+interface OnboardingConfig {
+  onboarding_completed?: boolean;
+  onboarding_step?: number;
+  vault_path?: string;
+  version?: string;
+}
+
+interface OnboardingWizardProps {
+  onComplete?: () => void;
+}
+
+const TOTAL_STEPS = 4;
+
+export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
+  const { setConfig, addToast } = useStore();
+  const [currentStep, setCurrentStep] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [, setVaultPath] = useState("");
+
+  // Load onboarding status on mount
+  useEffect(() => {
+    loadOnboardingStatus();
+  }, []);
+
+  const loadOnboardingStatus = async () => {
+    try {
+      const config = await api.get<OnboardingConfig>("/api/config");
+
+      // If onboarding is already completed, skip
+      if (config.onboarding_completed) {
+        if (onComplete) {
+          onComplete();
+        }
+        return;
+      }
+
+      // Resume from saved step if exists
+      if (config.onboarding_step !== undefined && config.onboarding_step > 0) {
+        setCurrentStep(config.onboarding_step);
+      }
+
+      if (config.vault_path) {
+        setVaultPath(config.vault_path);
+      }
+    } catch (error) {
+      console.error("Failed to load onboarding status:", error);
+      addToast({
+        kind: "error",
+        title: "加载配置失败",
+        message: "请检查后端服务是否运行",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const saveOnboardingStep = async (step: number) => {
+    try {
+      await api.post("/api/config", {
+        onboarding_step: step,
+      });
+    } catch (error) {
+      console.error("Failed to save onboarding step:", error);
+    }
+  };
+
+  const completeOnboarding = async () => {
+    try {
+      await api.post("/api/config", {
+        onboarding_completed: true,
+        onboarding_step: TOTAL_STEPS,
+      });
+
+      // Refresh config in store
+      const config = await api.get<{ vault_path: string; literature_path?: string; version: string }>("/api/config");
+      setConfig(config);
+
+      addToast({
+        kind: "success",
+        title: "欢迎加入 ABO！",
+        message: "你的研究之旅即将开始",
+      });
+
+      if (onComplete) {
+        onComplete();
+      }
+    } catch (error) {
+      console.error("Failed to complete onboarding:", error);
+      addToast({
+        kind: "error",
+        title: "保存失败",
+        message: "请稍后重试",
+      });
+    }
+  };
+
+  const handleNext = () => {
+    const nextStep = currentStep + 1;
+    if (nextStep < TOTAL_STEPS) {
+      setCurrentStep(nextStep);
+      saveOnboardingStep(nextStep);
+    }
+  };
+
+  const handleBack = () => {
+    const prevStep = currentStep - 1;
+    if (prevStep >= 0) {
+      setCurrentStep(prevStep);
+      saveOnboardingStep(prevStep);
+    }
+  };
+
+  const handleVaultPathSet = (path: string) => {
+    setVaultPath(path);
+  };
+
+  const handleComplete = () => {
+    completeOnboarding();
+  };
+
+  if (isLoading) {
+    return (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "var(--bg-app)",
+          zIndex: 100,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: "16px",
+          }}
+        >
+          <div
+            style={{
+              width: "48px",
+              height: "48px",
+              borderRadius: "50%",
+              border: "3px solid var(--border-light)",
+              borderTopColor: "var(--color-primary)",
+              animation: "spin 1s linear infinite",
+            }}
+          />
+          <p style={{ fontSize: "0.9375rem", color: "var(--text-muted)" }}>加载中...</p>
+        </div>
+        <style>{`
+          @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+        `}</style>
+      </div>
+    );
+  }
+
+  const renderStep = () => {
+    switch (currentStep) {
+      case 0:
+        return <WelcomeStep onNext={handleNext} />;
+      case 1:
+        return (
+          <VaultSetupStep
+            onNext={handleNext}
+            onBack={handleBack}
+            onVaultPathSet={handleVaultPathSet}
+          />
+        );
+      case 2:
+        return <QuickConfigStep onNext={handleNext} onBack={handleBack} />;
+      case 3:
+        return <TutorialStep onComplete={handleComplete} />;
+      default:
+        return <WelcomeStep onNext={handleNext} />;
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        display: "flex",
+        flexDirection: "column",
+        background: "var(--bg-app)",
+        zIndex: 100,
+        fontFamily: "'Nunito', 'M PLUS Rounded 1c', sans-serif",
+      }}
+    >
+      {/* Progress Header */}
+      <ProgressIndicator currentStep={currentStep} totalSteps={TOTAL_STEPS} />
+
+      {/* Step Content */}
+      <div
+        style={{
+          flex: 1,
+          overflow: "auto",
+          position: "relative",
+        }}
+      >
+        {/* Background Decoration */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            background: `
+              radial-gradient(ellipse 80% 50% at 20% 40%, rgba(188, 164, 227, 0.06) 0%, transparent 50%),
+              radial-gradient(ellipse 60% 40% at 80% 60%, rgba(255, 183, 178, 0.04) 0%, transparent 50%)
+            `,
+          }}
+        />
+
+        <div
+          style={{
+            position: "relative",
+            width: "100%",
+            height: "100%",
+          }}
+        >
+          {renderStep()}
+        </div>
+      </div>
+    </div>
+  );
+}

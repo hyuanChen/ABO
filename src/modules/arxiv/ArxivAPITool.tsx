@@ -11,6 +11,9 @@ import {
   Tag,
   Users,
   Download,
+  Image as ImageIcon,
+  Save,
+  FolderOpen,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState } from "../../components/Layout";
 import { api } from "../../core/api";
@@ -27,6 +30,12 @@ interface ArxivPaper {
   pdf_url: string;
   arxiv_url: string;
   comment?: string;
+  figures?: Array<{
+    url: string;
+    caption: string;
+    is_method: boolean;
+    type: string;
+  }>;
 }
 
 interface Category {
@@ -52,7 +61,7 @@ export function ArxivAPITool() {
   const [keywords, setKeywords] = useState("");
   const [categories, setCategories] = useState<string[]>([]);
   const [availableCategories, setAvailableCategories] = useState<Category[]>([]);
-  const [mode, setMode] = useState<"AND" | "OR">("OR");
+  const [mode, setMode] = useState<"AND" | "OR">("AND");
   const [maxResults, setMaxResults] = useState(50);
   const [daysBack, setDaysBack] = useState<number | null>(null);
   const [sortBy, setSortBy] = useState("submittedDate");
@@ -63,6 +72,9 @@ export function ArxivAPITool() {
   const [searchTimeMs, setSearchTimeMs] = useState(0);
   const [loading, setLoading] = useState(false);
   const [expandedPapers, setExpandedPapers] = useState<Set<string>>(new Set());
+  const [paperFigures, setPaperFigures] = useState<Record<string, ArxivPaper["figures"]>>({});
+  const [loadingFigures, setLoadingFigures] = useState<Set<string>>(new Set());
+  const [savingPaper, setSavingPaper] = useState<string | null>(null);
 
   // Load categories on mount
   useEffect(() => {
@@ -99,6 +111,12 @@ export function ArxivAPITool() {
       setTotalResults(result.total_results);
       setSearchTimeMs(result.search_time_ms);
       toast.success(`找到 ${result.total_results} 篇论文`);
+      // 自动加载图片
+      result.papers.forEach(paper => {
+        if (!paperFigures[paper.id]) {
+          loadPaperFigures(paper);
+        }
+      });
     } catch (e) {
       console.error("Search failed:", e);
       toast.error("搜索失败", e instanceof Error ? e.message : "未知错误");
@@ -115,13 +133,84 @@ export function ArxivAPITool() {
     );
   };
 
-  const togglePaperExpand = (paperId: string) => {
+  const togglePaperExpand = async (paperId: string) => {
+    const isExpanding = !expandedPapers.has(paperId);
     setExpandedPapers(prev => {
       const next = new Set(prev);
       if (next.has(paperId)) next.delete(paperId);
       else next.add(paperId);
       return next;
     });
+    // 自动获取图片
+    if (isExpanding) {
+      const paper = papers.find(p => p.id === paperId);
+      if (paper && !paperFigures[paperId] && !loadingFigures.has(paperId)) {
+        await loadPaperFigures(paper);
+      }
+    }
+  };
+
+  const loadPaperFigures = async (paper: ArxivPaper) => {
+    if (paperFigures[paper.id] || loadingFigures.has(paper.id)) return;
+
+    setLoadingFigures(prev => new Set(prev).add(paper.id));
+    try {
+      const result = await api.post<{ figures: ArxivPaper["figures"] }>("/api/tools/arxiv/figures", {
+        arxiv_id: paper.id,
+      });
+      setPaperFigures(prev => ({ ...prev, [paper.id]: result.figures }));
+    } catch (e) {
+      console.error("Failed to load figures:", e);
+    } finally {
+      setLoadingFigures(prev => {
+        const next = new Set(prev);
+        next.delete(paper.id);
+        return next;
+      });
+    }
+  };
+
+  const savePaper = async (paper: ArxivPaper) => {
+    setSavingPaper(paper.id);
+    try {
+      // 确保图片已加载
+      let figures = paperFigures[paper.id] || [];
+      if (figures.length === 0 && !loadingFigures.has(paper.id)) {
+        const result = await api.post<{ figures: ArxivPaper["figures"] }>("/api/tools/arxiv/figures", {
+          arxiv_id: paper.id,
+        });
+        figures = result.figures;
+        setPaperFigures(prev => ({ ...prev, [paper.id]: figures }));
+      }
+
+      // 调用保存接口，同时保存 Markdown 和 PDF
+      const saveResult = await api.post<{
+        success: boolean;
+        saved_to: string;
+        files: string[];
+        pdf_path?: string;
+      }>("/api/tools/arxiv/save", {
+        arxiv_id: paper.id,
+        title: paper.title,
+        authors: paper.authors,
+        summary: paper.summary,
+        pdf_url: paper.pdf_url,
+        arxiv_url: paper.arxiv_url,
+        primary_category: paper.primary_category,
+        published: paper.published,
+        comment: paper.comment,
+        figures: figures,
+      });
+
+      if (saveResult.success) {
+        toast.success("保存成功", `Markdown 和 PDF 已保存到知识库`);
+      }
+    } catch (e) {
+      console.error("Failed to save paper:", e);
+      toast.error("保存失败", String(e));
+    } finally {
+      setSavingPaper(null);
+    }
   };
 
   const formatDate = (dateStr: string) => {
@@ -154,7 +243,7 @@ export function ArxivAPITool() {
               value={keywords}
               onChange={(e) => setKeywords(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-              placeholder="输入关键词，用空格或逗号分隔..."
+              placeholder={mode === "AND" ? "vision transformer (同时包含所有词)" : "vision,language | robot (分组AND，组间OR)"}
               style={{
                 flex: 1,
                 padding: "12px 16px",
@@ -249,24 +338,29 @@ export function ArxivAPITool() {
           </div>
         </div>
 
-        {/* Filters row */}
+        {/* Filters row - 三个对齐 */}
         <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
           {/* Max results */}
-          <div>
+          <div style={{ display: "flex", flexDirection: "column", width: "100px" }}>
             <label
               style={{
-                display: "block",
                 fontSize: "0.875rem",
                 fontWeight: 600,
                 color: "var(--text-main)",
                 marginBottom: "8px",
+                height: "20px",
+                lineHeight: "20px",
               }}
             >
               最大结果数
             </label>
-            <select
+            <input
+              type="number"
               value={maxResults}
               onChange={(e) => setMaxResults(Number(e.target.value))}
+              placeholder="50"
+              min={1}
+              max={200}
               style={{
                 padding: "10px 14px",
                 borderRadius: "var(--radius-md)",
@@ -274,36 +368,36 @@ export function ArxivAPITool() {
                 background: "var(--bg-card)",
                 color: "var(--text-main)",
                 fontSize: "0.875rem",
-                cursor: "pointer",
-                minWidth: "100px",
+                width: "100px",
+                height: "42px",
+                boxSizing: "border-box",
               }}
-            >
-              <option value={10}>10</option>
-              <option value={20}>20</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-            </select>
+            />
           </div>
 
           {/* Time range */}
-          <div>
+          <div style={{ display: "flex", flexDirection: "column", width: "100px" }}>
             <label
               style={{
-                display: "block",
                 fontSize: "0.875rem",
                 fontWeight: 600,
                 color: "var(--text-main)",
                 marginBottom: "8px",
+                height: "20px",
+                lineHeight: "20px",
               }}
             >
-              时间范围
+              时间范围(天)
             </label>
-            <select
+            <input
+              type="number"
               value={daysBack ?? ""}
               onChange={(e) => {
                 const val = e.target.value;
                 setDaysBack(val ? Number(val) : null);
               }}
+              placeholder="365"
+              min={1}
               style={{
                 padding: "10px 14px",
                 borderRadius: "var(--radius-md)",
@@ -311,27 +405,23 @@ export function ArxivAPITool() {
                 background: "var(--bg-card)",
                 color: "var(--text-main)",
                 fontSize: "0.875rem",
-                cursor: "pointer",
-                minWidth: "120px",
+                width: "100px",
+                height: "42px",
+                boxSizing: "border-box",
               }}
-            >
-              <option value="">全部时间</option>
-              <option value={7}>最近7天</option>
-              <option value={30}>最近30天</option>
-              <option value={90}>最近90天</option>
-              <option value={365}>最近1年</option>
-            </select>
+            />
           </div>
 
           {/* Sort by */}
-          <div>
+          <div style={{ display: "flex", flexDirection: "column", width: "140px" }}>
             <label
               style={{
-                display: "block",
                 fontSize: "0.875rem",
                 fontWeight: 600,
                 color: "var(--text-main)",
                 marginBottom: "8px",
+                height: "20px",
+                lineHeight: "20px",
               }}
             >
               排序方式
@@ -347,7 +437,9 @@ export function ArxivAPITool() {
                 color: "var(--text-main)",
                 fontSize: "0.875rem",
                 cursor: "pointer",
-                minWidth: "140px",
+                width: "140px",
+                height: "42px",
+                boxSizing: "border-box",
               }}
             >
               <option value="submittedDate">提交日期</option>
@@ -596,8 +688,70 @@ export function ArxivAPITool() {
                 ))}
               </div>
 
+              {/* Figures Preview - 单行横向滚动，大图显示 */}
+              {(paperFigures[paper.id]?.length ?? 0) > 0 && (
+                <div style={{ marginBottom: "16px" }}>
+                  <div style={{
+                    display: "flex",
+                    gap: "16px",
+                    overflowX: "auto",
+                    paddingBottom: "12px",
+                    scrollbarWidth: "thin",
+                  }}>
+                    {paperFigures[paper.id]?.map((fig, idx) => (
+                      <div key={idx} style={{
+                        flexShrink: 0,
+                        width: "480px",
+                        borderRadius: "var(--radius-md)",
+                        overflow: "hidden",
+                        border: "1px solid var(--border-light)",
+                        background: "var(--bg-card)",
+                      }}>
+                        <img
+                          src={fig.url}
+                          alt={fig.caption}
+                          style={{
+                            width: "100%",
+                            height: "280px",
+                            objectFit: "contain",
+                            background: "var(--bg-hover)",
+                            cursor: "pointer",
+                          }}
+                          onClick={() => window.open(fig.url, "_blank")}
+                          loading="lazy"
+                        />
+                        <div style={{
+                          padding: "10px 12px",
+                          fontSize: "0.8125rem",
+                          color: "var(--text-muted)",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          background: "var(--bg-card)",
+                        }}>
+                          {fig.caption}
+                          {fig.is_method && (
+                            <span style={{
+                              marginLeft: "8px",
+                              padding: "3px 8px",
+                              borderRadius: "4px",
+                              background: "var(--color-primary)",
+                              color: "white",
+                              fontSize: "0.6875rem",
+                              fontWeight: 600,
+                            }}>
+                              架构图
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Actions */}
-              <div style={{ display: "flex", gap: "12px" }}>
+              <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
                 <a
                   href={paper.pdf_url}
                   target="_blank"
@@ -641,6 +795,66 @@ export function ArxivAPITool() {
                   <ExternalLink style={{ width: "14px", height: "14px" }} />
                   arXiv
                 </a>
+                <button
+                  onClick={() => loadPaperFigures(paper)}
+                  disabled={loadingFigures.has(paper.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    padding: "8px 16px",
+                    borderRadius: "var(--radius-md)",
+                    border: "1px solid var(--border-light)",
+                    background: (paperFigures[paper.id]?.length ?? 0) > 0 ? "var(--bg-hover)" : "var(--bg-card)",
+                    color: (paperFigures[paper.id]?.length ?? 0) > 0 ? "var(--text-muted)" : "var(--text-main)",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    cursor: loadingFigures.has(paper.id) ? "not-allowed" : "pointer",
+                    transition: "all 0.2s ease",
+                  }}
+                >
+                  {loadingFigures.has(paper.id) ? (
+                    <>
+                      <span className="animate-spin">⟳</span>
+                      加载图片...
+                    </>
+                  ) : (
+                    <>
+                      <ImageIcon style={{ width: "14px", height: "14px" }} />
+                      {(paperFigures[paper.id]?.length ?? 0) > 0 ? `已加载 ${paperFigures[paper.id]?.length} 张图` : "获取图片"}
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => savePaper(paper)}
+                  disabled={savingPaper === paper.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    padding: "8px 16px",
+                    borderRadius: "var(--radius-md)",
+                    border: "1px solid var(--border-light)",
+                    background: "var(--bg-card)",
+                    color: "var(--color-primary)",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    cursor: savingPaper === paper.id ? "not-allowed" : "pointer",
+                    transition: "all 0.2s ease",
+                  }}
+                >
+                  {savingPaper === paper.id ? (
+                    <>
+                      <span className="animate-spin">⟳</span>
+                      保存中...
+                    </>
+                  ) : (
+                    <>
+                      <Save style={{ width: "14px", height: "14px" }} />
+                      保存到文献库
+                    </>
+                  )}
+                </button>
               </div>
             </div>
           ))}

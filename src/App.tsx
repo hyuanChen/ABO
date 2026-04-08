@@ -1,27 +1,105 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import NavSidebar from "./modules/nav/NavSidebar";
 import MainContent from "./modules/MainContent";
 import ToastContainer from "./components/Toast";
 import RewardNotificationContainer from "./components/RewardNotification";
+import OnboardingWizard from "./modules/onboarding/OnboardingWizard";
 import { useStore, FeedModule } from "./core/store";
 import { api } from "./core/api";
+
+interface AppConfig {
+  vault_path: string;
+  literature_path?: string;
+  version: string;
+  onboarding_completed?: boolean;
+}
 
 export default function App() {
   const setConfig = useStore((s) => s.setConfig);
   const setFeedModules = useStore((s) => s.setFeedModules);
+  const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
+  // Check onboarding status on mount
   useEffect(() => {
-    api.get<{ vault_path: string; literature_path?: string; version: string }>("/api/config")
-      .then(setConfig)
-      .catch(() => {});
+    api.get<AppConfig>("/api/config")
+      .then((config) => {
+        setConfig(config);
+        setOnboardingCompleted(config.onboarding_completed ?? false);
+      })
+      .catch(() => {
+        // If API fails, assume onboarding is needed
+        setOnboardingCompleted(false);
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
   }, [setConfig]);
 
   // Load modules on app start so FeedSidebar shows all modules
   useEffect(() => {
+    if (onboardingCompleted) {
+      api.get<{ modules: FeedModule[] }>("/api/modules")
+        .then((r) => setFeedModules(r.modules))
+        .catch(() => {});
+    }
+  }, [setFeedModules, onboardingCompleted]);
+
+  const handleOnboardingComplete = () => {
+    setOnboardingCompleted(true);
+    // Load modules after onboarding
     api.get<{ modules: FeedModule[] }>("/api/modules")
       .then((r) => setFeedModules(r.modules))
       .catch(() => {});
-  }, [setFeedModules]);
+  };
+
+  // Show loading state while checking onboarding status
+  if (isLoading || onboardingCompleted === null) {
+    return (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "var(--bg-app)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: "16px",
+          }}
+        >
+          <div
+            style={{
+              width: "48px",
+              height: "48px",
+              borderRadius: "50%",
+              border: "3px solid var(--border-light)",
+              borderTopColor: "var(--color-primary)",
+              animation: "spin 1s linear infinite",
+            }}
+          />
+          <p style={{ fontSize: "0.9375rem", color: "var(--text-muted)" }}>加载中...</p>
+        </div>
+        <style>{`
+          @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+        `}</style>
+      </div>
+    );
+  }
+
+  // Show onboarding wizard if not completed
+  if (!onboardingCompleted) {
+    return <OnboardingWizard onComplete={handleOnboardingComplete} />;
+  }
 
   return (
     <div

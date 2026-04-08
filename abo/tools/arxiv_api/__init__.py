@@ -4,8 +4,11 @@ from datetime import datetime, timedelta
 from typing import Literal, Optional
 import asyncio
 import logging
+import re
+from pathlib import Path
 
 import arxiv
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +158,82 @@ class ArxivAPITool:
             ))
 
         return papers
+
+    async def fetch_figures(self, arxiv_id: str) -> list[dict]:
+        """Fetch figures from arXiv HTML version."""
+        html_url = f"https://arxiv.org/html/{arxiv_id}"
+        figures = []
+
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                resp = await client.get(html_url, headers={"User-Agent": "ABO-arXiv-API/1.0"}, timeout=15)
+
+            if resp.status_code != 200:
+                return figures
+
+            html = resp.text
+
+            # Look for img tags that are likely pipeline/method figures
+            img_pattern = r'<img[^>]+src="([^"]+)"[^>]*>'
+
+            found_urls = set()
+            img_matches = list(re.finditer(img_pattern, html, re.IGNORECASE))
+
+            for i, match in enumerate(img_matches[:8]):  # Limit to first 8 images
+                try:
+                    src = match.group(1)
+                    if not src:
+                        continue
+
+                    # Extract alt from the same img tag
+                    img_tag = match.group(0)
+                    alt_match = re.search(r'alt="([^"]*)"', img_tag, re.IGNORECASE)
+                    alt = alt_match.group(1) if alt_match else ""
+
+                    # Skip non-figure images
+                    if any(skip in src.lower() for skip in ['icon', 'logo', 'button', 'spacer', 'avatar']):
+                        continue
+
+                    # Make absolute URL
+                    if src.startswith('/'):
+                        src = f"https://arxiv.org{src}"
+                    elif not src.startswith('http'):
+                        # Handle relative paths - arxiv HTML uses paths like "2604.01216v1/x1.png"
+                        if src.startswith(arxiv_id + '/'):
+                            src = f"https://arxiv.org/html/{src}"
+                        else:
+                            src = f"https://arxiv.org/html/{arxiv_id}/{src}"
+
+                    if src in found_urls:
+                        continue
+                    found_urls.add(src)
+
+                    # Check if it's a method/pipeline related figure
+                    alt_lower = alt.lower()
+                    is_method_figure = any(kw in alt_lower for kw in [
+                        'method', 'pipeline', 'architecture', 'framework',
+                        'overview', 'structure', 'model', 'system', 'approach',
+                        'flowchart', 'diagram', 'fig', 'figure', 'network',
+                        'proposed', 'illustration', 'schematic'
+                    ])
+
+                    figures.append({
+                        'url': src,
+                        'caption': alt[:100] if alt else f"Figure {i+1}",
+                        'is_method': is_method_figure,
+                        'type': 'img'
+                    })
+                except Exception:
+                    continue
+
+            # Sort: prioritize method figures, then by caption
+            figures.sort(key=lambda x: (not x['is_method'], x['caption']))
+            figures = figures[:4]  # Limit to top 4 figures
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch figures for {arxiv_id}: {e}")
+
+        return figures
 
     def to_dict(self, paper: ArxivPaper) -> dict:
         """Convert an ArxivPaper to a dictionary.

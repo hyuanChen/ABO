@@ -40,8 +40,20 @@ export interface Message {
 }
 
 export interface StreamEvent {
-  type: 'start' | 'content' | 'tool_call' | 'error' | 'finish';
+  type: 'start' | 'content' | 'tool_call' | 'error' | 'finish' | 'ping' | 'pong' | 'connected' | 'disconnected' | 'reconnected';
   data: string;
   msgId: string;
   metadata?: Record<string, unknown>;
+  timestamp?: string;
+  attempt?: number;
+  reason?: string;
 }
+
+export type ConnectionState =
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'streaming'
+  | 'disconnected'
+  | 'error'
+  | 'reconnecting';
