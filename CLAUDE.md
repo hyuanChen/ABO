@@ -114,6 +114,36 @@ ABO/
 
 ---
 
+## User Experience Principles
+
+1. **Zero-config start** — 新用户无需配置即可看到示例数据
+2. **Progressive disclosure** — 功能分层展示，避免信息过载
+3. **Immediate feedback** — 所有操作有即时视觉反馈
+4. **Graceful degradation** — 部分功能失效时，其他功能正常可用
+5. **Smart defaults** — 所有配置项都有基于用户行为的智能默认值
+
+---
+
+## Development Guidelines
+
+### Adding New Features
+
+1. 阅读 `ref/10-user-experience.md` 了解 UX 规范
+2. 阅读 `ref/09-new-feature-checklist.md` 按步骤实现
+3. 确保新功能有合理的空状态
+4. 添加错误边界（Error Boundary）
+5. 为新功能添加 Tour Guide 步骤
+
+### Module Development
+
+1. 阅读 `ref/01-module-sdk.md` 了解 SDK
+2. 阅读 `ref/11-module-management.md` 了解模块管理规范
+3. 确保模块有清晰的配置界面
+4. 提供 Cookie/认证验证功能
+5. 添加诊断和自助修复功能
+
+---
+
 ## Key Patterns
 
 ### Claude CLI Bridge

@@ -24,6 +24,8 @@ Do NOT read all guides at once. Pick the one matching your task.
 | `07-claude-panel.md` | Claude chat panel changes | WebSocket streaming, quick actions, context injection |
 | `08-pending-features.md` | Implementing meeting/health/podcast/trends | Specs for the 4 unimplemented modules |
 | `09-new-feature-checklist.md` | Adding any new feature end-to-end | Step-by-step checklist: backend → store → nav → UI → test |
+| `10-user-experience.md` | Implementing any user-facing feature | UX principles, interaction patterns, component conventions |
+| `11-module-management.md` | Building new modules or module management UI | Module states, API specs, config UI patterns |
 
 ## Progressive Disclosure Pattern
 
