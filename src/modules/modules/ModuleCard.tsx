@@ -1,3 +1,4 @@
+import { useState, useEffect, useRef } from 'react';
 import { Play, Pause, Settings, AlertCircle, MoreVertical, FileText, RefreshCw } from 'lucide-react';
 import type { ModuleConfig, ModuleStatus } from '../../types/module';
 
@@ -271,5 +272,3 @@ export function ModuleCard({ module, onClick, onRun, onToggle, onDiagnose }: Mod
     </div>
   );
 }
-
-import { useState, useEffect, useRef } from 'react';
