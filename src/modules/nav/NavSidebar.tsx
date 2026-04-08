@@ -3,7 +3,7 @@ import PixelAvatar from "../profile/PixelAvatar";
 import {
   Inbox, BookOpen, FileText, MessageSquare,
   Rss, Heart, Settings, Zap, User, Menu, X, Moon, Sun, LayoutGrid, FolderOpen,
-  ChevronDown, BookHeart, Tv
+  ChevronDown, BookHeart, Tv, BarChart3
 } from "lucide-react";
 import { useState, useEffect } from "react";
 
@@ -12,6 +12,7 @@ type NavItem = { id: ActiveTab; label: string; Icon: React.FC<{ className?: stri
 const MAIN: NavItem[] = [
   { id: "profile",    label: "角色主页",   Icon: User },
   { id: "overview",   label: "今日情报",   Icon: Inbox },
+  { id: "dashboard",  label: "数据洞察",   Icon: BarChart3 },
   { id: "vault",      label: "情报库",     Icon: FolderOpen },
   { id: "literature", label: "文献库",     Icon: BookOpen },
   { id: "journal",    label: "手记",       Icon: FileText },

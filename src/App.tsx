@@ -4,6 +4,8 @@ import MainContent from "./modules/MainContent";
 import ToastContainer from "./components/Toast";
 import RewardNotificationContainer from "./components/RewardNotification";
 import OnboardingWizard from "./modules/onboarding/OnboardingWizard";
+import { CommandPalette } from "./components/CommandPalette";
+import { GlobalSearch } from "./components/Search";
 import { useStore, FeedModule } from "./core/store";
 import { api } from "./core/api";
 
@@ -146,6 +148,8 @@ export default function App() {
       </main>
       <ToastContainer />
       <RewardNotificationContainer />
+      <CommandPalette />
+      <GlobalSearch />
     </div>
   );
 }
