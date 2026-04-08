@@ -15,6 +15,7 @@ const MAIN: NavItem[] = [
   { id: "dashboard",  label: "数据洞察",   Icon: BarChart3 },
   { id: "vault",      label: "情报库",     Icon: FolderOpen },
   { id: "literature", label: "文献库",     Icon: BookOpen },
+  { id: "wiki",       label: "知识库",     Icon: BookHeart },
   { id: "journal",    label: "手记",       Icon: FileText },
   { id: "chat",       label: "AI 对话",    Icon: MessageSquare },
 ];

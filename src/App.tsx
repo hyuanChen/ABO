@@ -23,15 +23,20 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
 
   // Check onboarding status on mount
+  // NOTE: Onboarding is disabled by default for development.
+  // Set onboarding_completed to true to skip wizard.
+  // To enable onboarding, change the default to false or remove the override.
   useEffect(() => {
     api.get<AppConfig>("/api/config")
       .then((config) => {
         setConfig(config);
-        setOnboardingCompleted(config.onboarding_completed ?? false);
+        // Default to true to skip onboarding during development
+        // Users can manually trigger onboarding from settings later
+        setOnboardingCompleted(config.onboarding_completed ?? true);
       })
       .catch(() => {
-        // If API fails, assume onboarding is needed
-        setOnboardingCompleted(false);
+        // If API fails, skip onboarding (assume development mode)
+        setOnboardingCompleted(true);
       })
       .finally(() => {
         setIsLoading(false);

@@ -12,6 +12,7 @@ export type ActiveTab =
   | "claude"
   | "chat"
   | "vault"
+  | "wiki"
   | "settings"
   | "modules"
   | "xiaohongshu"

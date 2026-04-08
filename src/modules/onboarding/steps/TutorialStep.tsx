@@ -85,15 +85,23 @@ export default function TutorialStep({ onComplete }: TutorialStepProps) {
   const currentTutorial = tutorials[currentStep];
 
   const handleNext = () => {
+    // Mark current step as completed
     if (!completedSteps.includes(currentTutorial.id)) {
       setCompletedSteps([...completedSteps, currentTutorial.id]);
     }
 
     if (currentStep < tutorials.length - 1) {
+      // Go to next step
       setCurrentStep(currentStep + 1);
     } else {
+      // Last step - complete the tutorial
       onComplete();
     }
+  };
+
+  const handleStepClick = (index: number) => {
+    // Allow clicking to any step, including the last one
+    setCurrentStep(index);
   };
 
   const handleSkip = () => {
@@ -159,7 +167,7 @@ export default function TutorialStep({ onComplete }: TutorialStepProps) {
         {tutorials.map((tutorial, index) => (
           <button
             key={tutorial.id}
-            onClick={() => setCurrentStep(index)}
+            onClick={() => handleStepClick(index)}
             style={{
               width: "10px",
               height: "10px",

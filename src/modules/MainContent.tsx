@@ -13,6 +13,7 @@ import { XiaohongshuTool } from "./xiaohongshu/XiaohongshuTool";
 import { BilibiliTool } from "./bilibili/BilibiliTool";
 import { ArxivAPITool } from "./arxiv/ArxivAPITool";
 import Dashboard from "./dashboard/Dashboard";
+import Wiki from "./wiki/Wiki";
 
 export default function MainContent() {
   const activeTab = useStore((s) => s.activeTab);
@@ -58,6 +59,7 @@ export default function MainContent() {
       {activeTab === "xiaohongshu" && <XiaohongshuTool />}
       {activeTab === "bilibili" && <BilibiliTool />}
       {activeTab === "arxiv-api" && <ArxivAPITool />}
+      {activeTab === "wiki"      && <Wiki />}
       {activeTab === "dashboard" && <Dashboard />}
     </main>
   );

@@ -3,10 +3,11 @@
  * 显示历史消息 + 输入框，支持流式打字机效果
  */
 import { useRef, useEffect, useCallback } from 'react';
-import { Send, Loader2, Wifi, WifiOff, Bot, User, ArrowLeft, MoreVertical, Trash2 } from 'lucide-react';
+import { Send, Loader2, Bot, User, ArrowLeft, Trash2, MessageSquare } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Message, CliConfig, Conversation } from '../../types/chat';
+import { PageContainer, PageHeader, PageContent, Card } from '../../components/Layout';
 
 interface ChatSessionProps {
   cli: CliConfig;
@@ -56,116 +57,97 @@ export function ChatSession({
     target.style.height = `${Math.min(target.scrollHeight, 120)}px`;
   }, []);
 
-  return (
-    <div className="flex flex-col h-full bg-[var(--bg-app)]">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 bg-white/60 backdrop-blur-xl border-b border-[var(--border-color)]">
-        <div className="flex items-center gap-3">
-          <button
-            onClick={onBack}
-            className="p-2 rounded-xl text-[var(--text-muted)] hover:bg-[var(--color-primary)]/10 hover:text-[var(--color-primary)] transition-all"
-          >
-            <ArrowLeft className="w-5 h-5" />
-          </button>
+  const headerActions = (
+    <>
+      <button
+        onClick={onBack}
+        className="p-2 rounded-xl text-[var(--text-muted)] hover:bg-[var(--color-primary)]/10 hover:text-[var(--color-primary)] transition-all"
+        title="返回"
+      >
+        <ArrowLeft className="w-5 h-5" />
+      </button>
+      <button
+        onClick={onClear}
+        className="p-2 rounded-xl text-[var(--text-muted)] hover:bg-red-50 hover:text-red-500 transition-all"
+        title="清除对话"
+      >
+        <Trash2 className="w-5 h-5" />
+      </button>
+    </>
+  );
 
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[var(--color-primary)]/10 to-[var(--color-primary)]/20">
-              <Bot className="h-5 w-5 text-[var(--color-primary)]" />
-            </div>
-            <div>
-              <h3 className="font-semibold text-[var(--text-main)] text-sm">{cli.name}</h3>
-              <div className="flex items-center gap-1.5 text-xs">
-                {isConnected ? (
-                  <>
-                    <Wifi className="w-3 h-3 text-green-500" />
-                    <span className="text-green-600">已连接</span>
-                  </>
-                ) : (
-                  <>
-                    <WifiOff className="w-3 h-3 text-red-500" />
-                    <span className="text-red-500">未连接</span>
-                  </>
-                )}
+  return (
+    <PageContainer>
+      <PageHeader
+        title={cli.name}
+        subtitle={isConnected ? "已连接" : "未连接"}
+        icon={MessageSquare}
+        actions={headerActions}
+      />
+
+      <PageContent maxWidth="900px">
+        <Card noPadding style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto p-4">
+            <div className="space-y-6">
+              {/* Conversation title */}
+              <div className="text-center py-4">
+                <h2 className="text-lg font-semibold text-[var(--text-main)]">{conversation.title}</h2>
+                <p className="text-xs text-[var(--text-muted)] mt-1">
+                  {new Date(conversation.createdAt).toLocaleString('zh-CN')}
+                </p>
               </div>
+
+              {/* Message list */}
+              {messages.map((msg, index) => (
+                <MessageBubble
+                  key={msg.id}
+                  message={msg}
+                  isLast={index === messages.length - 1}
+                  isStreaming={isStreaming && index === messages.length - 1 && msg.role === 'assistant'}
+                />
+              ))}
+              <div ref={messagesEndRef} />
             </div>
           </div>
-        </div>
 
-        <div className="flex items-center gap-1">
-          <button
-            onClick={onClear}
-            className="p-2 rounded-xl text-[var(--text-muted)] hover:bg-red-50 hover:text-red-500 transition-all"
-            title="清除对话"
-          >
-            <Trash2 className="w-5 h-5" />
-          </button>
-          <button className="p-2 rounded-xl text-[var(--text-muted)] hover:bg-[var(--color-primary)]/10 hover:text-[var(--color-primary)] transition-all">
-            <MoreVertical className="w-5 h-5" />
-          </button>
-        </div>
-      </div>
-
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4">
-        <div className="max-w-3xl mx-auto space-y-6">
-          {/* Conversation title */}
-          <div className="text-center py-4">
-            <h2 className="text-lg font-semibold text-[var(--text-main)]">{conversation.title}</h2>
-            <p className="text-xs text-[var(--text-muted)] mt-1">
-              {new Date(conversation.createdAt).toLocaleString('zh-CN')}
+          {/* Input area */}
+          <div className="p-4 bg-white/60 backdrop-blur-xl border-t border-[var(--border-color)]">
+            <div className="flex items-end gap-2 p-2 rounded-2xl bg-white/80 border border-[var(--border-color)] shadow-soft focus-within:border-[var(--color-primary)] focus-within:shadow-medium transition-all">
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => onInputChange(e.target.value)}
+                onKeyDown={handleKeyDown}
+                onInput={handleInput}
+                placeholder="继续对话..."
+                disabled={!isConnected || isStreaming}
+                rows={1}
+                className="flex-1 resize-none bg-transparent px-3 py-2.5 text-[var(--text-main)] placeholder:text-[var(--text-muted)]/60 outline-none text-sm"
+                style={{ minHeight: '40px', maxHeight: '120px' }}
+              />
+              <button
+                onClick={onSend}
+                disabled={!input.trim() || !isConnected || isStreaming}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl
+                  bg-[var(--color-primary)] text-white
+                  transition-all hover:bg-[var(--color-primary-dark)] hover:scale-105
+                  disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isStreaming ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+              </button>
+            </div>
+            <p className="text-center text-xs text-[var(--text-muted)] mt-2">
+              按 Enter 发送，Shift + Enter 换行
             </p>
           </div>
-
-          {/* Message list */}
-          {messages.map((msg, index) => (
-            <MessageBubble
-              key={msg.id}
-              message={msg}
-              isLast={index === messages.length - 1}
-              isStreaming={isStreaming && index === messages.length - 1 && msg.role === 'assistant'}
-            />
-          ))}
-          <div ref={messagesEndRef} />
-        </div>
-      </div>
-
-      {/* Input area */}
-      <div className="p-4 bg-white/60 backdrop-blur-xl border-t border-[var(--border-color)]">
-        <div className="max-w-3xl mx-auto">
-          <div className="flex items-end gap-2 p-2 rounded-2xl bg-white/80 border border-[var(--border-color)] shadow-soft focus-within:border-[var(--color-primary)] focus-within:shadow-medium transition-all">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => onInputChange(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onInput={handleInput}
-              placeholder="继续对话..."
-              disabled={!isConnected || isStreaming}
-              rows={1}
-              className="flex-1 resize-none bg-transparent px-3 py-2.5 text-[var(--text-main)] placeholder:text-[var(--text-muted)]/60 outline-none text-sm"
-              style={{ minHeight: '40px', maxHeight: '120px' }}
-            />
-            <button
-              onClick={onSend}
-              disabled={!input.trim() || !isConnected || isStreaming}
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl
-                bg-[var(--color-primary)] text-white
-                transition-all hover:bg-[var(--color-primary-dark)] hover:scale-105
-                disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {isStreaming ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
-            </button>
-          </div>
-          <p className="text-center text-xs text-[var(--text-muted)] mt-2">
-            按 Enter 发送，Shift + Enter 换行
-          </p>
-        </div>
-      </div>
-    </div>
+        </Card>
+      </PageContent>
+    </PageContainer>
   );
 }
 

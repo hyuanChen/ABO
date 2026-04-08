@@ -8,13 +8,12 @@ import { ChatHome } from './ChatHome';
 import { ChatSession } from './ChatSession';
 import { useChat } from '../../hooks/useChat';
 import { X, Plus, MessageSquare, Wifi, WifiOff } from 'lucide-react';
-import type { CliConfig, Message } from '../../types/chat';
+import type { Message } from '../../types/chat';
 
 export function ChatPanel() {
   const {
     availableClis,
     selectedCli,
-    selectCli,
     conversations,
     activeConversation,
     createNewConversation,
@@ -47,8 +46,10 @@ export function ChatPanel() {
   }, [activeConversation]);
 
   // 开始新对话
-  const handleStartChat = useCallback(async (initialMessage: string) => {
-    if (!selectedCli && availableClis.length === 0) {
+  const handleStartChat = useCallback(async (initialMessage: string, cliId?: string) => {
+    // 使用传入的 cliId 或当前选中的 CLI
+    const targetCliId = cliId || selectedCli?.id;
+    if (!targetCliId && availableClis.length === 0) {
       return;
     }
 
@@ -147,11 +148,6 @@ export function ChatPanel() {
     setLocalMessages([]);
   }, []);
 
-  // 选择CLI
-  const handleSelectCli = useCallback((cli: CliConfig) => {
-    selectCli(cli);
-  }, [selectCli]);
-
   // 如果有错误，显示错误提示
   if (error) {
     return (
@@ -240,9 +236,6 @@ export function ChatPanel() {
           }`}
         >
           <ChatHome
-            clis={availableClis}
-            selectedCli={selectedCli}
-            onSelectCli={handleSelectCli}
             onStartChat={handleStartChat}
             isLoading={isCreating}
           />

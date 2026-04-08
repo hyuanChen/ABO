@@ -79,7 +79,7 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
       id: "xiaohongshu-tracker",
       name: "小红书追踪器",
       icon: <ShoppingBag style={{ width: "20px", height: "20px" }} />,
-      enabled: false,
+      enabled: true,
       keywords: DEFAULT_KEYWORDS["xiaohongshu-tracker"],
       requiresCookie: true,
       description: "学习笔记和评测",
