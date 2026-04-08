@@ -28,3 +28,32 @@ def test_parse_empty(tmp_path):
     from claude_session_cleaner import parse_sessions
     sessions = parse_sessions(tmp_path / "nonexistent.jsonl")
     assert sessions == []
+
+
+def test_delete_sessions(tmp_path):
+    history = tmp_path / "history.jsonl"
+    history.write_text(
+        '{"display":"a","pastedContents":{},"timestamp":1000,"project":"/tmp","sessionId":"aaa-111"}\n'
+        '{"display":"b","pastedContents":{},"timestamp":2000,"project":"/tmp","sessionId":"aaa-111"}\n'
+        '{"display":"c","pastedContents":{},"timestamp":3000,"project":"/foo","sessionId":"bbb-222"}\n'
+        '{"display":"d","pastedContents":{},"timestamp":4000,"project":"/bar","sessionId":"ccc-333"}\n'
+    )
+    fh = tmp_path / "file-history"
+    (fh / "aaa-111").mkdir(parents=True)
+    (fh / "aaa-111" / "data").write_text("x")
+    (fh / "bbb-222").mkdir(parents=True)
+
+    from claude_session_cleaner import delete_sessions
+    result = delete_sessions(["aaa-111", "bbb-222"], history, fh)
+
+    assert result["linesRemoved"] == 3  # 2 from aaa + 1 from bbb
+    assert result["dirsRemoved"] == 2
+
+    # Verify remaining content
+    remaining = history.read_text().strip().splitlines()
+    assert len(remaining) == 1
+    assert '"ccc-333"' in remaining[0]
+
+    # Verify dirs are gone
+    assert not (fh / "aaa-111").exists()
+    assert not (fh / "bbb-222").exists()
