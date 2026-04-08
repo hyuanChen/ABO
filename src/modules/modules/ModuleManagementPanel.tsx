@@ -26,6 +26,7 @@ export function ModuleManagementPanel() {
   const [filter, setFilter] = useState<FilterType>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedModule, setSelectedModule] = useState<ModuleConfig | null>(null);
+  const [runningModules, setRunningModules] = useState<Set<string>>(new Set());
   const { addToast } = useStore();
 
   useEffect(() => {
