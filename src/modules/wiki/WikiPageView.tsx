@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { ExternalLink, Link2, Tag, Clock, Loader2 } from "lucide-react";
+import { ExternalLink, Link2, Tag, Clock, Loader2, BookOpen } from "lucide-react";
 import { api } from "../../core/api";
 import type { WikiType } from "./Wiki";
 
@@ -256,20 +256,48 @@ export default function WikiPageView({ wikiType, slug, onNavigateToPage }: Props
             </span>
           ))}
 
-          {/* Updated date */}
-          <span
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "4px",
-              fontSize: "0.75rem",
-              color: "var(--text-muted)",
-              marginLeft: "auto",
-            }}
-          >
-            <Clock style={{ width: "12px", height: "12px" }} />
-            更新于 {page.updated}
-          </span>
+          {/* Updated date + Open in Obsidian */}
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginLeft: "auto" }}>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+                fontSize: "0.75rem",
+                color: "var(--text-muted)",
+              }}
+            >
+              <Clock style={{ width: "12px", height: "12px" }} />
+              更新于 {page.updated}
+            </span>
+            <button
+              onClick={() => {
+                const vaultName = "obsidian";
+                const wikiDir = wikiType === "intel" ? "Wiki-Intel" : "Wiki-Lit";
+                const filePath = `${wikiDir}/${slug}.md`;
+                window.location.href = `obsidian://open?vault=${vaultName}&file=${encodeURIComponent(filePath)}`;
+              }}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "4px",
+                padding: "4px 10px",
+                borderRadius: "var(--radius-full)",
+                background: "rgba(188, 164, 227, 0.1)",
+                border: "1px solid rgba(188, 164, 227, 0.2)",
+                color: "var(--color-primary-dark)",
+                cursor: "pointer",
+                fontSize: "0.6875rem",
+                fontWeight: 600,
+                transition: "all 0.2s ease",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(188, 164, 227, 0.2)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(188, 164, 227, 0.1)"; }}
+            >
+              <BookOpen style={{ width: "11px", height: "11px" }} />
+              Obsidian
+            </button>
+          </div>
         </div>
 
         {/* Divider */}

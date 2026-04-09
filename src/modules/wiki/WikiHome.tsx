@@ -184,7 +184,7 @@ export default function WikiHome({ onSelectWiki }: Props) {
                   情报库 Wiki
                 </h2>
                 <p style={{ fontSize: "0.9375rem", color: "var(--text-muted)", lineHeight: 1.5 }}>
-                  行业动态 · 竞品 · 趋势
+                  兴趣 · 技能 · 生活思考
                 </p>
               </div>
 
@@ -213,7 +213,7 @@ export default function WikiHome({ onSelectWiki }: Props) {
                     background: "rgba(168, 230, 207, 0.15)",
                   }}
                 >
-                  {intelStats?.entity_count ?? 0} 实体
+                  {intelStats?.entity_count ?? 0} 兴趣
                 </span>
               </div>
             </button>
@@ -270,7 +270,7 @@ export default function WikiHome({ onSelectWiki }: Props) {
                   文献库 Wiki
                 </h2>
                 <p style={{ fontSize: "0.9375rem", color: "var(--text-muted)", lineHeight: 1.5 }}>
-                  论文 · 方法 · 领域
+                  论文 · 方法 · 研究方向
                 </p>
               </div>
 

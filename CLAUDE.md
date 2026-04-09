@@ -142,6 +142,17 @@ ABO/
 4. 提供 Cookie/认证验证功能
 5. 添加诊断和自助修复功能
 
+### Wiki 知识库维护
+
+阅读 `ref/12-LLM-wiki.md` 了解 Wiki 系统的设计理念和维护规范。核心要点：
+
+- **三层架构**：Raw Sources（不可变原始文档）→ Wiki（LLM 生成维护的 Markdown 页面）→ Schema（结构约定）
+- **Ingest 流程**：新源文档加入后，LLM 读取并整合到现有 Wiki 中 — 更新实体页、修订主题摘要、标注矛盾之处、维护交叉引用
+- **Query 流程**：基于 Wiki 回答问题，好的回答应作为新页面归档回 Wiki，知识持续积累
+- **Lint 流程**：定期健康检查 — 查找页面间矛盾、过时内容、孤立页面、缺失交叉引用
+- **index.md**：内容导航索引，每次 ingest 更新；**log.md**：时间线操作日志，append-only
+- **Obsidian 是 IDE，LLM 是程序员，Wiki 是代码库** — 用户负责策展和提问，LLM 负责所有整理维护工作
+
 ---
 
 ## Key Patterns

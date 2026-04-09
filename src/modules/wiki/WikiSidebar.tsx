@@ -19,10 +19,10 @@ interface Props {
   onBack: () => void;
 }
 
-// Category metadata for intel wiki
+// Category metadata for intel wiki (生活相关)
 const INTEL_CATEGORIES = [
-  { key: "entity", label: "实体", Icon: Users, description: "公司 · 产品 · 人物" },
-  { key: "concept", label: "概念", Icon: Lightbulb, description: "趋势 · 技术 · 事件" },
+  { key: "entity", label: "兴趣技能", Icon: Users, description: "日语 · 吉他 · 摄影 · 运动" },
+  { key: "concept", label: "思考笔记", Icon: Lightbulb, description: "生活方式 · 读书 · 个人思考" },
 ];
 
 // Category metadata for lit wiki

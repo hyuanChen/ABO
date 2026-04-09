@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Map as MapIcon, FileText } from "lucide-react";
+import { Map as MapIcon, FileText, BookOpen } from "lucide-react";
 import { PageContainer, PageHeader, EmptyState } from "../../components/Layout";
 import { api } from "../../core/api";
 import WikiSidebar from "./WikiSidebar";
@@ -32,9 +32,42 @@ export default function WikiView({
       {/* Header with view mode toggle */}
       <PageHeader
         title={wikiTitle}
-        subtitle={wikiType === "intel" ? "行业动态 · 竞品 · 趋势" : "论文 · 方法 · 领域"}
+        subtitle={wikiType === "intel" ? "兴趣 · 技能 · 生活思考" : "论文 · 方法 · 研究方向"}
         actions={
-          <div style={{ display: "flex", gap: "4px" }}>
+          <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
+            <button
+              onClick={() => {
+                const vaultName = "obsidian";
+                const wikiDir = wikiType === "intel" ? "Wiki-Intel" : "Wiki-Lit";
+                window.location.href = `obsidian://open?vault=${vaultName}&file=${encodeURIComponent(wikiDir)}`;
+              }}
+              style={{
+                padding: "8px 14px",
+                borderRadius: "var(--radius-full)",
+                background: "var(--bg-card)",
+                color: "var(--text-secondary)",
+                border: "1px solid var(--border-light)",
+                cursor: "pointer",
+                transition: "all 0.2s ease",
+                fontSize: "0.8125rem",
+                fontWeight: 600,
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                marginRight: "8px",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = "var(--color-primary-light)";
+                e.currentTarget.style.color = "var(--color-primary-dark)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = "var(--border-light)";
+                e.currentTarget.style.color = "var(--text-secondary)";
+              }}
+            >
+              <BookOpen style={{ width: "14px", height: "14px" }} />
+              Obsidian
+            </button>
             <button
               onClick={() => onSetViewMode("pages")}
               style={{
@@ -110,7 +143,7 @@ export default function WikiView({
           }}
         >
           {viewMode === "mindmap" ? (
-            <WikiMindMapPlaceholder wikiType={wikiType} onSelectPage={onNavigateToPage} />
+            <WikiMindMapPlaceholder wikiType={wikiType} onSelectPage={(slug) => { onNavigateToPage(slug); onSetViewMode("pages"); }} />
           ) : activePage ? (
             <WikiPageView
               wikiType={wikiType}
@@ -225,9 +258,16 @@ function WikiMindMapPlaceholder({ wikiType, onSelectPage }: MindMapPlaceholderPr
   const centerX = 400;
   const centerY = 300;
   const radius = Math.min(250, nodes.length * 20);
-  const maxSize = Math.max(...nodes.map((n) => n.size), 1);
+  // Count edges per node to compute size
+  const edgeCount = new globalThis.Map<string, number>();
+  graph.edges.forEach((e) => {
+    edgeCount.set(e.source, (edgeCount.get(e.source) ?? 0) + 1);
+    edgeCount.set(e.target, (edgeCount.get(e.target) ?? 0) + 1);
+  });
+  const nodesWithSize = nodes.map((n) => ({ ...n, size: n.size ?? (edgeCount.get(n.id) ?? 1) }));
+  const maxSize = Math.max(...nodesWithSize.map((n) => n.size), 1);
 
-  const positionedNodes = nodes.map((node, i) => {
+  const positionedNodes = nodesWithSize.map((node, i) => {
     const angle = (2 * Math.PI * i) / nodes.length;
     const r = radius * (0.5 + 0.5 * (node.size / maxSize));
     return {
