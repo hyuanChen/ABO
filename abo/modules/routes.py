@@ -11,6 +11,9 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Body
 from pydantic import BaseModel
 
+from ..config import is_demo_mode
+from ..demo.data import get_demo_modules_dashboard
+
 router = APIRouter(prefix="/api/modules")
 
 
@@ -249,8 +252,10 @@ def _determine_status(module_id: str) -> ModuleStatus:
 # ── API Endpoints ──────────────────────────────────────────────────
 
 @router.get("/dashboard")
-async def get_module_dashboard() -> ModuleDashboard:
+async def get_module_dashboard():
     """Returns all modules with full status for the dashboard."""
+    if is_demo_mode():
+        return get_demo_modules_dashboard()
     modules = []
 
     for default in DEFAULT_MODULES:

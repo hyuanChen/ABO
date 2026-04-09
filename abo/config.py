@@ -34,8 +34,11 @@ def save(data: dict) -> None:
     existing = load()
     merged = {**existing}
     for k, v in data.items():
+        # Booleans are always written as-is (including False)
+        if isinstance(v, bool):
+            merged[k] = v
         # Only overwrite if new value is non-empty, or existing was already empty
-        if v or not existing.get(k):
+        elif v or not existing.get(k):
             merged[k] = v
     _CONFIG_PATH.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
 
@@ -60,3 +63,8 @@ def get_abo_dir() -> Path:
 def get_semantic_scholar_api_key() -> str:
     """Return Semantic Scholar API key, or empty string if not configured."""
     return load().get("semantic_scholar_api_key", "")
+
+
+def is_demo_mode() -> bool:
+    """Return True if demo/showcase mode is enabled."""
+    return bool(load().get("demo_mode", False))

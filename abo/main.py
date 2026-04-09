@@ -15,7 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .activity import ActivityTracker, ActivityType
-from .config import get_vault_path, get_literature_path, load as load_config, save as save_config
+from .config import get_vault_path, get_literature_path, load as load_config, save as save_config, is_demo_mode
+from .demo.data import get_demo_cards, DEMO_UNREAD_COUNTS, DEMO_KEYWORD_PREFS, get_demo_activities, get_demo_modules_dashboard
 from .insights.routes import router as insights_router
 from .wiki.routes import router as wiki_router
 from .preferences.engine import PreferenceEngine
@@ -236,6 +237,13 @@ async def get_cards(
     limit: int = 50,
     offset: int = 0,
 ):
+    if is_demo_mode():
+        demo_cards = get_demo_cards()
+        if module_id:
+            demo_cards = [c for c in demo_cards if c["module_id"] == module_id]
+        if unread_only:
+            demo_cards = [c for c in demo_cards if not c.get("read")]
+        return {"cards": demo_cards[offset:offset + limit]}
     cards = _card_store.list(
         module_id=module_id, unread_only=unread_only,
         limit=limit, offset=offset,
@@ -245,6 +253,8 @@ async def get_cards(
 
 @app.get("/api/cards/unread-counts")
 async def unread_counts():
+    if is_demo_mode():
+        return DEMO_UNREAD_COUNTS
     return _card_store.unread_counts()
 
 
@@ -590,6 +600,14 @@ async def clear_all_cards():
 
 @app.get("/api/modules")
 async def list_modules():
+    if is_demo_mode():
+        dash = get_demo_modules_dashboard()
+        return {"modules": [
+            {"id": m["id"], "name": m["name"], "icon": m["icon"],
+             "schedule": m["schedule"], "enabled": m["status"] == "active",
+             "next_run": m.get("next_run")}
+            for m in dash["modules"]
+        ]}
     job_map = {j["id"]: j for j in (_scheduler.job_info() if _scheduler else [])}
     modules = [
         {**m.get_status(), "next_run": job_map.get(m.id, {}).get("next_run")}
@@ -1962,6 +1980,8 @@ async def validate_vault_path(request: VaultValidationRequest):
 
 @app.get("/api/preferences")
 async def get_prefs():
+    if is_demo_mode():
+        return {"keyword_preferences": DEMO_KEYWORD_PREFS}
     return _prefs.all_data()
 
 
@@ -1974,6 +1994,14 @@ async def update_prefs(data: dict):
 @app.get("/api/preferences/keywords")
 async def get_keyword_preferences():
     """Get all keyword preferences with scores."""
+    if is_demo_mode():
+        from .demo.data import DEMO_KEYWORD_PREFS as _dkp
+        top = sorted(_dkp.items(), key=lambda x: -x[1]["score"])[:20]
+        return {
+            "keywords": {k: {"score": v["score"], "count": v["count"], "source_modules": v["source_modules"]} for k, v in _dkp.items()},
+            "top": [{"keyword": k, "score": v["score"]} for k, v in top],
+            "disliked": [],
+        }
     prefs = _prefs.get_all_keyword_prefs()
     return {
         "keywords": {k: v.to_dict() for k, v in prefs.items()},
@@ -2338,6 +2366,9 @@ def get_default_keywords_for_module(module_id: str) -> list[str]:
 @app.get("/api/game/stats")
 async def get_game_stats():
     """Get daily gaming stats (happiness, SAN, energy, achievements)."""
+    if is_demo_mode():
+        from .demo.data import DEMO_GAME_STATS
+        return DEMO_GAME_STATS
     from .game import get_daily_stats
     return get_daily_stats()
 
@@ -2650,8 +2681,21 @@ async def record_chat(data: dict):
 @app.get("/api/timeline/today")
 async def get_today_timeline():
     """Get today's timeline."""
-    from datetime import datetime
-    today = datetime.now().strftime("%Y-%m-%d")
+    if is_demo_mode():
+        activities = get_demo_activities()
+        return {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "activities": activities,
+            "summary": None,
+            "summary_generated_at": None,
+            "chat_path": [
+                {"time": "09:30", "topic": "讨论 Diffusion Policy 在机械臂上的应用", "context": "arxiv"},
+                {"time": "09:45", "topic": "对比 RT-2 和 Diffusion Policy 的优劣", "context": "research"},
+            ],
+            "interaction_summary": {"card_view": 7, "card_like": 4, "card_save": 4, "chat_start": 1, "chat_message": 1, "module_run": 1, "checkin": 1},
+        }
+    from datetime import datetime as _dt
+    today = _dt.now().strftime("%Y-%m-%d")
     return await get_timeline(today)
 
 

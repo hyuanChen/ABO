@@ -7,7 +7,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..config import get_vault_path
+from ..config import get_vault_path, is_demo_mode
+from ..demo.data import get_demo_wiki_pages, get_demo_wiki_graph, get_demo_wiki_stats
 from .builder import WikiBuilder
 from .store import WikiStore
 
@@ -51,6 +52,12 @@ class IngestRequest(BaseModel):
 @router.get("/{wiki_type}/index")
 async def get_index(wiki_type: str):
     _check_wiki_type(wiki_type)
+    if is_demo_mode():
+        pages = get_demo_wiki_pages(wiki_type)
+        lines = [f"# {wiki_type.upper()} Wiki\n"]
+        for p in pages:
+            lines.append(f"- [[{p['title']}]] — {p['category']}")
+        return {"wiki_type": wiki_type, "content": "\n".join(lines)}
     vault_path = _get_vault()
     WikiStore.ensure_structure(vault_path, wiki_type)
     content = WikiStore.get_index(vault_path, wiki_type)
@@ -64,6 +71,14 @@ async def list_pages(
     category: Optional[str] = None,
 ):
     _check_wiki_type(wiki_type)
+    if is_demo_mode():
+        pages = get_demo_wiki_pages(wiki_type)
+        if q:
+            ql = q.lower()
+            pages = [p for p in pages if ql in p["title"].lower() or ql in p["content"].lower()]
+        if category:
+            pages = [p for p in pages if p.get("category") == category]
+        return {"wiki_type": wiki_type, "pages": pages, "total": len(pages)}
     vault_path = _get_vault()
     WikiStore.ensure_structure(vault_path, wiki_type)
     if q:
@@ -78,6 +93,12 @@ async def list_pages(
 @router.get("/{wiki_type}/page/{slug}")
 async def get_page(wiki_type: str, slug: str):
     _check_wiki_type(wiki_type)
+    if is_demo_mode():
+        pages = get_demo_wiki_pages(wiki_type)
+        page = next((p for p in pages if p["slug"] == slug), None)
+        if page is None:
+            raise HTTPException(status_code=404, detail=f"页面 '{slug}' 不存在")
+        return page
     vault_path = _get_vault()
     WikiStore.ensure_structure(vault_path, wiki_type)
     page = WikiStore.get_page(vault_path, wiki_type, slug)
@@ -120,6 +141,9 @@ async def delete_page(wiki_type: str, slug: str):
 @router.get("/{wiki_type}/graph")
 async def get_graph(wiki_type: str):
     _check_wiki_type(wiki_type)
+    if is_demo_mode():
+        graph = get_demo_wiki_graph(wiki_type)
+        return {"wiki_type": wiki_type, **graph}
     vault_path = _get_vault()
     WikiStore.ensure_structure(vault_path, wiki_type)
     graph = WikiStore.get_graph(vault_path, wiki_type)
@@ -190,6 +214,16 @@ async def lint(wiki_type: str):
 @router.get("/{wiki_type}/backlinks/{slug}")
 async def get_backlinks(wiki_type: str, slug: str):
     _check_wiki_type(wiki_type)
+    if is_demo_mode():
+        import re
+        pages = get_demo_wiki_pages(wiki_type)
+        backlinks = []
+        for p in pages:
+            links = re.findall(r'\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]', p["content"])
+            slugs = [l.strip().lower().replace(" ", "-") for l in links]
+            if slug in slugs:
+                backlinks.append({"slug": p["slug"], "title": p["title"]})
+        return {"wiki_type": wiki_type, "slug": slug, "backlinks": backlinks, "count": len(backlinks)}
     vault_path = _get_vault()
     WikiStore.ensure_structure(vault_path, wiki_type)
     backlinks = WikiStore.get_backlinks(vault_path, wiki_type, slug)
@@ -199,6 +233,8 @@ async def get_backlinks(wiki_type: str, slug: str):
 @router.get("/{wiki_type}/stats")
 async def get_stats(wiki_type: str):
     _check_wiki_type(wiki_type)
+    if is_demo_mode():
+        return get_demo_wiki_stats(wiki_type)
     vault_path = _get_vault()
     WikiStore.ensure_structure(vault_path, wiki_type)
     stats = WikiStore.get_stats(vault_path, wiki_type)

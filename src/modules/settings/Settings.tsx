@@ -16,6 +16,7 @@ import {
   Plus,
   Trash2,
   Loader2,
+  Eye,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
 import { api } from "../../core/api";
@@ -395,6 +396,32 @@ function GeneralSection() {
   const [darkMode, setDarkMode] = useState(() =>
     document.documentElement.classList.contains("dark")
   );
+  const [demoMode, setDemoMode] = useState(false);
+  const { addToast } = useStore();
+
+  // Load demo mode state from config
+  useEffect(() => {
+    api.get<Record<string, unknown>>("/api/config").then((cfg) => {
+      setDemoMode(Boolean(cfg.demo_mode));
+    }).catch(() => {});
+  }, []);
+
+  async function toggleDemoMode() {
+    const newVal = !demoMode;
+    try {
+      await api.post("/api/config", { demo_mode: newVal });
+      setDemoMode(newVal);
+      addToast({
+        kind: "success",
+        title: newVal ? "展示模式已开启" : "展示模式已关闭",
+        message: newVal ? "正在展示预设的人设数据" : "已切换回真实数据",
+      });
+      // Reload the page to refresh all data
+      setTimeout(() => window.location.reload(), 500);
+    } catch {
+      addToast({ kind: "error", title: "切换失败" });
+    }
+  }
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -412,6 +439,22 @@ function GeneralSection() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      {/* Demo Mode */}
+      <Card title="展示模式" icon={<Eye style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <SettingItem
+            icon={<Eye style={{ width: "20px", height: "20px" }} />}
+            title="展示模式"
+            description={demoMode
+              ? "正在展示预设的人设数据，用于宣传截图"
+              : "关闭后使用真实数据，不会清空任何内容"
+            }
+          >
+            <Toggle enabled={demoMode} onToggle={toggleDemoMode} />
+          </SettingItem>
+        </div>
+      </Card>
+
       {/* Appearance */}
       <Card title="外观设置" icon={<Palette style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>

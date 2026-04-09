@@ -9,6 +9,11 @@ from typing import List, Dict, Any, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from ..config import is_demo_mode
+from ..demo.data import (
+    get_demo_overview, get_demo_today, get_demo_wellness,
+    get_demo_engagement, get_demo_preferences_evolution,
+)
 from ..store.cards import CardStore
 from ..preferences.engine import PreferenceEngine
 from ..activity import ActivityTracker
@@ -285,9 +290,11 @@ def _get_feedback_counts_for_period(card_store: CardStore, start_ts: float, end_
 
 # ── API 路由 ───────────────────────────────────────────────────────
 
-@router.get("/overview", response_model=OverviewResponse)
+@router.get("/overview")
 async def get_overview():
     """Get overview statistics for the dashboard."""
+    if is_demo_mode():
+        return get_demo_overview()
     card_store = CardStore()
     activity_tracker = ActivityTracker()
 
@@ -313,9 +320,11 @@ async def get_overview():
     )
 
 
-@router.get("/today", response_model=TodayResponse)
+@router.get("/today")
 async def get_today():
     """Get today's detailed snapshot — activities, heatmap, todos, wellness."""
+    if is_demo_mode():
+        return get_demo_today()
     activity_tracker = ActivityTracker()
     today_str = date.today().isoformat()
     timeline = activity_tracker.get_timeline(today_str)
@@ -381,9 +390,11 @@ async def get_today():
     )
 
 
-@router.get("/wellness", response_model=WellnessResponse)
+@router.get("/wellness")
 async def get_wellness(days: int = 30):
     """Get wellness trends: SAN, happiness, energy over time."""
+    if is_demo_mode():
+        return get_demo_wellness()
     san_log = _read_json_log("san_log.json")
     happiness_log = _read_json_log("happiness_log.json")
     energy_history = _read_energy_history()
@@ -433,9 +444,11 @@ async def get_wellness(days: int = 30):
     )
 
 
-@router.get("/engagement", response_model=EngagementResponse)
+@router.get("/engagement")
 async def get_engagement(days: int = 30):
     """Get engagement depth: views vs deep reads, quality metrics."""
+    if is_demo_mode():
+        return get_demo_engagement()
     card_store = CardStore()
     today = date.today()
 
@@ -501,9 +514,11 @@ async def get_activity(days: int = 30):
     return ActivityResponse(days=days, data=daily_trend)
 
 
-@router.get("/preferences-evolution", response_model=PreferencesEvolutionResponse)
+@router.get("/preferences-evolution")
 async def get_preferences_evolution():
     """Get keyword preferences with scores."""
+    if is_demo_mode():
+        return get_demo_preferences_evolution()
     # Read raw JSON to handle format mismatch in keyword_preferences.json
     from pathlib import Path
     kw_path = Path.home() / ".abo" / "keyword_preferences.json"

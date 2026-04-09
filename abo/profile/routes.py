@@ -5,7 +5,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..claude_bridge.runner import batch_call
-from ..config import load as load_config
+from ..config import load as load_config, is_demo_mode
+from ..demo.data import get_demo_profile, DEMO_STATS
 from ..store.cards import CardStore
 from .stats import calculate_stats
 from .store import (
@@ -35,6 +36,8 @@ def _vault_path() -> str | None:
 
 @router.get("")
 async def get_profile():
+    if is_demo_mode():
+        return get_demo_profile()
     cs = _card_store or CardStore()
     stats = calculate_stats(_vault_path(), cs)
     return {
@@ -52,6 +55,8 @@ async def get_profile():
 
 @router.get("/stats")
 async def get_stats():
+    if is_demo_mode():
+        return DEMO_STATS
     cs = _card_store or CardStore()
     return calculate_stats(_vault_path(), cs)
 
