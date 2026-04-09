@@ -31,9 +31,9 @@ function KeywordItem({ keyword, score, count, onRemove }: KeywordItemProps) {
     >
       <div className="flex items-center gap-2">
         {isPositive ? (
-          <ThumbsUp className="w-4 h-4" style={{ color: "var(--color-success)" }} />
+          <ThumbsUp className="w-4 h-4" style={{ color: "var(--color-success-text)" }} />
         ) : (
-          <ThumbsDown className="w-4 h-4" style={{ color: "var(--color-danger)" }} />
+          <ThumbsDown className="w-4 h-4" style={{ color: "var(--color-danger-text)" }} />
         )}
         <span style={{ color: "var(--text-secondary)" }}>{keyword}</span>
         <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
@@ -54,8 +54,8 @@ function KeywordItem({ keyword, score, count, onRemove }: KeywordItemProps) {
           className="text-xs font-mono w-12 text-right"
           style={{
             color: isPositive
-              ? "var(--color-success)"
-              : "var(--color-danger)",
+              ? "var(--color-success-text)"
+              : "var(--color-danger-text)",
           }}
         >
           {score > 0 ? "+" : ""}
@@ -146,7 +146,7 @@ export default function KeywordPreferences() {
         >
           <div
             className="text-2xl font-bold"
-            style={{ color: "var(--color-success)" }}
+            style={{ color: "var(--color-success-text)" }}
           >
             {likedKeywords.length}
           </div>
@@ -160,7 +160,7 @@ export default function KeywordPreferences() {
         >
           <div
             className="text-2xl font-bold"
-            style={{ color: "var(--color-danger)" }}
+            style={{ color: "var(--color-danger-text)" }}
           >
             {dislikedKeywords.length}
           </div>
@@ -219,7 +219,7 @@ export default function KeywordPreferences() {
         <div>
           <h4
             className="text-sm font-medium mb-3 flex items-center gap-2"
-            style={{ color: "var(--color-success)" }}
+            style={{ color: "var(--color-success-text)" }}
           >
             <ThumbsUp className="w-4 h-4" />
             喜欢 ({likedKeywords.length})
@@ -245,7 +245,7 @@ export default function KeywordPreferences() {
         <div>
           <h4
             className="text-sm font-medium mb-3 flex items-center gap-2"
-            style={{ color: "var(--color-danger)" }}
+            style={{ color: "var(--color-danger-text)" }}
           >
             <ThumbsDown className="w-4 h-4" />
             不喜欢 ({dislikedKeywords.length})

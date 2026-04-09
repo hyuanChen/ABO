@@ -11,7 +11,7 @@
   --bg-app: #FFFDF8;
   --bg-sidebar: rgba(255, 253, 248, 0.85);
   --bg-panel: rgba(255, 255, 255, 0.82);
-  --bg-card: rgba(255, 255, 255, 0.75);
+  --bg-card: rgba(255, 255, 255, 0.88);
   --bg-hover: rgba(255, 255, 255, 0.95);
 
   /* Primary Colors - Soft Pastel Palette */
@@ -23,11 +23,16 @@
   --color-accent: #A8D8FF;
   --color-accent-light: #C8E8FF;
 
-  /* Functional Colors */
+  /* Functional Colors - backgrounds/fills */
   --color-success: #A8E6CF;
   --color-warning: #FFE4B5;
   --color-danger: #FFB7B2;
   --color-info: #A8D8FF;
+
+  /* Functional Colors - text-safe (readable on light bg) */
+  --color-success-text: #059669;
+  --color-danger-text: #DC2626;
+  --color-warning-text: #D97706;
 
   /* Text Colors - Soft Dark */
   --text-main: #4A4A5A;
@@ -67,7 +72,7 @@
   --bg-app: #1A1A24;
   --bg-sidebar: rgba(26, 26, 36, 0.88);
   --bg-panel: rgba(40, 40, 55, 0.85);
-  --bg-card: rgba(40, 40, 55, 0.75);
+  --bg-card: rgba(40, 40, 55, 0.88);
   --bg-hover: rgba(50, 50, 70, 0.9);
 
   --color-primary: #9D7BDB;
@@ -75,6 +80,11 @@
   --color-primary-dark: #8B6BC8;
   --color-secondary: #E89B96;
   --color-accent: #7BC8F0;
+
+  /* Functional Colors - text-safe (readable on dark bg) */
+  --color-success-text: #34D399;
+  --color-danger-text: #F87171;
+  --color-warning-text: #FBBF24;
 
   --text-main: #EAEAEA;
   --text-secondary: #C8C8D8;

@@ -147,7 +147,7 @@ export default function ArxivTracker() {
   const [loading, setLoading] = useState(false);
   const [savedPapers, setSavedPapers] = useState<Set<string>>(new Set());
   const [_savedS2Papers, _setSavedS2Papers] = useState<Set<string>>(new Set());
-  const [autoSave, setAutoSave] = useState(true);
+  const [autoSave, setAutoSave] = useState(false);
   const [csOnly, setCsOnly] = useState(true);
 
   const toast = useToast();
@@ -635,7 +635,7 @@ export default function ArxivTracker() {
   return (
     <PageContainer>
       <PageHeader
-        title="arXiv 论文追踪"
+        title="论文搜索"
         subtitle="AND/OR 双模式 · CS领域 · 实时进度 · 自动去重"
         icon={BookOpen}
         actions={

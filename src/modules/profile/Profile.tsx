@@ -1,6 +1,6 @@
 // src/modules/profile/Profile.tsx
 import { useEffect, useState } from "react";
-import { User, Sparkles, Clock } from "lucide-react";
+import { User, Sparkles, Clock, ChevronDown, ChevronRight } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, ProfileStats } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Card, Grid } from "../../components/Layout";
@@ -43,6 +43,8 @@ export default function Profile() {
   const [data, setData] = useState<ProfileData | null>(null);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [showCheckin, setShowCheckin] = useState(false);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  const [modulesOpen, setModulesOpen] = useState(false);
   const { setProfileEnergy, setProfileSan, setProfileMotto, setProfileStats } = useStore();
 
   useEffect(() => {
@@ -128,24 +130,6 @@ export default function Profile() {
           <TimelineView />
         </Card>
 
-        {/* Phase 2: Keyword Preferences */}
-        <Card
-          title="偏好学习"
-          icon={<span style={{ fontSize: "1rem" }}>📊</span>}
-          style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
-        >
-          <KeywordPreferences />
-        </Card>
-
-        {/* Module Configuration */}
-        <Card
-          title="爬虫模块管理"
-          icon={<span style={{ fontSize: "1rem" }}>🔧</span>}
-          style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
-        >
-          <ModuleConfigPanel />
-        </Card>
-
         {/* Hexagon Radar */}
         <Card
           title="六维能力评估"
@@ -173,6 +157,74 @@ export default function Profile() {
             <AchievementGallery achievements={data.achievements} />
           </Card>
         </Grid>
+
+        {/* Keyword Preferences - collapsible */}
+        <div style={{
+          marginTop: "clamp(20px, 3vw, 28px)",
+          background: "var(--bg-card)", borderRadius: "var(--radius-md)",
+          border: "1px solid var(--border-light)", boxShadow: "var(--shadow-soft)",
+          overflow: "hidden",
+        }}>
+          <button
+            onClick={() => setPrefsOpen(!prefsOpen)}
+            style={{
+              width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "14px 18px", background: "var(--bg-hover)",
+              border: "none", borderBottom: prefsOpen ? "1px solid var(--border-light)" : "none",
+              cursor: "pointer",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span style={{ fontSize: "0.9375rem" }}>📊</span>
+              <span style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>
+                偏好学习
+              </span>
+            </div>
+            {prefsOpen
+              ? <ChevronDown style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
+              : <ChevronRight style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
+            }
+          </button>
+          {prefsOpen && (
+            <div style={{ padding: "clamp(14px, 2vw, 20px)" }}>
+              <KeywordPreferences />
+            </div>
+          )}
+        </div>
+
+        {/* Module Configuration - collapsible */}
+        <div style={{
+          marginTop: "clamp(16px, 2vw, 20px)",
+          background: "var(--bg-card)", borderRadius: "var(--radius-md)",
+          border: "1px solid var(--border-light)", boxShadow: "var(--shadow-soft)",
+          overflow: "hidden",
+        }}>
+          <button
+            onClick={() => setModulesOpen(!modulesOpen)}
+            style={{
+              width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "14px 18px", background: "var(--bg-hover)",
+              border: "none", borderBottom: modulesOpen ? "1px solid var(--border-light)" : "none",
+              cursor: "pointer",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span style={{ fontSize: "0.9375rem" }}>🔧</span>
+              <span style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>
+                爬虫模块管理
+              </span>
+            </div>
+            {modulesOpen
+              ? <ChevronDown style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
+              : <ChevronRight style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
+            }
+          </button>
+          {modulesOpen && (
+            <div style={{ padding: "clamp(14px, 2vw, 20px)" }}>
+              <ModuleConfigPanel />
+            </div>
+          )}
+        </div>
       </PageContent>
 
       {showCheckin && <DailyCheckInModal onClose={handleCheckinClose} />}

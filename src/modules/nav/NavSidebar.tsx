@@ -1,7 +1,7 @@
 import { useStore, ActiveTab } from "../../core/store";
 import PixelAvatar from "../profile/PixelAvatar";
 import {
-  Inbox, BookOpen, FileText, MessageSquare,
+  Inbox, BookOpen, FileText,
   Rss, Heart, Settings, Zap, User, Menu, X, Moon, Sun, LayoutGrid, FolderOpen,
   ChevronDown, BookHeart, Tv, BarChart3
 } from "lucide-react";
@@ -15,9 +15,8 @@ const MAIN: NavItem[] = [
   { id: "dashboard",  label: "数据洞察",   Icon: BarChart3 },
   { id: "vault",      label: "情报库",     Icon: FolderOpen },
   { id: "literature", label: "文献库",     Icon: BookOpen },
-  { id: "wiki",       label: "知识库",     Icon: BookHeart },
+  { id: "wiki",       label: "Wiki",       Icon: BookHeart },
   { id: "journal",    label: "手记",       Icon: FileText },
-  { id: "chat",       label: "AI 对话",    Icon: MessageSquare },
 ];
 
 export default function NavSidebar() {
@@ -148,19 +147,18 @@ export default function NavSidebar() {
 
   function ModuleItem({ mod, isMobile, setIsOpen }: { mod: { id: string; name: string; enabled: boolean }; isMobile: boolean; setIsOpen: (v: boolean) => void }) {
     const unread = unreadCounts[mod.id] ?? 0;
-    const { setModuleToConfigure, setActiveTab } = useStore();
+    const { setModuleHistoryId, setActiveTab } = useStore();
     return (
       <button
         onClick={() => {
-          const current = useStore.getState().moduleToConfigure;
-          // If already on this module, force reset first to trigger change detection
+          const current = useStore.getState().moduleHistoryId;
           if (current === mod.id) {
-            setModuleToConfigure(null);
+            setModuleHistoryId(null);
             requestAnimationFrame(() => {
-              setModuleToConfigure(mod.id);
+              setModuleHistoryId(mod.id);
             });
           } else {
-            setModuleToConfigure(mod.id);
+            setModuleHistoryId(mod.id);
           }
           setActiveTab("modules");
           if (isMobile) setIsOpen(false);
@@ -223,7 +221,7 @@ export default function NavSidebar() {
   const sidebarContent = (
     <>
       {/* Logo Section */}
-      <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "24px", padding: "0 8px", flexShrink: 0 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: "12px", marginBottom: "24px", padding: "0 8px", flexShrink: 0 }}>
         <div
           style={{
             width: "clamp(40px, 5vw, 44px)",
@@ -253,8 +251,21 @@ export default function NavSidebar() {
           >
             ABO
           </div>
-          <div style={{ fontSize: "0.6875rem", color: "var(--text-muted)", fontWeight: 500 }}>
-            Agent Boost OS
+          <div style={{ display: "flex", alignItems: "baseline", gap: "4px", lineHeight: 1.2 }}>
+            <span style={{
+              display: "inline-flex", gap: "4px",
+              background: "linear-gradient(135deg, #A78BFA, #818CF8)",
+              WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text",
+            }}>
+              <span style={{ fontSize: "0.6875rem", fontWeight: 600, letterSpacing: "0.08em" }}>Another</span>
+              <span style={{ fontSize: "0.6875rem", fontWeight: 700, letterSpacing: "0.04em" }}>Brain</span>
+            </span>
+            <span style={{
+              fontSize: "0.8125rem", fontWeight: 800, letterSpacing: "0.06em",
+              fontStyle: "italic",
+              background: "linear-gradient(135deg, #6DD5FA, #FF6B9D, #C084FC)",
+              WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text",
+            }}>Odyssey</span>
           </div>
         </div>
 
@@ -537,7 +548,7 @@ export default function NavSidebar() {
             <Rss className="w-[18px] h-[18px] shrink-0" style={{ color: "var(--color-primary-dark)" }} aria-hidden />
           </div>
           <span style={{ fontWeight: 600, fontSize: "clamp(0.875rem, 1.2vw, 0.9375rem)", flex: 1, textAlign: "left" }}>
-            arXiv追踪
+            论文搜索
           </span>
         </button>
 

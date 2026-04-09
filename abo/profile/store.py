@@ -69,13 +69,22 @@ def save_daily_motto(motto: str, description: str) -> None:
 # ── SAN log ──────────────────────────────────────────────────────
 
 def append_san(score: int) -> None:
-    log = _read("san_log.json", [])
+    log = _normalize_log(_read("san_log.json", []))
     log.append({"date": date.today().isoformat(), "score": score})
     _write("san_log.json", log[-90:])  # keep last 90 days
 
 
+def _normalize_log(raw: Any) -> list[dict]:
+    """Handle both dict format {date: score} and list format [{date, score}]."""
+    if isinstance(raw, dict):
+        return [{"date": k, "score": v} for k, v in sorted(raw.items())]
+    if isinstance(raw, list):
+        return raw
+    return []
+
+
 def get_san_7d_avg() -> float:
-    log = _read("san_log.json", [])
+    log = _normalize_log(_read("san_log.json", []))
     recent = log[-7:] if len(log) >= 7 else log
     if not recent:
         return 0.0
@@ -85,13 +94,13 @@ def get_san_7d_avg() -> float:
 # ── Happiness log ────────────────────────────────────────────────
 
 def append_happiness(score: int) -> None:
-    log = _read("happiness_log.json", [])
+    log = _normalize_log(_read("happiness_log.json", []))
     log.append({"date": date.today().isoformat(), "score": score})
     _write("happiness_log.json", log[-90:])
 
 
 def get_happiness_today() -> float:
-    log = _read("happiness_log.json", [])
+    log = _normalize_log(_read("happiness_log.json", []))
     today = date.today().isoformat()
     for entry in reversed(log):
         if entry["date"] == today:

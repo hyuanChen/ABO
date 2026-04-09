@@ -119,8 +119,8 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
     }
   };
 
-  const handleVaultPathSet = (path: string) => {
-    setVaultPath(path);
+  const handleVaultPathSet = (vaultPath: string, _literaturePath?: string) => {
+    setVaultPath(vaultPath);
   };
 
   const handleComplete = () => {
@@ -204,7 +204,14 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
       }}
     >
       {/* Progress Header */}
-      <ProgressIndicator currentStep={currentStep} totalSteps={TOTAL_STEPS} />
+      <ProgressIndicator
+        currentStep={currentStep}
+        totalSteps={TOTAL_STEPS}
+        onStepClick={(step) => {
+          setCurrentStep(step);
+          saveOnboardingStep(step);
+        }}
+      />
 
       {/* Step Content */}
       <div

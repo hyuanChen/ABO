@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Clock, Heart, Bookmark, MessageCircle, Eye, Sparkles, RefreshCw } from "lucide-react";
+import { Calendar, Sun, CloudSun, Moon, Sparkles, Clock, RefreshCw } from "lucide-react";
 import { api } from "../core/api";
 
 interface Activity {
@@ -21,27 +21,56 @@ interface TimelineData {
   interaction_summary: Record<string, number>;
 }
 
-const activityIcons: Record<string, React.ReactNode> = {
-  card_view: <Eye className="w-4 h-4" style={{ color: "var(--text-muted)" }} />,
-  card_like: <Heart className="w-4 h-4" style={{ color: "var(--color-secondary)" }} />,
-  card_save: <Bookmark className="w-4 h-4" style={{ color: "var(--color-accent)" }} />,
-  card_dislike: <Heart className="w-4 h-4" style={{ color: "var(--text-light)" }} />,
-  chat_message: <MessageCircle className="w-4 h-4" style={{ color: "var(--color-primary)" }} />,
-  chat_start: <MessageCircle className="w-4 h-4" style={{ color: "var(--color-primary-dark)" }} />,
-  module_run: <RefreshCw className="w-4 h-4" style={{ color: "var(--color-success)" }} />,
-  checkin: <Sparkles className="w-4 h-4" style={{ color: "var(--color-warning)" }} />,
-};
-
 const activityLabels: Record<string, string> = {
   card_view: "浏览",
   card_like: "点赞",
-  card_save: "保存",
+  card_save: "收藏",
   card_dislike: "不感兴趣",
   chat_message: "对话",
   chat_start: "开始对话",
   module_run: "运行爬虫",
   checkin: "签到",
 };
+
+interface PeriodData {
+  key: string;
+  label: string;
+  icon: React.ReactNode;
+  counts: Record<string, number>;
+  total: number;
+}
+
+function groupByPeriod(activities: Activity[]): PeriodData[] {
+  const periods: PeriodData[] = [
+    { key: "morning", label: "上午", icon: <Sun className="w-3.5 h-3.5" />, counts: {}, total: 0 },
+    { key: "afternoon", label: "下午", icon: <CloudSun className="w-3.5 h-3.5" />, counts: {}, total: 0 },
+    { key: "evening", label: "晚上", icon: <Moon className="w-3.5 h-3.5" />, counts: {}, total: 0 },
+  ];
+
+  for (const act of activities) {
+    const hour = parseInt(act.timestamp.slice(11, 13));
+    const period = hour < 12 ? periods[0] : hour < 18 ? periods[1] : periods[2];
+    period.counts[act.type] = (period.counts[act.type] || 0) + 1;
+    period.total++;
+  }
+
+  return periods;
+}
+
+function getHourCounts(activities: Activity[]): Map<number, number> {
+  const counts = new Map<number, number>();
+  for (const act of activities) {
+    const hour = parseInt(act.timestamp.slice(11, 13));
+    counts.set(hour, (counts.get(hour) || 0) + 1);
+  }
+  return counts;
+}
+
+function formatDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  const days = ["日", "一", "二", "三", "四", "五", "六"];
+  return `${d.getMonth() + 1}月${d.getDate()}日 · 周${days[d.getDay()]}`;
+}
 
 export default function TimelineView() {
   const [timeline, setTimeline] = useState<TimelineData | null>(null);
@@ -78,42 +107,193 @@ export default function TimelineView() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-40" style={{ color: "var(--text-muted)" }}>
-        <Clock className="w-5 h-5 animate-spin mr-2" />
-        加载今日时间线...
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        height: "120px", color: "var(--text-muted)",
+      }}>
+        <Clock style={{ width: "16px", height: "16px", animation: "spin 1s linear infinite", marginRight: "8px" }} />
+        <span style={{ fontSize: "0.875rem" }}>加载中...</span>
       </div>
     );
   }
 
   if (!timeline || timeline.activities.length === 0) {
     return (
-      <div className="text-center py-8" style={{ color: "var(--text-muted)" }}>
-        <Clock className="w-12 h-12 mx-auto mb-3" style={{ opacity: 0.3 }} />
-        <p>今日暂无活动记录</p>
-        <p className="text-sm mt-1" style={{ color: "var(--text-light)" }}>开始浏览内容或对话吧！</p>
+      <div style={{ textAlign: "center", padding: "24px 0", color: "var(--text-muted)" }}>
+        <Calendar style={{ width: "36px", height: "36px", margin: "0 auto 8px", opacity: 0.3 }} />
+        <p style={{ fontSize: "0.875rem" }}>今日暂无活动</p>
+        <p style={{ fontSize: "0.75rem", marginTop: "4px", color: "var(--text-light)" }}>
+          开始浏览或对话吧
+        </p>
       </div>
     );
   }
 
+  const periods = groupByPeriod(timeline.activities);
+  const hourCounts = getHourCounts(timeline.activities);
+  const maxHourCount = Math.max(...Array.from(hourCounts.values()), 1);
+  const hours = Array.from({ length: 18 }, (_, i) => i + 6);
+  const hourLabels = [6, 9, 12, 15, 18, 21];
+
   return (
-    <div className="space-y-6">
-      {/* Summary Section */}
+    <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+      {/* Date Header */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <Calendar style={{ width: "15px", height: "15px", color: "var(--color-primary)" }} />
+          <span style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>
+            {formatDate(timeline.date)}
+          </span>
+        </div>
+        <span style={{
+          fontSize: "0.6875rem", padding: "2px 8px", borderRadius: "8px",
+          background: "var(--bg-hover)", color: "var(--text-muted)",
+        }}>
+          {timeline.activities.length} 项活动
+        </span>
+      </div>
+
+      {/* Hour Activity Bar */}
+      <div style={{
+        padding: "10px 10px 6px",
+        borderRadius: "10px",
+        background: "var(--bg-hover)",
+      }}>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: "2px", height: "28px" }}>
+          {hours.map(h => {
+            const count = hourCounts.get(h) || 0;
+            const barHeight = count > 0 ? Math.max(6, (count / maxHourCount) * 24) : 3;
+            return (
+              <div
+                key={h}
+                style={{
+                  flex: 1,
+                  height: `${barHeight}px`,
+                  borderRadius: count > 0 ? "3px 3px 1px 1px" : "1px",
+                  background: count > 0 ? "var(--color-primary)" : "var(--border-light)",
+                  opacity: count > 0 ? 0.35 + (count / maxHourCount) * 0.65 : 0.4,
+                  transition: "height 0.3s ease",
+                }}
+                title={count > 0 ? `${h}:00 — ${count} 项活动` : `${h}:00`}
+              />
+            );
+          })}
+        </div>
+        <div style={{
+          display: "flex", justifyContent: "space-between",
+          marginTop: "4px", padding: "0 2px",
+        }}>
+          {hourLabels.map(h => (
+            <span key={h} style={{ fontSize: "9px", color: "var(--text-light)", fontFamily: "monospace" }}>
+              {h}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Period Summary */}
+      <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+        {periods.map(period => (
+          <div
+            key={period.key}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "10px",
+              padding: "8px 10px",
+              borderRadius: "8px",
+              background: period.total > 0 ? "var(--bg-hover)" : "transparent",
+              opacity: period.total > 0 ? 1 : 0.45,
+            }}
+          >
+            <div style={{
+              display: "flex", alignItems: "center", gap: "5px",
+              minWidth: "48px", flexShrink: 0,
+              color: period.total > 0 ? "var(--text-secondary)" : "var(--text-light)",
+            }}>
+              {period.icon}
+              <span style={{ fontSize: "0.8125rem", fontWeight: 500 }}>{period.label}</span>
+            </div>
+            {period.total > 0 ? (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                {Object.entries(period.counts).map(([type, count]) => (
+                  <span
+                    key={type}
+                    style={{
+                      fontSize: "0.6875rem",
+                      padding: "1px 7px",
+                      borderRadius: "5px",
+                      background: "var(--bg-card)",
+                      border: "1px solid var(--border-light)",
+                      color: "var(--text-secondary)",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {activityLabels[type] || type} {count}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <span style={{ fontSize: "0.75rem", color: "var(--text-light)" }}>—</span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Chat Path (compact) */}
+      {timeline.chat_path.length > 0 && (
+        <div style={{
+          padding: "8px 10px",
+          borderRadius: "8px",
+          background: "var(--bg-hover)",
+        }}>
+          <div style={{ fontSize: "0.6875rem", color: "var(--text-light)", marginBottom: "4px" }}>
+            对话路径
+          </div>
+          <div style={{
+            fontSize: "0.75rem",
+            color: "var(--text-secondary)",
+            lineHeight: 1.5,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}>
+            {timeline.chat_path.map((c, i) => (
+              <span key={i}>
+                {i > 0 && <span style={{ color: "var(--text-light)", margin: "0 4px" }}>&rarr;</span>}
+                <span style={{ color: "var(--text-muted)", fontFamily: "monospace", fontSize: "0.625rem" }}>
+                  {c.time.slice(11, 16)}
+                </span>
+                {" "}
+                {c.topic || "对话"}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* AI Summary */}
       {timeline.summary ? (
-        <div
-          className="rounded-xl p-4"
-          style={{
-            background: `linear-gradient(135deg, rgba(188, 164, 227, 0.15), rgba(157, 123, 219, 0.1))`,
-            border: "1px solid var(--border-color)",
-          }}
-        >
-          <div className="flex items-center gap-2 mb-2">
-            <Sparkles className="w-5 h-5" style={{ color: "var(--color-primary)" }} />
-            <h4 className="font-semibold" style={{ color: "var(--color-primary-dark)" }}>今日总结</h4>
-            <span className="text-xs ml-auto" style={{ color: "var(--text-muted)" }}>
+        <div style={{
+          padding: "10px 12px",
+          borderRadius: "8px",
+          background: "linear-gradient(135deg, rgba(188, 164, 227, 0.08), rgba(157, 123, 219, 0.05))",
+          border: "1px solid var(--border-light)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "6px" }}>
+            <Sparkles style={{ width: "13px", height: "13px", color: "var(--color-primary)" }} />
+            <span style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--text-secondary)" }}>
+              今日总结
+            </span>
+            <span style={{ fontSize: "0.625rem", marginLeft: "auto", color: "var(--text-light)" }}>
               {timeline.summary_generated_at?.slice(11, 16)}
             </span>
           </div>
-          <p className="text-sm leading-relaxed whitespace-pre-line" style={{ color: "var(--text-secondary)" }}>
+          <p style={{
+            fontSize: "0.8125rem", lineHeight: 1.6,
+            color: "var(--text-secondary)", whiteSpace: "pre-line",
+            margin: 0,
+          }}>
             {timeline.summary}
           </p>
         </div>
@@ -121,108 +301,37 @@ export default function TimelineView() {
         <button
           onClick={generateSummary}
           disabled={generating}
-          className="w-full py-3 rounded-xl text-sm disabled:opacity-50 transition-all hover:scale-[1.02] active:scale-[0.98]"
           style={{
-            background: "var(--bg-card)",
+            width: "100%", padding: "8px",
+            borderRadius: "8px", fontSize: "0.8125rem",
+            background: "var(--bg-hover)",
             border: "1px solid var(--border-light)",
-            color: "var(--text-secondary)",
+            color: "var(--text-muted)",
+            cursor: generating ? "not-allowed" : "pointer",
+            opacity: generating ? 0.6 : 1,
           }}
         >
           {generating ? (
             <>
-              <Clock className="w-4 h-4 animate-spin inline mr-2" />
-              正在生成总结...
+              <RefreshCw style={{
+                width: "13px", height: "13px",
+                display: "inline", verticalAlign: "middle",
+                marginRight: "6px", animation: "spin 1s linear infinite",
+              }} />
+              生成中...
             </>
           ) : (
             <>
-              <Sparkles className="w-4 h-4 inline mr-2" style={{ color: "var(--color-primary)" }} />
+              <Sparkles style={{
+                width: "13px", height: "13px",
+                display: "inline", verticalAlign: "middle",
+                marginRight: "6px", color: "var(--color-primary)",
+              }} />
               生成今日总结
             </>
           )}
         </button>
       )}
-
-      {/* Chat Path */}
-      {timeline.chat_path.length > 0 && (
-        <div>
-          <h4 className="text-sm font-medium mb-3" style={{ color: "var(--text-muted)" }}>今日对话路径</h4>
-          <div className="space-y-2">
-            {timeline.chat_path.map((chat, i) => (
-              <div key={i} className="flex items-start gap-3 text-sm">
-                <span className="font-mono text-xs pt-0.5" style={{ color: "var(--text-light)" }}>
-                  {chat.time.slice(11, 16)}
-                </span>
-                <div className="flex-1">
-                  <span style={{ color: "var(--text-secondary)" }}>{chat.topic || "未命名话题"}</span>
-                  {chat.context && (
-                    <p className="text-xs mt-0.5 line-clamp-1" style={{ color: "var(--text-muted)" }}>
-                      {chat.context}
-                    </p>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Activity Timeline */}
-      <div>
-        <h4 className="text-sm font-medium mb-3" style={{ color: "var(--text-muted)" }}>
-          活动记录 ({timeline.activities.length})
-        </h4>
-        <div
-          className="space-y-2 max-h-60 overflow-y-auto rounded-lg p-2"
-          style={{ background: "var(--bg-hover)" }}
-        >
-          {timeline.activities.slice().reverse().map((activity) => (
-            <div
-              key={activity.id}
-              className="flex items-center gap-3 p-2 rounded-lg transition-all hover:scale-[1.01]"
-              style={{
-                background: "var(--bg-card)",
-                border: "1px solid var(--border-light)",
-              }}
-            >
-              <span>{activityIcons[activity.type] || <Clock className="w-4 h-4" style={{ color: "var(--text-muted)" }} />}</span>
-              <span className="text-xs font-mono" style={{ color: "var(--text-light)" }}>
-                {activity.timestamp.slice(11, 16)}
-              </span>
-              <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                {activityLabels[activity.type] || activity.type}
-              </span>
-              {activity.card_title && (
-                <span className="text-sm truncate flex-1" style={{ color: "var(--text-main)" }}>
-                  {activity.card_title}
-                </span>
-              )}
-              {activity.chat_topic && (
-                <span className="text-sm truncate flex-1" style={{ color: "var(--text-main)" }}>
-                  {activity.chat_topic}
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Stats */}
-      <div
-        className="grid grid-cols-3 gap-3 pt-4"
-        style={{ borderTop: "1px solid var(--border-light)" }}
-      >
-        {Object.entries(timeline.interaction_summary)
-          .filter(([_, count]) => count > 0)
-          .slice(0, 3)
-          .map(([type, count]) => (
-            <div key={type} className="text-center">
-              <div className="text-xl font-bold" style={{ color: "var(--color-primary)" }}>{count}</div>
-              <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-                {activityLabels[type] || type}
-              </div>
-            </div>
-          ))}
-      </div>
     </div>
   );
 }

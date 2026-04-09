@@ -134,7 +134,7 @@ class ConfigUpdateRequest(BaseModel):
     subscriptions: list[ModuleSubscription] = []
 
 
-# ── Mock Data (Replace with actual database queries) ───────────────
+# ── Module Registry ───────────────────────────────────────────────
 
 # Default 7 modules
 DEFAULT_MODULES = [

@@ -3,7 +3,7 @@ ABO Backend — FastAPI 入口
 """
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import hashlib
 import os
@@ -28,7 +28,7 @@ from .runtime.discovery import ModuleRegistry, start_watcher
 from .runtime.runner import ModuleRunner
 from .runtime.scheduler import ModuleScheduler
 from .runtime.state import ModuleStateStore
-from .sdk.types import FeedbackAction
+from .sdk.types import Card, FeedbackAction
 from .store.cards import CardStore
 from .subscription_store import get_subscription_store
 from .summary import DailySummaryGenerator, SummaryScheduler
@@ -333,6 +333,257 @@ async def feedback(card_id: str, body: FeedbackReq):
         )
 
     return {"ok": True, "rewards": rewards.get("rewards", {})}
+
+
+# ── Debug / Demo ────────────────────────────────────────────────
+
+_DEMO_CARDS = [
+    # ── arxiv-tracker (10) ───────────────────────────────────────
+    {"module_id": "arxiv-tracker", "title": "Attention Is All You Need: Revisited for 2026", "summary": "Transformer 架构的最新改进综述，涵盖稀疏注意力、线性注意力和混合专家模型的最新进展。", "tags": ["Transformer", "NLP", "深度学习"], "score": 0.92, "url": "https://arxiv.org/abs/2606.00001"},
+    {"module_id": "arxiv-tracker", "title": "Scaling Laws for Neural Language Models: New Frontiers", "summary": "探讨大语言模型规模化定律在多模态和长上下文场景下的扩展，提出新的效率预测框架。", "tags": ["LLM", "Scaling Laws", "效率"], "score": 0.88, "url": "https://arxiv.org/abs/2606.00002"},
+    {"module_id": "arxiv-tracker", "title": "Diffusion Models Meet Reinforcement Learning", "summary": "将扩散模型与强化学习结合，在连续控制任务上实现了新的 SOTA 表现。", "tags": ["扩散模型", "强化学习", "控制"], "score": 0.85, "url": "https://arxiv.org/abs/2606.00003"},
+    {"module_id": "arxiv-tracker", "title": "Constitutional AI: Harmlessness from AI Feedback", "summary": "提出通过 AI 自我批评和修正来实现对齐的新方法，减少人类反馈的依赖。", "tags": ["AI对齐", "RLHF", "安全"], "score": 0.86, "url": "https://arxiv.org/abs/2606.00004"},
+    {"module_id": "arxiv-tracker", "title": "Efficient Fine-Tuning of LLMs with LoRA and Beyond", "summary": "对比 LoRA、QLoRA、AdaLoRA 等参数高效微调方法，提出统一的理论分析框架。", "tags": ["微调", "LoRA", "LLM"], "score": 0.89, "url": "https://arxiv.org/abs/2606.00005"},
+    {"module_id": "arxiv-tracker", "title": "Neural Radiance Fields for Autonomous Driving", "summary": "NeRF 在自动驾驶场景重建中的最新应用，实现厘米级精度的三维环境感知。", "tags": ["NeRF", "自动驾驶", "三维重建"], "score": 0.79, "url": "https://arxiv.org/abs/2606.00006"},
+    {"module_id": "arxiv-tracker", "title": "Protein Language Models: From Sequences to Functions", "summary": "蛋白质语言模型综述，探讨序列-结构-功能预测的端到端方法。", "tags": ["蛋白质", "生物信息", "预训练"], "score": 0.83, "url": "https://arxiv.org/abs/2606.00007"},
+    {"module_id": "arxiv-tracker", "title": "State Space Models vs Transformers: A Comprehensive Benchmark", "summary": "Mamba 及其变体与 Transformer 在 12 个 NLP 基准上的系统对比，揭示各自的优势场景。", "tags": ["SSM", "Mamba", "基准测试"], "score": 0.91, "url": "https://arxiv.org/abs/2606.00008"},
+    {"module_id": "arxiv-tracker", "title": "Federated Learning at Scale: Lessons from Production", "summary": "Google 联邦学习生产系统经验总结，涵盖隐私、通信效率和模型聚合策略。", "tags": ["联邦学习", "隐私计算", "分布式"], "score": 0.77, "url": "https://arxiv.org/abs/2606.00009"},
+    {"module_id": "arxiv-tracker", "title": "Code Generation with Large Language Models: A Survey", "summary": "LLM 代码生成能力的全面综述，从 Copilot 到自主 Agent 编程。", "tags": ["代码生成", "LLM", "Agent"], "score": 0.87, "url": "https://arxiv.org/abs/2606.00010"},
+    # ── semantic-scholar-tracker (8) ─────────────────────────────
+    {"module_id": "semantic-scholar-tracker", "title": "A Survey on Retrieval-Augmented Generation", "summary": "RAG 技术全面综述：从基础检索增强到自适应检索、多跳推理和知识图谱集成。", "tags": ["RAG", "信息检索", "知识库"], "score": 0.90, "url": "https://www.semanticscholar.org/paper/1"},
+    {"module_id": "semantic-scholar-tracker", "title": "Graph Neural Networks for Scientific Discovery", "summary": "图神经网络在药物发现、材料科学和蛋白质结构预测中的最新应用进展。", "tags": ["GNN", "科学发现", "药物设计"], "score": 0.82, "url": "https://www.semanticscholar.org/paper/2"},
+    {"module_id": "semantic-scholar-tracker", "title": "Multimodal Learning with Transformers: A Survey", "summary": "多模态 Transformer 学习的系统性综述，涵盖视觉-语言、音频-视觉等跨模态融合策略。", "tags": ["多模态", "Transformer", "跨模态"], "score": 0.84, "url": "https://www.semanticscholar.org/paper/3"},
+    {"module_id": "semantic-scholar-tracker", "title": "Knowledge Distillation in Large Language Models", "summary": "大语言模型知识蒸馏的最新方法，包括黑盒蒸馏、任务特定蒸馏和渐进式蒸馏策略。", "tags": ["知识蒸馏", "模型压缩", "LLM"], "score": 0.83, "url": "https://www.semanticscholar.org/paper/4"},
+    {"module_id": "semantic-scholar-tracker", "title": "Causal Inference Meets Machine Learning: A Practical Guide", "summary": "因果推断与机器学习结合的实用指南，涵盖反事实推理、工具变量和双重差分法的现代实现。", "tags": ["因果推断", "因果发现", "统计学"], "score": 0.81, "url": "https://www.semanticscholar.org/paper/5"},
+    {"module_id": "semantic-scholar-tracker", "title": "Robotics Foundation Models: Bridging Simulation and Reality", "summary": "机器人基础模型综述，探讨 Sim2Real 迁移、视觉-语言-动作模型和通用操作策略。", "tags": ["机器人", "基础模型", "Sim2Real"], "score": 0.78, "url": "https://www.semanticscholar.org/paper/6"},
+    {"module_id": "semantic-scholar-tracker", "title": "Time Series Forecasting with Foundation Models", "summary": "时间序列基础模型的前沿进展，对比 TimeGPT、Lag-Llama 和 Chronos 的预测性能。", "tags": ["时间序列", "预测", "基础模型"], "score": 0.80, "url": "https://www.semanticscholar.org/paper/7"},
+    {"module_id": "semantic-scholar-tracker", "title": "Synthetic Data Generation for Privacy-Preserving ML", "summary": "合成数据生成方法综述：GAN、扩散模型和 LLM 在构建隐私安全训练集中的应用。", "tags": ["合成数据", "隐私", "数据增强"], "score": 0.76, "url": "https://www.semanticscholar.org/paper/8"},
+    # ── xiaohongshu-tracker (8) ──────────────────────────────────
+    {"module_id": "xiaohongshu-tracker", "title": "读博第三年的时间管理心得", "summary": "分享 Pomodoro + 时间块法结合的实践经验，以及如何平衡科研、写作和生活。", "tags": ["读博", "时间管理", "科研生活"], "score": 0.75, "url": "https://www.xiaohongshu.com/explore/demo1"},
+    {"module_id": "xiaohongshu-tracker", "title": "用 Obsidian 搭建个人知识库的完整流程", "summary": "从零开始搭建 Zettelkasten 笔记系统，包括插件推荐、模板设计和工作流自动化。", "tags": ["Obsidian", "知识管理", "Zettelkasten"], "score": 0.78, "url": "https://www.xiaohongshu.com/explore/demo2"},
+    {"module_id": "xiaohongshu-tracker", "title": "科研人的 iPad 笔记术", "summary": "使用 GoodNotes + Zotero 的论文阅读工作流，提升文献管理效率。", "tags": ["论文阅读", "iPad", "工具"], "score": 0.72, "url": "https://www.xiaohongshu.com/explore/demo3"},
+    {"module_id": "xiaohongshu-tracker", "title": "一个人的留学生活 | 如何对抗学术孤独感", "summary": "分享在海外读博期间维持心理健康的方法：建立学术社群、定期运动和正念冥想。", "tags": ["留学", "心理健康", "读博"], "score": 0.68, "url": "https://www.xiaohongshu.com/explore/demo4"},
+    {"module_id": "xiaohongshu-tracker", "title": "SCI 论文写作模板分享 | Introduction 万能框架", "summary": "总结 50 篇顶刊论文的 Introduction 结构，提炼出四段式万能写作框架。", "tags": ["论文写作", "SCI", "学术"], "score": 0.80, "url": "https://www.xiaohongshu.com/explore/demo5"},
+    {"module_id": "xiaohongshu-tracker", "title": "实验室咖啡角 DIY | 低成本提升幸福感", "summary": "花 200 元在实验室搭建一个温馨咖啡角，附购物清单和布置思路。", "tags": ["生活", "DIY", "实验室"], "score": 0.55, "url": "https://www.xiaohongshu.com/explore/demo6"},
+    {"module_id": "xiaohongshu-tracker", "title": "Nature 子刊拒稿后怎么改？亲身经历分享", "summary": "记录一篇从 Nature Communications 拒稿到接收的全过程，包含审稿意见回复策略。", "tags": ["Nature", "投稿", "审稿"], "score": 0.82, "url": "https://www.xiaohongshu.com/explore/demo7"},
+    {"module_id": "xiaohongshu-tracker", "title": "研究生必备 Mac 软件清单 (2026 版)", "summary": "精选 20 个提升科研效率的 Mac 应用：文献管理、写作、数据分析、作图工具一网打尽。", "tags": ["Mac", "软件推荐", "效率"], "score": 0.74, "url": "https://www.xiaohongshu.com/explore/demo8"},
+    # ── bilibili-tracker (8) ─────────────────────────────────────
+    {"module_id": "bilibili-tracker", "title": "3Blue1Brown: 线性代数的本质 (2026 更新版)", "summary": "经典数学可视化系列更新，新增张量分解和高维几何的直觉解释。", "tags": ["数学", "可视化", "线性代数"], "score": 0.87, "url": "https://www.bilibili.com/video/BV1demo1"},
+    {"module_id": "bilibili-tracker", "title": "从零实现一个 Mini-GPT", "summary": "手把手教学视频，用 PyTorch 从头实现一个小型 GPT 模型，深入理解 Transformer 内部机制。", "tags": ["GPT", "PyTorch", "教程"], "score": 0.83, "url": "https://www.bilibili.com/video/BV1demo2"},
+    {"module_id": "bilibili-tracker", "title": "计算机视觉前沿 2026: 从 ViT 到 DINO v3", "summary": "梳理自监督视觉模型的演进路线，对比最新的视觉基础模型架构。", "tags": ["计算机视觉", "ViT", "自监督"], "score": 0.81, "url": "https://www.bilibili.com/video/BV1demo3"},
+    {"module_id": "bilibili-tracker", "title": "强化学习入门到实践 | DQN → PPO → SAC 全讲解", "summary": "8 小时系统课程，从马尔可夫决策过程到前沿 RL 算法，配套代码和环境。", "tags": ["强化学习", "DQN", "PPO"], "score": 0.79, "url": "https://www.bilibili.com/video/BV1demo4"},
+    {"module_id": "bilibili-tracker", "title": "李沐带你读论文: DALL-E 3 技术报告深度解析", "summary": "逐页解读 DALL-E 3 技术报告，分析文本到图像生成的最新突破和训练技巧。", "tags": ["DALL-E", "文生图", "论文解读"], "score": 0.85, "url": "https://www.bilibili.com/video/BV1demo5"},
+    {"module_id": "bilibili-tracker", "title": "数据科学家的一天 | 互联网大厂 vlog", "summary": "记录在字节跳动做推荐算法的日常：晨会、数据分析、模型调参和团队协作。", "tags": ["数据科学", "职场", "vlog"], "score": 0.62, "url": "https://www.bilibili.com/video/BV1demo6"},
+    {"module_id": "bilibili-tracker", "title": "LaTeX 论文排版从入门到精通", "summary": "从零学习 LaTeX：环境配置、常用命令、公式排版、参考文献管理和模板自定义。", "tags": ["LaTeX", "排版", "教程"], "score": 0.73, "url": "https://www.bilibili.com/video/BV1demo7"},
+    {"module_id": "bilibili-tracker", "title": "MIT 6.S191 深度学习导论 2026 (中英双语字幕)", "summary": "MIT 最新深度学习公开课完整搬运，涵盖基础网络、生成模型、RL 和前沿应用。", "tags": ["MIT", "公开课", "深度学习"], "score": 0.88, "url": "https://www.bilibili.com/video/BV1demo8"},
+    # ── zhihu-tracker (8) ────────────────────────────────────────
+    {"module_id": "zhihu-tracker", "title": "如何评价 2026 年 AI 领域的最新进展？", "summary": "知乎高赞回答汇总：多模态大模型、具身智能和 AI Agent 三大方向的突破性进展。", "tags": ["AI", "多模态", "Agent"], "score": 0.80, "url": "https://www.zhihu.com/question/demo1"},
+    {"module_id": "zhihu-tracker", "title": "博士毕业后进入工业界还是学术界？", "summary": "来自不同背景的研究者分享职业选择的考量因素和真实体验。", "tags": ["职业规划", "博士", "学术界"], "score": 0.70, "url": "https://www.zhihu.com/question/demo2"},
+    {"module_id": "zhihu-tracker", "title": "有哪些值得关注的 AI 开源项目？", "summary": "盘点 2026 年最具影响力的 AI 开源项目，涵盖训练框架、推理引擎和应用工具。", "tags": ["开源", "AI工具", "推荐"], "score": 0.76, "url": "https://www.zhihu.com/question/demo3"},
+    {"module_id": "zhihu-tracker", "title": "为什么说 Rust 是系统编程的未来？", "summary": "从内存安全、并发模型和生态系统三个角度深度分析 Rust 语言的核心优势。", "tags": ["Rust", "系统编程", "编程语言"], "score": 0.72, "url": "https://www.zhihu.com/question/demo4"},
+    {"module_id": "zhihu-tracker", "title": "如何从零开始学习机器学习？", "summary": "系统化学习路径推荐：数学基础 → 经典算法 → 深度学习 → 项目实践，附资源链接。", "tags": ["机器学习", "学习路径", "入门"], "score": 0.74, "url": "https://www.zhihu.com/question/demo5"},
+    {"module_id": "zhihu-tracker", "title": "大语言模型的涌现能力是否真实存在？", "summary": "围绕 LLM 涌现能力的学术争论梳理，是度量标准的假象还是真正的相变？", "tags": ["LLM", "涌现", "AI理论"], "score": 0.85, "url": "https://www.zhihu.com/question/demo6"},
+    {"module_id": "zhihu-tracker", "title": "读研期间发表论文最重要的经验是什么？", "summary": "数十位学者的论文写作心得：选题比方法重要，写作比实验重要，展示比内容重要。", "tags": ["论文发表", "研究生", "经验"], "score": 0.71, "url": "https://www.zhihu.com/question/demo7"},
+    {"module_id": "zhihu-tracker", "title": "2026 年，普通程序员如何拥抱 AI 转型？", "summary": "讨论传统开发者如何利用 AI 工具提升效率，以及 AI 时代的核心竞争力。", "tags": ["AI转型", "程序员", "职业发展"], "score": 0.69, "url": "https://www.zhihu.com/question/demo8"},
+    # ── xiaoyuzhou-tracker (6) ───────────────────────────────────
+    {"module_id": "xiaoyuzhou-tracker", "title": "硬地骗局 EP.128: AI 创业的第二波浪潮", "summary": "讨论 AI 应用层创业的新机会，以及开发者如何找到 PMF。", "tags": ["AI创业", "播客", "产品"], "score": 0.73, "url": "https://www.xiaoyuzhoufm.com/episode/demo1"},
+    {"module_id": "xiaoyuzhou-tracker", "title": "科技乱炖: 聊聊 Agent 时代的开发者工具", "summary": "探讨 AI Agent 对软件开发工作流的影响，以及新一代开发工具的形态。", "tags": ["Agent", "开发工具", "播客"], "score": 0.74, "url": "https://www.xiaoyuzhoufm.com/episode/demo2"},
+    {"module_id": "xiaoyuzhou-tracker", "title": "声东击西: 学术圈的开放获取运动", "summary": "讨论 Open Access 对学术出版的颠覆，以及 Plan S、预印本和数据共享的最新动态。", "tags": ["开放获取", "学术出版", "播客"], "score": 0.70, "url": "https://www.xiaoyuzhoufm.com/episode/demo3"},
+    {"module_id": "xiaoyuzhou-tracker", "title": "不合时宜: 当 AI 遇上哲学——意识与智能的边界", "summary": "从哲学角度审视 AI 是否可能拥有意识，中文房间论证在 LLM 时代的新解读。", "tags": ["AI哲学", "意识", "思辨"], "score": 0.67, "url": "https://www.xiaoyuzhoufm.com/episode/demo4"},
+    {"module_id": "xiaoyuzhou-tracker", "title": "知行小酒馆: 研究生的理财入门", "summary": "适合学生党的理财策略：从余额宝到指数基金定投，低风险积累第一桶金。", "tags": ["理财", "研究生", "生活"], "score": 0.58, "url": "https://www.xiaoyuzhoufm.com/episode/demo5"},
+    {"module_id": "xiaoyuzhou-tracker", "title": "来都来了: 对话斯坦福 AI Lab 博士后——我的科研之路", "summary": "分享从国内本科到斯坦福博后的成长经历，讨论科研选题和导师关系。", "tags": ["科研经历", "斯坦福", "博后"], "score": 0.76, "url": "https://www.xiaoyuzhoufm.com/episode/demo6"},
+    # ── folder-monitor (4) ───────────────────────────────────────
+    {"module_id": "folder-monitor", "title": "新文件: experiment_results_v3.csv", "summary": "检测到实验数据目录新增文件，包含 2048 行实验记录，文件大小 1.2MB。", "tags": ["文件监控", "实验数据", "CSV"], "score": 0.60, "url": ""},
+    {"module_id": "folder-monitor", "title": "文献更新: attention_survey_2026.pdf", "summary": "Zotero 同步目录检测到新 PDF 文献，已自动提取元数据和摘要。", "tags": ["文件监控", "PDF", "文献"], "score": 0.65, "url": ""},
+    {"module_id": "folder-monitor", "title": "笔记变更: research-journal-april.md", "summary": "Obsidian Vault 中的研究日志文件被修改，新增 350 字关于模型调参的笔记。", "tags": ["文件监控", "笔记", "Obsidian"], "score": 0.50, "url": ""},
+    {"module_id": "folder-monitor", "title": "代码更新: model/transformer.py", "summary": "项目代码目录检测到模型文件更新，变更了 MultiHeadAttention 的实现。", "tags": ["文件监控", "代码", "模型"], "score": 0.55, "url": ""},
+]
+
+
+@app.post("/api/debug/seed-cards")
+async def seed_demo_cards(body: dict | None = None):
+    """Generate demo feed cards for testing/demo purposes."""
+    import random
+    import time as _time
+
+    count = (body or {}).get("count", 20)
+    count = max(1, min(count, 200))
+
+    now = _time.time()
+    inserted = 0
+    for i in range(count):
+        tpl = _DEMO_CARDS[i % len(_DEMO_CARDS)]
+        card_id = f"demo-{tpl['module_id']}-{i}-{random.randint(1000, 9999)}"
+        card = Card(
+            id=card_id,
+            title=tpl["title"],
+            summary=tpl["summary"],
+            score=max(0.0, min(1.0, tpl["score"] + random.uniform(-0.08, 0.08))),
+            tags=tpl["tags"],
+            source_url=tpl.get("url", ""),
+            obsidian_path=f"Demo/{card_id}.md",
+            module_id=tpl["module_id"],
+            created_at=now - random.uniform(0, 86400 * 7),
+            metadata={"demo": True},
+        )
+        _card_store.save(card)
+        inserted += 1
+
+    return {"ok": True, "inserted": inserted}
+
+
+@app.post("/api/debug/seed-all")
+async def seed_all_demo_data(body: dict | None = None):
+    """Seed demo data for all areas: cards, profile, activity, preferences."""
+    import random
+    import time as _time
+    import json as _json
+
+    results = {}
+
+    # 1. Seed cards
+    card_count = (body or {}).get("card_count", 52)
+    card_count = max(1, min(card_count, 200))
+    now = _time.time()
+    inserted = 0
+    for i in range(card_count):
+        tpl = _DEMO_CARDS[i % len(_DEMO_CARDS)]
+        card_id = f"demo-{tpl['module_id']}-{i}-{random.randint(1000, 9999)}"
+        card = Card(
+            id=card_id,
+            title=tpl["title"],
+            summary=tpl["summary"],
+            score=max(0.0, min(1.0, tpl["score"] + random.uniform(-0.08, 0.08))),
+            tags=tpl["tags"],
+            source_url=tpl.get("url", ""),
+            obsidian_path=f"Demo/{card_id}.md",
+            module_id=tpl["module_id"],
+            created_at=now - random.uniform(0, 86400 * 7),
+            metadata={"demo": True},
+        )
+        _card_store.save(card)
+        inserted += 1
+    results["cards"] = inserted
+
+    # 2. Seed profile data
+    abo_dir = Path.home() / ".abo"
+    abo_dir.mkdir(parents=True, exist_ok=True)
+
+    # Profile identity
+    profile_path = abo_dir / "profile.json"
+    profile_data = {
+        "codename": "Researcher-X",
+        "long_term_goal": "探索通用人工智能的理论基础，构建可解释的智能系统",
+        "research_field": "Machine Learning & NLP",
+        "affiliation": "Demo University",
+    }
+    profile_path.write_text(_json.dumps(profile_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    results["profile"] = True
+
+    # Daily motto
+    motto_path = abo_dir / "daily_motto.json"
+    motto_path.write_text(_json.dumps({
+        "motto": "Stay hungry, stay foolish. 保持好奇，持续探索。",
+        "date": datetime.now().strftime("%Y-%m-%d"),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    results["motto"] = True
+
+    # SAN log (30 days)
+    san_path = abo_dir / "san_log.json"
+    san_log = {}
+    for d in range(30):
+        date_str = (datetime.now() - timedelta(days=d)).strftime("%Y-%m-%d")
+        san_log[date_str] = random.randint(40, 95)
+    san_path.write_text(_json.dumps(san_log, ensure_ascii=False, indent=2), encoding="utf-8")
+    results["san_log"] = 30
+
+    # Happiness log (30 days)
+    happiness_path = abo_dir / "happiness_log.json"
+    happiness_log = {}
+    for d in range(30):
+        date_str = (datetime.now() - timedelta(days=d)).strftime("%Y-%m-%d")
+        happiness_log[date_str] = random.randint(50, 100)
+    happiness_path.write_text(_json.dumps(happiness_log, ensure_ascii=False, indent=2), encoding="utf-8")
+    results["happiness_log"] = 30
+
+    # Energy memory
+    energy_path = abo_dir / "energy_memory.json"
+    energy_data = {
+        "current": random.randint(50, 90),
+        "history": [
+            {"date": (datetime.now() - timedelta(days=d)).strftime("%Y-%m-%d"),
+             "value": random.randint(30, 100)}
+            for d in range(14)
+        ],
+    }
+    energy_path.write_text(_json.dumps(energy_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    results["energy"] = True
+
+    # Daily todos
+    todos_path = abo_dir / "daily_todos.json"
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    todos_data = {
+        today_str: [
+            {"text": "阅读 3 篇 Transformer 相关论文", "done": True},
+            {"text": "整理实验数据并更新 Wandb 面板", "done": True},
+            {"text": "写完 Introduction 第二稿", "done": False},
+            {"text": "Review 师弟的 PR", "done": False},
+            {"text": "跑步 30 分钟", "done": True},
+        ],
+    }
+    todos_path.write_text(_json.dumps(todos_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    results["todos"] = True
+
+    # 3. Seed keyword preferences
+    prefs_path = abo_dir / "keyword_preferences.json"
+    keyword_prefs = {
+        "Transformer": {"score": 0.8, "count": 15, "source_modules": ["arxiv-tracker", "semantic-scholar-tracker"]},
+        "LLM": {"score": 0.9, "count": 22, "source_modules": ["arxiv-tracker", "zhihu-tracker"]},
+        "读博": {"score": 0.6, "count": 8, "source_modules": ["xiaohongshu-tracker", "zhihu-tracker"]},
+        "强化学习": {"score": 0.5, "count": 6, "source_modules": ["arxiv-tracker", "bilibili-tracker"]},
+        "RAG": {"score": 0.7, "count": 10, "source_modules": ["semantic-scholar-tracker"]},
+        "Agent": {"score": 0.85, "count": 18, "source_modules": ["arxiv-tracker", "zhihu-tracker", "xiaoyuzhou-tracker"]},
+        "论文写作": {"score": 0.4, "count": 5, "source_modules": ["xiaohongshu-tracker"]},
+        "开源": {"score": 0.3, "count": 4, "source_modules": ["zhihu-tracker"]},
+    }
+    prefs_path.write_text(_json.dumps(keyword_prefs, ensure_ascii=False, indent=2), encoding="utf-8")
+    results["keyword_prefs"] = len(keyword_prefs)
+
+    # 4. Seed activity timeline (today)
+    activities_dir = abo_dir / "activities"
+    activities_dir.mkdir(parents=True, exist_ok=True)
+    timeline_path = activities_dir / f"timeline_{today_str}.json"
+    demo_activities = [
+        {"id": "d1", "type": "card_like", "timestamp": f"{today_str}T09:15:00", "card_title": "State Space Models vs Transformers", "module_id": "arxiv-tracker", "metadata": {}},
+        {"id": "d2", "type": "card_save", "timestamp": f"{today_str}T09:32:00", "card_title": "A Survey on RAG", "module_id": "semantic-scholar-tracker", "metadata": {}},
+        {"id": "d3", "type": "card_view", "timestamp": f"{today_str}T10:05:00", "card_title": "读博第三年的时间管理心得", "module_id": "xiaohongshu-tracker", "metadata": {}},
+        {"id": "d4", "type": "card_like", "timestamp": f"{today_str}T10:48:00", "card_title": "Code Generation with LLMs", "module_id": "arxiv-tracker", "metadata": {}},
+        {"id": "d5", "type": "card_view", "timestamp": f"{today_str}T11:20:00", "card_title": "实验室咖啡角 DIY", "module_id": "xiaohongshu-tracker", "metadata": {}},
+        {"id": "d6", "type": "card_save", "timestamp": f"{today_str}T14:00:00", "card_title": "MIT 6.S191 深度学习导论", "module_id": "bilibili-tracker", "metadata": {}},
+        {"id": "d7", "type": "card_like", "timestamp": f"{today_str}T15:30:00", "card_title": "大语言模型的涌现能力", "module_id": "zhihu-tracker", "metadata": {}},
+        {"id": "d8", "type": "card_view", "timestamp": f"{today_str}T16:15:00", "card_title": "AI 创业的第二波浪潮", "module_id": "xiaoyuzhou-tracker", "metadata": {}},
+    ]
+    timeline_data = {
+        "date": today_str,
+        "activities": demo_activities,
+        "summary": None,
+        "summary_generated_at": None,
+    }
+    timeline_path.write_text(_json.dumps(timeline_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    results["activities"] = len(demo_activities)
+
+    return {"ok": True, "results": results}
+
+
+@app.delete("/api/debug/cards")
+async def clear_all_cards():
+    """Delete all cards from the database."""
+    import sqlite3
+    db_path = Path.home() / ".abo" / "data" / "cards.db"
+    with sqlite3.connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
+        conn.execute("DELETE FROM cards")
+    return {"ok": True, "deleted": count}
 
 
 # ── Modules ──────────────────────────────────────────────────────

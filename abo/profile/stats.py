@@ -65,7 +65,8 @@ def calculate_stats(vault_path: str | None, card_store: CardStore) -> dict:
 
     # ── SAN 值 ────────────────────────────────────────────────────
     san_avg = get_san_7d_avg()
-    san_raw = min(100, int(san_avg * 10))
+    # san_avg is already 0-100 scale (from san_log.json values)
+    san_raw = min(100, int(san_avg))
 
     # ── 幸福指数 ──────────────────────────────────────────────────
     happiness_today = get_happiness_today()

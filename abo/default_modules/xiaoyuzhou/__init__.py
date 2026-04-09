@@ -73,72 +73,7 @@ class XiaoyuzhouTracker(Module):
                 )
                 items.extend(podcast_items)
 
-        # Demo fallback: generate sample data if no items
-        if not items:
-            items = self._generate_demo_items(keywords, max_results)
-
         return items[:max_results]
-
-    def _generate_demo_items(self, keywords: list[str], limit: int) -> list[Item]:
-        """Generate demo items for testing when APIs fail."""
-        demo_episodes = [
-            {
-                "title": "AI Revolution: The Future of Research",
-                "description": "Exploring how AI is transforming academic research and what it means for scientists.",
-                "podcast_name": "Tech Insights",
-                "published": (datetime.utcnow() - timedelta(days=1)).isoformat(),
-            },
-            {
-                "title": "Navigating Grad School: A Survival Guide",
-                "description": "Tips and tricks for surviving and thriving in graduate school.",
-                "podcast_name": "Academic Life",
-                "published": (datetime.utcnow() - timedelta(days=3)).isoformat(),
-            },
-            {
-                "title": "Deep Learning for Beginners",
-                "description": "An introduction to neural networks and deep learning concepts.",
-                "podcast_name": "CodeCast",
-                "published": (datetime.utcnow() - timedelta(days=5)).isoformat(),
-            },
-            {
-                "title": "The Art of Scientific Writing",
-                "description": "How to write compelling scientific papers that get published.",
-                "podcast_name": "Research Methods",
-                "published": (datetime.utcnow() - timedelta(days=7)).isoformat(),
-            },
-            {
-                "title": "Startup Stories: From Lab to Market",
-                "description": "Interview with founders who turned their research into successful companies.",
-                "podcast_name": "Innovation Weekly",
-                "published": (datetime.utcnow() - timedelta(days=9)).isoformat(),
-            },
-        ]
-
-        items = []
-        for i, ep in enumerate(demo_episodes[:limit]):
-            # Check keywords
-            text_lower = f"{ep['title']} {ep['description']}".lower()
-            if not any(kw.lower() in text_lower for kw in keywords):
-                continue
-
-            items.append(
-                Item(
-                    id=f"xyz-demo-{i}",
-                    raw={
-                        "title": ep["title"],
-                        "description": ep["description"],
-                        "url": f"https://www.xiaoyuzhoufm.com/episode/demo{i}",
-                        "episode_id": f"demo{i}",
-                        "podcast_id": "demo",
-                        "podcast_name": ep["podcast_name"],
-                        "published": ep["published"],
-                        "platform": "xiaoyuzhou",
-                        "demo": True,
-                    },
-                )
-            )
-
-        return items
 
     async def _fetch_podcast_episodes(
         self, podcast_id: str, keywords: list[str], limit: int

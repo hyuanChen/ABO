@@ -132,30 +132,39 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
   const handleContinue = async () => {
     setIsSaving(true);
     try {
-      // Save module configurations
+      // Save module configurations — use allSettled so partial failures don't block progress
       const enabledModules = modules.filter((m) => m.enabled);
 
-      for (const module of enabledModules) {
-        await api.post(`/api/modules/${module.id}/config`, {
-          keywords: module.keywords,
-          enabled: module.enabled,
+      const results = await Promise.allSettled(
+        enabledModules.map((module) =>
+          api.post(`/api/modules/${module.id}/config`, {
+            keywords: module.keywords,
+            enabled: module.enabled,
+          })
+        )
+      );
+
+      const failed = results.filter((r) => r.status === "rejected").length;
+      if (failed > 0) {
+        addToast({
+          kind: "info",
+          title: "部分配置保存失败",
+          message: `${enabledModules.length - failed}/${enabledModules.length} 个模块保存成功，可稍后在模块管理中重新配置`,
+        });
+      } else {
+        addToast({
+          kind: "success",
+          title: "配置已保存",
+          message: `已启用 ${enabledModules.length} 个模块`,
         });
       }
 
-      addToast({
-        kind: "success",
-        title: "配置已保存",
-        message: `已启用 ${enabledModules.length} 个模块`,
-      });
-
+      // Always proceed to next step
       onNext();
     } catch (error) {
       console.error("Failed to save config:", error);
-      addToast({
-        kind: "error",
-        title: "保存失败",
-        message: "请检查网络连接后重试",
-      });
+      // Even on unexpected error, still proceed
+      onNext();
     } finally {
       setIsSaving(false);
     }

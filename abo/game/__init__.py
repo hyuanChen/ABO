@@ -85,7 +85,7 @@ def apply_action(user_id: str, action: str, metadata: dict = None) -> dict:
 
         # Update SAN (0-100 range, written daily)
         if reward.san != 0:
-            current_san = profile_store.get_san_7d_avg() * 10  # Rough current
+            current_san = profile_store.get_san_7d_avg()  # already 0-100
             new_san = max(0, min(100, int(current_san + reward.san)))
             profile_store.append_san(new_san)
 

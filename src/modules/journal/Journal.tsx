@@ -78,20 +78,10 @@ export default function Journal() {
   const [editContent, setEditContent] = useState("");
   const [selectedMood, setSelectedMood] = useState<string | null>(null);
 
-  // Load entries (mock for now - would be API call)
+  // Load entries
   useEffect(() => {
-    // TODO: Replace with actual API call
-    const mockEntries: JournalEntry[] = [
-      {
-        id: "1",
-        content: "今天完成了文献综述的初稿，感觉很有成就感。下午和导师讨论了下一步的研究方向。",
-        mood: "✨",
-        tags: ["研究", "文献"],
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      },
-    ];
-    setEntries(mockEntries);
+    // TODO: Replace with actual API call when backend is ready
+    setEntries([]);
   }, []);
 
   const currentEntry = entries.find((e) => {

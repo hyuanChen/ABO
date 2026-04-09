@@ -635,91 +635,7 @@ class ZhihuAPI:
             match = re.search(pattern, desc, re.IGNORECASE)
             if match:
                 return int(match.group(1))
-        # 默认返回一个随机值用于演示
-        return 100 + hash(desc) % 900
-
-    def _generate_mock_search_results(self, keyword: str, count: int, min_votes: int) -> list[ZhihuContent]:
-        """生成模拟搜索结果（用于开发测试）"""
-        mock_data = [
-            {
-                "title": f"{keyword}是什么？如何系统学习？",
-                "content": f"这是一个关于{keyword}的详细解答，包含了基础概念、进阶技巧以及实战经验分享...",
-                "type": "answer",
-                "votes": 8542,
-            },
-            {
-                "title": f"{keyword}完全指南：从入门到精通",
-                "content": f"本文将全面介绍{keyword}的核心概念和实践方法，适合初学者和进阶者阅读...",
-                "type": "article",
-                "votes": 3421,
-            },
-            {
-                "title": f"为什么{keyword}这么火？深度分析",
-                "content": f"从多个角度分析{keyword}火爆的原因，包括市场趋势、用户需求、技术发展等...",
-                "type": "answer",
-                "votes": 2156,
-            },
-            {
-                "title": f"{keyword}的10个实用技巧",
-                "content": f"总结了{keyword}使用过程中最常用的10个技巧，帮助你提升效率...",
-                "type": "article",
-                "votes": 1890,
-            },
-            {
-                "title": f"{keyword}行业现状与未来趋势",
-                "content": f"深入分析{keyword}行业的发展现状，并预测未来3-5年的发展趋势...",
-                "type": "answer",
-                "votes": 1234,
-            },
-            {
-                "title": f"{keyword}避坑指南：新手常犯的错误",
-                "content": f"整理了{keyword}初学者最容易犯的10个错误，以及如何避免...",
-                "type": "article",
-                "votes": 987,
-            },
-            {
-                "title": f"如何用{keyword}提升自己？",
-                "content": f"分享利用{keyword}提升个人能力的具体方法和实践案例...",
-                "type": "answer",
-                "votes": 756,
-            },
-            {
-                "title": f"{keyword}资源汇总：书籍、课程、工具",
-                "content": f"精心整理的{keyword}学习资源，包括推荐书籍、在线课程和实用工具...",
-                "type": "article",
-                "votes": 543,
-            },
-        ]
-
-        contents = []
-        base_time = datetime.utcnow()
-
-        for i, data in enumerate(mock_data[:count]):
-            votes = data["votes"]
-            if votes < min_votes:
-                continue
-
-            content_type = data["type"]
-            if content_type == "article":
-                url = f"https://zhuanlan.zhihu.com/p/{1000000 + i}"
-            else:
-                url = f"https://www.zhihu.com/question/{1000000 + i}/answer/{2000000 + i}"
-
-            contents.append(ZhihuContent(
-                id=f"mock-{i}-{hash(keyword) % 10000}",
-                title=data["title"],
-                content=data["content"],
-                author=f"知乎用户_{i}",
-                author_id=f"user_{i}",
-                content_type=content_type,
-                votes=votes,
-                comments_count=votes // 20,
-                url=url,
-                published_at=base_time - timedelta(days=i),
-                tags=[keyword, "学习", "经验分享"],
-            ))
-
-        return contents
+        return 0
 
     async def search_by_keyword(
         self,
@@ -790,12 +706,8 @@ class ZhihuAPI:
         except Exception as e:
             print(f"RSSHub 搜索失败: {e}")
 
-        # 4. 回退到模拟数据
-        print("使用模拟数据")
-        contents = self._generate_mock_search_results(keyword, max_results, min_votes)
-        if sort_by == "votes":
-            contents.sort(key=lambda x: x.votes, reverse=True)
-        return contents[:max_results]
+        # No results from any source
+        return []
 
     async def fetch_comments(
         self,
@@ -807,60 +719,9 @@ class ZhihuAPI:
         """
         获取内容的评论列表
 
-        Note: 知乎反爬严格，这里使用模拟数据或简化实现
+        TODO: 接入真实 API 或浏览器自动化
         """
-        # 模拟评论数据
-        return self._generate_mock_comments(content_id, max_comments, sort_by)
-
-    def _generate_mock_comments(
-        self,
-        content_id: str,
-        count: int,
-        sort_by: str,
-    ) -> list[ZhihuComment]:
-        """生成模拟评论数据"""
-        mock_contents = [
-            "说得太好了，受益匪浅！",
-            "收藏了，慢慢消化",
-            "这个角度很独特，学到了",
-            "确实是这样，深有体会",
-            "感谢分享，对我很有帮助",
-            "分析得很透彻",
-            "能不能再详细讲讲？",
-            "已经关注答主很久了",
-            "这个我也经历过，感同身受",
-            "求推荐相关书籍",
-            "写得太好了，必须点赞",
-            "第一次知道这些",
-            "转发给需要的朋友",
-            "说得很有道理",
-            "期待更多干货",
-            "干货满满，感谢",
-            "这个回答太及时了",
-            "mark一下，以后再看",
-            "答主太厉害了",
-            "解决了我多年的疑惑",
-        ]
-
-        import random
-        comments = []
-
-        for i in range(min(count, len(mock_contents))):
-            likes = random.randint(10, 1000) + (count - i) * 50
-            comments.append(ZhihuComment(
-                id=f"{content_id}-comment-{i}",
-                author=f"用户_{i+100}",
-                content=mock_contents[i],
-                likes=likes,
-                created_at=datetime.now() - timedelta(hours=i*2),
-                is_author=(i == 0 and random.random() > 0.7),
-            ))
-
-        # 排序
-        if sort_by == "likes":
-            comments.sort(key=lambda x: x.likes, reverse=True)
-
-        return comments
+        return []
 
     async def analyze_trends(
         self,

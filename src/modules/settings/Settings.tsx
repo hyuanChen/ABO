@@ -11,6 +11,11 @@ import {
   Rss,
   Copy,
   Check,
+  Bug,
+  Database,
+  Plus,
+  Trash2,
+  Loader2,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
 import { api } from "../../core/api";
@@ -18,7 +23,7 @@ import { useStore } from "../../core/store";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type SettingsTab = "general" | "about";
+type SettingsTab = "general" | "developer" | "about";
 
 interface SettingItemProps {
   icon: React.ReactNode;
@@ -399,10 +404,10 @@ function GeneralSection() {
   const shortcuts = [
     { label: "角色主页", shortcut: "⌘1" },
     { label: "今日情报", shortcut: "⌘2" },
-    { label: "Vault", shortcut: "⌘3" },
+    { label: "情报库", shortcut: "⌘3" },
     { label: "文献库", shortcut: "⌘4" },
-    { label: "手记", shortcut: "⌘5" },
-    { label: "Claude", shortcut: "⌘6" },
+    { label: "知识库", shortcut: "⌘5" },
+    { label: "手记", shortcut: "⌘6" },
   ];
 
   return (
@@ -508,7 +513,7 @@ function AboutSection() {
           ABO
         </h2>
         <p style={{ fontSize: "1rem", color: "var(--text-secondary)", marginBottom: "4px" }}>
-          Academic Buddy OS
+          Another Brain Odyssey
         </p>
         <p style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>Version 0.5.0 · Phase 5</p>
       </div>
@@ -579,6 +584,186 @@ function AboutSection() {
   );
 }
 
+function ActionButton({
+  onClick,
+  loading,
+  loadingText,
+  label,
+  icon,
+  variant = "primary",
+}: {
+  onClick: () => void;
+  loading: boolean;
+  loadingText: string;
+  label: string;
+  icon: React.ReactNode;
+  variant?: "primary" | "danger";
+}) {
+  const styles =
+    variant === "danger"
+      ? {
+          border: "1px solid rgba(255, 100, 100, 0.3)",
+          background: "rgba(255, 100, 100, 0.1)",
+          color: "#E85D5D",
+        }
+      : {
+          border: "none",
+          background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+          color: "white",
+        };
+
+  return (
+    <button
+      onClick={onClick}
+      disabled={loading}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "6px",
+        padding: "8px 16px",
+        borderRadius: "var(--radius-md)",
+        fontSize: "0.8125rem",
+        fontWeight: 600,
+        cursor: loading ? "not-allowed" : "pointer",
+        opacity: loading ? 0.7 : 1,
+        transition: "all 0.2s ease",
+        ...styles,
+      }}
+    >
+      {loading ? (
+        <Loader2 style={{ width: "14px", height: "14px", animation: "spin 1s linear infinite" }} />
+      ) : (
+        icon
+      )}
+      {loading ? loadingText : label}
+    </button>
+  );
+}
+
+function DeveloperSection() {
+  const [seedCount, setSeedCount] = useState(52);
+  const [seedingCards, setSeedingCards] = useState(false);
+  const [seedingAll, setSeedingAll] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const { addToast } = useStore();
+
+  async function handleSeedCards() {
+    setSeedingCards(true);
+    try {
+      const r = await api.post<{ ok: boolean; inserted: number }>("/api/debug/seed-cards", { count: seedCount });
+      addToast({ kind: "success", title: `已生成 ${r.inserted} 条演示卡片` });
+    } catch {
+      addToast({ kind: "error", title: "生成演示数据失败" });
+    } finally {
+      setSeedingCards(false);
+    }
+  }
+
+  async function handleSeedAll() {
+    setSeedingAll(true);
+    try {
+      const r = await api.post<{ ok: boolean; results: Record<string, unknown> }>("/api/debug/seed-all", { card_count: seedCount });
+      const res = r.results;
+      addToast({
+        kind: "success",
+        title: `已生成全部演示数据`,
+        message: `卡片 ${res.cards} · 偏好 ${res.keyword_prefs} · 活动 ${res.activities} · 30天SAN/心情`,
+      });
+    } catch {
+      addToast({ kind: "error", title: "生成演示数据失败" });
+    } finally {
+      setSeedingAll(false);
+    }
+  }
+
+  async function handleClear() {
+    setClearing(true);
+    try {
+      const r = await api.delete<{ ok: boolean; deleted: number }>("/api/debug/cards");
+      addToast({ kind: "success", title: `已清空 ${r.deleted} 条卡片` });
+    } catch {
+      addToast({ kind: "error", title: "清空数据失败" });
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      {/* One-click seed all */}
+      <Card title="一键填充" icon={<Zap style={{ width: "18px", height: "18px" }} />}>
+        <SettingItem
+          icon={<Database style={{ width: "20px", height: "20px" }} />}
+          title="生成全部演示数据"
+          description="Feed 卡片 + 角色档案 + SAN/心情/精力历史 + 偏好 + 今日活动"
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <input
+              type="number"
+              min={1}
+              max={200}
+              value={seedCount}
+              onChange={(e) => setSeedCount(Math.max(1, Math.min(200, parseInt(e.target.value) || 52)))}
+              title="卡片数量"
+              style={{
+                width: "60px",
+                padding: "8px 10px",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-card)",
+                color: "var(--text-main)",
+                fontSize: "0.875rem",
+                textAlign: "center",
+              }}
+            />
+            <ActionButton
+              onClick={handleSeedAll}
+              loading={seedingAll}
+              loadingText="生成中..."
+              label="一键填充"
+              icon={<Zap style={{ width: "14px", height: "14px" }} />}
+            />
+          </div>
+        </SettingItem>
+      </Card>
+
+      {/* Fine-grained controls */}
+      <Card title="精细控制" icon={<Database style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <SettingItem
+            icon={<Plus style={{ width: "20px", height: "20px" }} />}
+            title="仅生成 Feed 卡片"
+            description={`向 Feed 追加 ${seedCount} 条模拟卡片 (7个模块均覆盖)`}
+          >
+            <ActionButton
+              onClick={handleSeedCards}
+              loading={seedingCards}
+              loadingText="生成中..."
+              label="生成卡片"
+              icon={<Plus style={{ width: "14px", height: "14px" }} />}
+            />
+          </SettingItem>
+
+          <SettingItem
+            icon={<Trash2 style={{ width: "20px", height: "20px" }} />}
+            title="清空所有卡片"
+            description="删除 Feed 数据库中的全部卡片数据"
+          >
+            <ActionButton
+              onClick={handleClear}
+              loading={clearing}
+              loadingText="清空中..."
+              label="清空"
+              icon={<Trash2 style={{ width: "14px", height: "14px" }} />}
+              variant="danger"
+            />
+          </SettingItem>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -586,6 +771,7 @@ export default function Settings() {
 
   const tabs = [
     { id: "general" as const, label: "通用", icon: <SettingsIcon style={{ width: "20px", height: "20px" }} /> },
+    { id: "developer" as const, label: "开发调试", icon: <Bug style={{ width: "20px", height: "20px" }} /> },
     { id: "about" as const, label: "关于", icon: <Info style={{ width: "20px", height: "20px" }} /> },
   ];
 
@@ -628,6 +814,7 @@ export default function Settings() {
           {/* Content Area */}
           <div style={{ minWidth: 0 }}>
             {activeTab === "general" && <GeneralSection />}
+            {activeTab === "developer" && <DeveloperSection />}
             {activeTab === "about" && <AboutSection />}
           </div>
         </div>

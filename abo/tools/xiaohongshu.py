@@ -761,39 +761,6 @@ class XiaohongshuAPI:
             return match.group(1)
         return url.split("/")[-1] if "/" in url else url
 
-    def _generate_mock_search_results(self, keyword: str, count: int) -> list[XHSNote]:
-        """生成模拟搜索结果（用于开发测试）"""
-        mock_titles = [
-            f"{keyword}入门指南，新手必看！",
-            f"关于{keyword}，没人告诉你的10件事",
-            f"{keyword}一周年复盘，数据大公开",
-            f"实测｜{keyword}最强攻略",
-            f"{keyword}避坑指南，血泪教训",
-            f"从0到1学习{keyword}的经验分享",
-            f"{keyword}行业分析2024",
-            f"如何用{keyword}提升自己？",
-        ]
-
-        notes = []
-        base_time = datetime.utcnow()
-
-        for i in range(min(count, len(mock_titles))):
-            likes = 1000 + (len(mock_titles) - i) * 500 + i * 123
-            notes.append(XHSNote(
-                id=f"mock-{i}-{hash(keyword) % 10000}",
-                title=mock_titles[i],
-                content=f"这是关于{keyword}的第{i+1}篇热门笔记...",
-                author=f"博主_{i}",
-                author_id=f"user_{i}",
-                likes=likes,
-                collects=likes // 3,
-                comments_count=likes // 10,
-                url=f"https://www.xiaohongshu.com/explore/mock{i}",
-                published_at=base_time - timedelta(days=i),
-            ))
-
-        return notes
-
     async def fetch_comments(
         self,
         note_id: str,
@@ -803,55 +770,9 @@ class XiaohongshuAPI:
         """
         获取笔记的评论列表
 
-        Note: 由于小红书反爬严格，这里使用模拟数据或缓存数据
-        实际部署时可接入第三方 API 或浏览器自动化
+        TODO: 接入第三方 API 或浏览器自动化
         """
-        # 模拟评论数据
-        return self._generate_mock_comments(note_id, max_comments, sort_by)
-
-    def _generate_mock_comments(
-        self,
-        note_id: str,
-        count: int,
-        sort_by: str,
-    ) -> list[XHSComment]:
-        """生成模拟评论数据"""
-        mock_contents = [
-            "太实用了！收藏了",
-            "讲得很好，学到了",
-            "收藏起来慢慢看",
-            "确实是这样的",
-            "感谢分享，对我很有帮助",
-            "这个角度很新颖",
-            "能不能出一期进阶版？",
-            "已经关注博主很久了",
-            "这个我也试过，确实有效",
-            "求推荐相关书籍",
-            "写得太好了",
-            "第一次知道这些",
-            "转发给需要的朋友",
-            "说得很有道理",
-            "期待下一期",
-        ]
-
-        import random
-        comments = []
-
-        for i in range(min(count, len(mock_contents))):
-            likes = random.randint(10, 500) + (count - i) * 20
-            comments.append(XHSComment(
-                id=f"{note_id}-comment-{i}",
-                author=f"用户_{i+100}",
-                content=mock_contents[i],
-                likes=likes,
-                is_top=(i == 0),
-            ))
-
-        # 排序
-        if sort_by == "likes":
-            comments.sort(key=lambda x: x.likes, reverse=True)
-
-        return comments
+        return []
 
     async def close(self):
         await self.client.aclose()

@@ -31,8 +31,10 @@ function toPath(points: { x: number; y: number }[]) {
 }
 
 export default function HexagonRadar({ stats, size = 280 }: Props) {
-  const cx = size / 2;
-  const cy = size / 2;
+  const pad = 36;
+  const viewSize = size + pad * 2;
+  const cx = viewSize / 2;
+  const cy = viewSize / 2;
   const maxR = size * 0.35;
   const labelR = maxR + 30;
   const gradeR = maxR + 16;
@@ -48,7 +50,11 @@ export default function HexagonRadar({ stats, size = 280 }: Props) {
   });
 
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+    <svg
+      width="100%"
+      style={{ maxWidth: `${viewSize}px` }}
+      viewBox={`0 0 ${viewSize} ${viewSize}`}
+    >
       {/* Grid rings */}
       {rings.map((pct) => {
         const r = (pct / 100) * maxR;
@@ -58,7 +64,7 @@ export default function HexagonRadar({ stats, size = 280 }: Props) {
             key={pct}
             points={pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ")}
             fill="none"
-            stroke="rgb(51 65 85 / 0.6)"
+            stroke="var(--border-color)"
             strokeWidth="1"
           />
         );
@@ -72,7 +78,7 @@ export default function HexagonRadar({ stats, size = 280 }: Props) {
             key={i}
             x1={cx} y1={cy}
             x2={end.x.toFixed(1)} y2={end.y.toFixed(1)}
-            stroke="rgb(51 65 85 / 0.4)"
+            stroke="var(--border-light)"
             strokeWidth="1"
           />
         );
@@ -109,7 +115,7 @@ export default function HexagonRadar({ stats, size = 280 }: Props) {
             <text
               x={lp.x.toFixed(1)} y={lp.y.toFixed(1)}
               textAnchor="middle" dominantBaseline="middle"
-              fontSize="11" fill="#94A3B8"
+              fontSize="11" fill="var(--text-muted)"
             >
               {label}
             </text>

@@ -3,7 +3,6 @@ import { Inbox, Sparkles, Wifi, WifiOff, Layers } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, FeedCard } from "../../core/store";
 import CardView from "./CardView";
-import FeedSortControl from "../../components/FeedSortControl";
 
 const WS_URL = "ws://127.0.0.1:8765/ws/feed";
 
@@ -15,96 +14,6 @@ async function loadModules(setFeedModules: (modules: any[]) => void) {
   } catch {}
 }
 
-// Mock data generator for UI testing
-function generateMockCards(): FeedCard[] {
-  const now = Date.now();
-  return [
-    {
-      id: "mock-1",
-      title: "Attention Is All You Need: 从论文到工程的十年演进",
-      module_id: "arxiv",
-      category: "paper",
-      created_at: now,
-      summary: "Transformer架构自2017年问世以来，彻底改变了NLP领域。本文回顾了从原始论文到现代大语言模型的技术演进路径...",
-      tags: ["transformer", "nlp", "llm"],
-      score: 0.95,
-      source_url: "",
-      obsidian_path: "",
-      metadata: {},
-      read: false,
-    },
-    {
-      id: "mock-2",
-      title: "OpenAI 发布 GPT-5 技术报告：多模态推理能力大幅提升",
-      module_id: "rss",
-      category: "news",
-      created_at: now - 3600000,
-      summary: "最新发布的GPT-5在数学推理、代码生成和跨模态理解方面取得突破性进展，幻觉率降低40%...",
-      tags: ["openai", "gpt5", "ai-news"],
-      score: 0.88,
-      source_url: "",
-      obsidian_path: "",
-      metadata: {},
-      read: false,
-    },
-    {
-      id: "mock-3",
-      title: "研究灵感：将游戏化机制应用于学术阅读workflow",
-      module_id: "folder_monitor",
-      category: "idea",
-      created_at: now - 7200000,
-      summary: "如果把论文阅读设计成RPG经验值系统，每读一篇积累技能点，能否提升研究动力？关键设计要素包括...",
-      tags: ["gamification", "workflow", "productivity"],
-      score: 0.82,
-      source_url: "",
-      obsidian_path: "",
-      metadata: {},
-      read: false,
-    },
-    {
-      id: "mock-4",
-      title: "本周待办：完成NeurIPS 2024投稿论文的实验部分",
-      module_id: "system",
-      category: "todo",
-      created_at: now - 10800000,
-      summary: "距离截稿还有5天，需要完成：1) 补充对比实验 2) 修订Related Work 3) 检查格式要求...",
-      tags: ["neurips", "deadline", "writing"],
-      score: 1.0,
-      source_url: "",
-      obsidian_path: "",
-      metadata: {},
-      read: false,
-    },
-    {
-      id: "mock-5",
-      title: "DeepSeek-V3: 671B参数MoE模型训练成本仅557万美元",
-      module_id: "arxiv",
-      category: "paper",
-      created_at: now - 14400000,
-      summary: "DeepSeek团队展示了通过极致的工程优化，可以用极低成本训练出媲美GPT-4级别的大模型...",
-      tags: ["deepseek", "moe", "efficiency"],
-      score: 0.91,
-      source_url: "",
-      obsidian_path: "",
-      metadata: {},
-      read: false,
-    },
-    {
-      id: "mock-6",
-      title: "Claude 3.7 Sonnet 编程能力实测：与o3-mini对比",
-      module_id: "rss",
-      category: "news",
-      created_at: now - 18000000,
-      summary: "在SWE-bench和HumanEval基准测试中，Claude 3.7展现了出色的代码理解和生成能力，特别是在复杂重构任务上...",
-      tags: ["claude", "coding", "benchmark"],
-      score: 0.85,
-      source_url: "",
-      obsidian_path: "",
-      metadata: {},
-      read: false,
-    },
-  ];
-}
 
 // Module Filter Component - 模块筛选
 function ModuleFilter({
@@ -209,7 +118,6 @@ export default function Feed() {
     feedCards, setFeedCards, prependCard,
     activeModuleFilter, setActiveModuleFilter,
     setUnreadCounts, feedModules, unreadCounts,
-    feedSortMode,
   } = useStore();
   const [focusIdx, setFocusIdx] = useState(0);
   const [isConnected, setIsConnected] = useState(false);
@@ -229,7 +137,7 @@ export default function Feed() {
   // Initial load
   useEffect(() => {
     loadCards();
-  }, [activeModuleFilter, feedSortMode, setFeedCards, setUnreadCounts]);
+  }, [activeModuleFilter, setFeedCards, setUnreadCounts]);
 
   async function loadCards() {
     // Load modules first so FeedSidebar can display them
@@ -238,15 +146,8 @@ export default function Feed() {
     try {
       let cards: FeedCard[] = [];
 
-      // Choose API based on sort mode
-      if (feedSortMode === "prioritized" || feedSortMode === "mixed") {
-        // Use prioritized endpoint
-        const r = await api.get<{ cards: FeedCard[] }>(
-          `/api/cards/prioritized?limit=50&unread_only=true`
-        );
-        cards = r.cards || [];
-      } else {
-        // Default: time-based sorting
+      // Default: time-based sorting
+      {
         const params = activeModuleFilter
           ? `?module_id=${activeModuleFilter}&unread_only=true`
           : "?unread_only=true";
@@ -254,16 +155,10 @@ export default function Feed() {
         cards = r.cards || [];
       }
 
-      // Use mock data if empty (for UI testing)
-      if (cards.length === 0) {
-        cards = generateMockCards();
-      }
-
       setFeedCards(cards);
       setFocusIdx(0);
     } catch (e) {
-      // Use mock data on error
-      setFeedCards(generateMockCards());
+      setFeedCards([]);
       setFocusIdx(0);
     }
 
@@ -479,7 +374,6 @@ export default function Feed() {
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "clamp(16px, 2vw, 24px)" }}>
           {/* Header Section */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "16px" }}>
-            <FeedSortControl />
             <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
               <div
                 style={{

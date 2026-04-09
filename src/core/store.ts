@@ -176,6 +176,8 @@ interface AboStore {
   // Module configuration
   moduleToConfigure: string | null;
   setModuleToConfigure: (id: string | null) => void;
+  moduleHistoryId: string | null;
+  setModuleHistoryId: (id: string | null) => void;
 
   // ArXiv Tracker State (persisted across tab switches)
   arxivAndPapers: ArxivPaper[];
@@ -260,6 +262,8 @@ export const useStore = create<AboStore>((set) => ({
   // Module configuration
   moduleToConfigure: null,
   setModuleToConfigure: (moduleToConfigure) => set({ moduleToConfigure }),
+  moduleHistoryId: null,
+  setModuleHistoryId: (moduleHistoryId) => set({ moduleHistoryId }),
 
   // ArXiv Tracker State
   arxivAndPapers: [],

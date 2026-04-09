@@ -1,6 +1,7 @@
 interface ProgressIndicatorProps {
   currentStep: number;
   totalSteps: number;
+  onStepClick?: (step: number) => void;
 }
 
 interface Step {
@@ -10,12 +11,12 @@ interface Step {
 
 const steps: Step[] = [
   { id: 0, title: "欢迎" },
-  { id: 1, title: "Vault配置" },
-  { id: 2, title: "快速配置" },
+  { id: 1, title: "存储路径" },
+  { id: 2, title: "模块配置" },
   { id: 3, title: "功能引导" },
 ];
 
-export default function ProgressIndicator({ currentStep, totalSteps }: ProgressIndicatorProps) {
+export default function ProgressIndicator({ currentStep, totalSteps, onStepClick }: ProgressIndicatorProps) {
   const progress = ((currentStep + 1) / totalSteps) * 100;
 
   return (
@@ -61,15 +62,19 @@ export default function ProgressIndicator({ currentStep, totalSteps }: ProgressI
           const isCurrent = index === currentStep;
           const isPending = index > currentStep;
 
+          const canClick = isCompleted && onStepClick;
+
           return (
             <div
               key={step.id}
+              onClick={() => canClick && onStepClick(index)}
               style={{
                 display: "flex",
                 alignItems: "center",
                 gap: "10px",
                 opacity: isPending ? 0.5 : 1,
                 transition: "opacity 0.3s ease",
+                cursor: canClick ? "pointer" : "default",
               }}
             >
               {/* Step Number */}

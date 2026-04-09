@@ -1,11 +1,16 @@
 // src/modules/dashboard/Dashboard.tsx
+// Redesigned dashboard: Today Snapshot → Wellness Trend → Engagement Depth → Research Focus → Activity Trend
 import { useEffect, useState } from "react";
-import { BarChart3, TrendingUp, Calendar, Target, Zap } from "lucide-react";
+import { BarChart3, Sunrise, Activity, BookOpen, Compass, TrendingUp } from "lucide-react";
 import { api } from "../../core/api";
-import { PageContainer, PageHeader, PageContent, Card, Grid } from "../../components/Layout";
+import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
+import TodaySnapshot from "./TodaySnapshot";
+import WellnessTrend from "./WellnessTrend";
+import EngagementDepth from "./EngagementDepth";
+import ResearchFocus from "./ResearchFocus";
 import ActivityChart from "./ActivityChart";
-import ReadingStats from "./ReadingStats";
-import ModulePerformance from "./ModulePerformance";
+
+// ── Types ────────────────────────────────────────────────────────
 
 interface DailyTrendItem {
   date: string;
@@ -15,107 +20,141 @@ interface DailyTrendItem {
 interface OverviewData {
   totalCards: number;
   thisWeek: number;
+  lastWeek: number;
   dailyTrend: DailyTrendItem[];
   byModule: Record<string, number>;
   topTags: [string, number][];
   readingStreak: number;
 }
 
-interface MetricCardProps {
-  title: string;
-  value: number;
-  subtitle?: string;
-  icon: React.ReactNode;
-  color: string;
+interface TodayData {
+  date: string;
+  activityCounts: {
+    total: number;
+    views: number;
+    likes: number;
+    saves: number;
+    dislikes: number;
+    chats: number;
+    module_runs: number;
+  };
+  hourlyHeatmap: { hour: number; count: number }[];
+  todoProgress: { total: number; done: number; rate: number };
+  wellness: { energy: number; san: number; happiness: number };
+  summary: string | null;
+  topInteractions: { id: string; title: string; action: string }[];
 }
 
-function MetricCard({ title, value, subtitle, icon, color }: MetricCardProps) {
+interface WellnessData {
+  daily: { date: string; san: number | null; happiness: number | null; energy: number | null }[];
+  thisWeekAvg: { san: number; happiness: number; energy: number };
+  lastWeekAvg: { san: number; happiness: number; energy: number };
+}
+
+interface EngagementData {
+  overall: {
+    totalViewed: number;
+    liked: number;
+    saved: number;
+    starred: number;
+    disliked: number;
+    skipped: number;
+  };
+  dailyTrend: { date: string; viewed: number; deepRead: number; rate: number }[];
+  weekComparison: {
+    thisWeek: {
+      totalViewed: number;
+      liked: number;
+      saved: number;
+      starred: number;
+      disliked: number;
+      skipped: number;
+    };
+    lastWeek: {
+      totalViewed: number;
+      liked: number;
+      saved: number;
+      starred: number;
+      disliked: number;
+      skipped: number;
+    };
+    cardsDelta: number;
+    engagementRateDelta: number;
+  };
+}
+
+interface KeywordPref {
+  keyword: string;
+  score: number;
+  count: number;
+}
+
+// ── Streak Badge ─────────────────────────────────────────────────
+
+function StreakBadge({ streak, thisWeek, lastWeek }: { streak: number; thisWeek: number; lastWeek: number }) {
+  const weekDelta = thisWeek - lastWeek;
   return (
-    <div
-      style={{
-        background: "var(--bg-card)",
-        backdropFilter: "blur(16px)",
-        borderRadius: "var(--radius-md)",
-        border: "1px solid var(--border-light)",
-        boxShadow: "var(--shadow-soft)",
-        padding: "clamp(16px, 2vw, 24px)",
-        display: "flex",
-        alignItems: "flex-start",
-        gap: "16px",
-        transition: "transform 0.3s ease, box-shadow 0.3s ease",
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.transform = "translateY(-4px)";
-        e.currentTarget.style.boxShadow = "var(--shadow-medium)";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.transform = "translateY(0)";
-        e.currentTarget.style.boxShadow = "var(--shadow-soft)";
-      }}
-    >
-      <div
-        style={{
-          width: "52px",
-          height: "52px",
-          borderRadius: "var(--radius-md)",
-          background: color,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-        }}
-      >
-        {icon}
-      </div>
-      <div style={{ flex: 1 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+      {streak > 0 && (
         <div
           style={{
-            fontSize: "0.8125rem",
-            color: "var(--text-muted)",
-            fontWeight: 500,
-            marginBottom: "4px",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+            padding: "4px 12px",
+            borderRadius: "var(--radius-full)",
+            background: "linear-gradient(135deg, rgba(255, 183, 178, 0.2), rgba(255, 183, 178, 0.1))",
+            border: "1px solid rgba(255, 183, 178, 0.3)",
           }}
         >
-          {title}
+          <span style={{ fontSize: "0.875rem" }}>&#x1F525;</span>
+          <span style={{ fontSize: "0.8125rem", fontWeight: 600, color: "#D48984" }}>
+            {streak} day streak
+          </span>
         </div>
+      )}
+      {lastWeek > 0 && (
         <div
           style={{
-            fontSize: "clamp(1.5rem, 2.5vw, 2rem)",
-            fontWeight: 700,
-            color: "var(--text-main)",
-            fontFamily: "'M PLUS Rounded 1c', sans-serif",
+            fontSize: "0.75rem",
+            color: weekDelta >= 0 ? "#5BA88C" : "#E89B96",
           }}
         >
-          {value.toLocaleString()}
+          This week: {thisWeek} cards ({weekDelta >= 0 ? "+" : ""}{weekDelta})
         </div>
-        {subtitle && (
-          <div
-            style={{
-              fontSize: "0.75rem",
-              color: "var(--text-secondary)",
-              marginTop: "4px",
-            }}
-          >
-            {subtitle}
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 }
 
+// ── Main Dashboard ───────────────────────────────────────────────
+
 export default function Dashboard() {
-  const [data, setData] = useState<OverviewData | null>(null);
+  const [overview, setOverview] = useState<OverviewData | null>(null);
+  const [today, setToday] = useState<TodayData | null>(null);
+  const [wellness, setWellness] = useState<WellnessData | null>(null);
+  const [engagement, setEngagement] = useState<EngagementData | null>(null);
+  const [keywords, setKeywords] = useState<KeywordPref[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    loadData();
+    loadAll();
   }, []);
 
-  async function loadData() {
+  async function loadAll() {
     try {
-      const overview = await api.get<OverviewData>("/api/insights/overview");
-      setData(overview);
+      const [ov, td, wl, eg, kw] = await Promise.all([
+        api.get<OverviewData>("/api/insights/overview"),
+        api.get<TodayData>("/api/insights/today"),
+        api.get<WellnessData>("/api/insights/wellness"),
+        api.get<EngagementData>("/api/insights/engagement"),
+        api.get<{ keywords: KeywordPref[] }>("/api/insights/preferences-evolution"),
+      ]);
+      setOverview(ov);
+      setToday(td);
+      setWellness(wl);
+      setEngagement(eg);
+      setKeywords(kw.keywords);
     } catch (error) {
       console.error("Failed to load dashboard data:", error);
     } finally {
@@ -147,22 +186,23 @@ export default function Dashboard() {
               style={{
                 width: "48px",
                 height: "48px",
-                borderRadius: "var(--radius-md)",
-                background: "var(--bg-hover)",
-                animation: "pulse 2s infinite",
+                borderRadius: "50%",
+                border: "3px solid var(--border-light)",
+                borderTopColor: "var(--color-primary)",
+                animation: "spin 1s linear infinite",
               }}
             />
-            <p style={{ fontSize: "0.9375rem" }}>加载数据中...</p>
+            <p style={{ fontSize: "0.9375rem" }}>Loading insights...</p>
           </div>
         </div>
       </PageContainer>
     );
   }
 
-  if (!data) {
+  if (!overview) {
     return (
       <PageContainer>
-        <PageHeader title="数据洞察" subtitle="个人数据分析与可视化" icon={BarChart3} />
+        <PageHeader title="Data Insights" subtitle="Personal analytics & visualization" icon={BarChart3} />
         <PageContent>
           <div
             style={{
@@ -171,186 +211,78 @@ export default function Dashboard() {
               color: "var(--text-muted)",
             }}
           >
-            <p>无法加载数据，请稍后重试</p>
+            <p>Unable to load data. Please try again later.</p>
           </div>
         </PageContent>
       </PageContainer>
     );
   }
 
-  const activeModules = Object.keys(data.byModule).length;
-  const topTagCount = data.topTags.length;
-
   return (
     <PageContainer>
-      <PageHeader title="数据洞察" subtitle="个人数据分析与可视化" icon={BarChart3} />
-      <PageContent maxWidth="1400px">
-        {/* Metric Cards */}
-        <Grid columns={4} gap="md" style={{ marginBottom: "24px" }}>
-          <MetricCard
-            title="总卡片数"
-            value={data.totalCards}
-            subtitle="累计收集的情报卡片"
-            icon={<TrendingUp style={{ width: "24px", height: "24px", color: "white" }} />}
-            color="linear-gradient(135deg, #BCA4E3, #9B7FD4)"
+      <PageHeader
+        title="Data Insights"
+        subtitle="Your personal research analytics"
+        icon={BarChart3}
+        actions={
+          <StreakBadge
+            streak={overview.readingStreak}
+            thisWeek={overview.thisWeek}
+            lastWeek={overview.lastWeek}
           />
-          <MetricCard
-            title="连续阅读"
-            value={data.readingStreak}
-            subtitle="天连续活跃"
-            icon={<Calendar style={{ width: "24px", height: "24px", color: "white" }} />}
-            color="linear-gradient(135deg, #A8E6CF, #7DD3C0)"
-          />
-          <MetricCard
-            title="活跃模块"
-            value={activeModules}
-            subtitle="个自动化模块"
-            icon={<Target style={{ width: "24px", height: "24px", color: "white" }} />}
-            color="linear-gradient(135deg, #FFE4B5, #F5C88C)"
-          />
-          <MetricCard
-            title="偏好标签"
-            value={topTagCount}
-            subtitle="个常用标签"
-            icon={<Zap style={{ width: "24px", height: "24px", color: "white" }} />}
-            color="linear-gradient(135deg, #FFB7B2, #E89B96)"
-          />
-        </Grid>
+        }
+      />
+      <PageContent maxWidth="1200px">
+        <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+          {/* Section 1: Today's Snapshot */}
+          {today && (
+            <Card
+              title="Today"
+              icon={<Sunrise style={{ width: "18px", height: "18px", color: "#F5C88C" }} />}
+            >
+              <TodaySnapshot data={today} />
+            </Card>
+          )}
 
-        {/* Charts Grid */}
-        <Grid columns={2} gap="lg">
-          {/* Activity Chart */}
+          {/* Section 2 + 3: Wellness + Engagement side by side */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
+            {wellness && (
+              <Card
+                title="Wellness Trends"
+                icon={<Activity style={{ width: "18px", height: "18px", color: "#A8E6CF" }} />}
+              >
+                <WellnessTrend data={wellness} />
+              </Card>
+            )}
+
+            {engagement && (
+              <Card
+                title="Engagement Depth"
+                icon={<BookOpen style={{ width: "18px", height: "18px", color: "#BCA4E3" }} />}
+              >
+                <EngagementDepth data={engagement} />
+              </Card>
+            )}
+          </div>
+
+          {/* Section 4: Research Focus */}
+          {(keywords.length > 0 || Object.keys(overview.byModule).length > 0) && (
+            <Card
+              title="Research Focus"
+              icon={<Compass style={{ width: "18px", height: "18px", color: "#9B7FD4" }} />}
+            >
+              <ResearchFocus keywords={keywords} byModule={overview.byModule} />
+            </Card>
+          )}
+
+          {/* Section 5: 30-day Activity Trend */}
           <Card
-            title="30天活动趋势"
+            title="30-Day Activity"
             icon={<TrendingUp style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
           >
-            <ActivityChart data={data.dailyTrend} />
+            <ActivityChart data={overview.dailyTrend} />
           </Card>
-
-          {/* Reading Stats */}
-          <Card
-            title="阅读统计"
-            icon={<Calendar style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
-          >
-            <ReadingStats
-              streak={data.readingStreak}
-              topTags={data.topTags}
-              thisWeek={data.thisWeek}
-            />
-          </Card>
-
-          {/* Module Performance */}
-          <Card
-            title="模块表现"
-            icon={<Target style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
-          >
-            <ModulePerformance byModule={data.byModule} />
-          </Card>
-
-          {/* Weekly Summary */}
-          <Card
-            title="本周概览"
-            icon={<Zap style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
-          >
-            <div style={{ padding: "20px 0" }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: "16px",
-                  marginBottom: "24px",
-                }}
-              >
-                <div
-                  style={{
-                    width: "80px",
-                    height: "80px",
-                    borderRadius: "50%",
-                    background: "linear-gradient(135deg, rgba(168, 230, 207, 0.3), rgba(168, 230, 207, 0.1))",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    border: "2px solid rgba(168, 230, 207, 0.5)",
-                  }}
-                >
-                  <span
-                    style={{
-                      fontSize: "1.75rem",
-                      fontWeight: 700,
-                      color: "#5BA88C",
-                    }}
-                  >
-                    {data.thisWeek}
-                  </span>
-                </div>
-                <div>
-                  <div
-                    style={{
-                      fontSize: "1rem",
-                      fontWeight: 600,
-                      color: "var(--text-main)",
-                    }}
-                  >
-                    本周新增卡片
-                  </div>
-                  <div
-                    style={{
-                      fontSize: "0.8125rem",
-                      color: "var(--text-muted)",
-                      marginTop: "4px",
-                    }}
-                  >
-                    平均每天 {(data.thisWeek / 7).toFixed(1)} 张
-                  </div>
-                </div>
-              </div>
-
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(3, 1fr)",
-                  gap: "12px",
-                }}
-              >
-                {[
-                  { label: "总卡片", value: data.totalCards },
-                  { label: "模块数", value: activeModules },
-                  { label: "标签数", value: topTagCount },
-                ].map((item) => (
-                  <div
-                    key={item.label}
-                    style={{
-                      textAlign: "center",
-                      padding: "12px",
-                      background: "var(--bg-hover)",
-                      borderRadius: "var(--radius-sm)",
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontSize: "1.25rem",
-                        fontWeight: 700,
-                        color: "var(--text-main)",
-                      }}
-                    >
-                      {item.value}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: "0.75rem",
-                        color: "var(--text-muted)",
-                        marginTop: "2px",
-                      }}
-                    >
-                      {item.label}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </Card>
-        </Grid>
+        </div>
       </PageContent>
     </PageContainer>
   );

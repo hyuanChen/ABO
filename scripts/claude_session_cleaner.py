@@ -255,7 +255,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .msg-detail { display: none; margin-top: 8px; }
   .msg-detail.open { display: block; }
   .msg-detail-item { padding: 6px 10px; margin: 4px 0; background: #0d1117; border-left: 2px solid #30363d;
-    border-radius: 4px; font-size: 12px; color: #c9d1d9; white-space: pre-wrap; word-break: break-all; line-height: 1.5; }
+    border-radius: 4px; font-size: 12px; color: #c9d1d9; white-space: pre-wrap; word-break: break-all; line-height: 1.5;
+    user-select: text; cursor: text; }
   .msg-detail-item .msg-time { color: #484f58; font-size: 11px; margin-bottom: 2px; }
   .msg-detail-loading { color: #8b949e; font-size: 12px; padding: 6px 0; }
   .project-text { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8b949e; font-size: 12px; }
