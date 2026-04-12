@@ -1,4 +1,4 @@
-export type CliType = 'claude' | 'gemini' | 'openclaw' | 'custom';
+export type CliType = 'codex' | 'claude' | 'gemini' | 'openclaw' | 'custom';
 
 export interface CliConfig {
   id: CliType;

@@ -10,6 +10,7 @@ import uuid
 
 from ..cli.detector import detector
 from ..cli.runner import RunnerFactory, StreamEvent
+from ..config import get_ai_provider
 from ..store.conversations import conversation_store
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ chat_router = router  # 导出别名
 # === 请求/响应模型 ===
 
 class CreateConversationRequest(BaseModel):
-    cli_type: str
+    cli_type: Optional[str] = None
     title: Optional[str] = None
     workspace: Optional[str] = None
 
@@ -159,13 +160,14 @@ async def get_cli_info(cli_id: str):
 @router.post("/conversations", response_model=ConversationResponse)
 async def create_conversation(req: CreateConversationRequest):
     """创建新对话"""
-    cli_info = detector.get_cli_info(req.cli_type)
+    cli_type = req.cli_type or get_ai_provider()
+    cli_info = detector.get_cli_info(cli_type)
     if not cli_info or not cli_info.is_available:
-        raise HTTPException(status_code=400, detail=f"CLI {req.cli_type} not available")
+        raise HTTPException(status_code=400, detail=f"CLI {cli_type} not available")
 
     session_id = str(uuid.uuid4())
     conv_id = conversation_store.create_conversation(
-        cli_type=req.cli_type,
+        cli_type=cli_type,
         session_id=session_id,
         title=req.title or f"New {cli_info.name} chat",
         workspace=req.workspace or ""

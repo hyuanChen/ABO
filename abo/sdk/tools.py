@@ -4,11 +4,14 @@ ABO SDK 工具函数。
 """
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 
 import httpx
 import feedparser
+
+from ..config import get_ai_provider
 
 
 def _build_pref_block(prefs: dict) -> str:
@@ -25,26 +28,66 @@ def _build_pref_block(prefs: dict) -> str:
     )
 
 
-async def claude(prompt: str, prefs: dict | None = None, timeout: int = 30) -> str:
-    """调用本机 claude CLI，返回完整文本（批处理模式）"""
+def resolve_ai_provider(provider: str | None = None) -> str:
+    """Resolve provider with config fallback."""
+    resolved = (provider or get_ai_provider()).strip().lower()
+    if resolved not in {"codex", "claude"}:
+        return "codex"
+    return resolved
+
+
+def build_ai_command(
+    prompt: str,
+    prefs: dict | None = None,
+    provider: str | None = None,
+) -> tuple[str, list[str]]:
+    """Build the CLI command for the configured AI provider."""
     full = f"{_build_pref_block(prefs)}\n\n{prompt}" if prefs else prompt
+    resolved = resolve_ai_provider(provider)
+
+    if resolved == "codex":
+        return resolved, [
+            "codex",
+            "exec",
+            "--full-auto",
+            "--skip-git-repo-check",
+            "--color",
+            "never",
+            full,
+        ]
+
+    return resolved, ["claude", "--print", full]
+
+
+async def claude(
+    prompt: str,
+    prefs: dict | None = None,
+    timeout: int = 30,
+    provider: str | None = None,
+) -> str:
+    """调用当前配置的 AI CLI，保留 claude 名称以兼容旧调用方。"""
+    resolved, command = build_ai_command(prompt, prefs=prefs, provider=provider)
     proc = await asyncio.create_subprocess_exec(
-        "claude", "--print", full,
+        *command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=os.getcwd(),
     )
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode not in (0, None):
+            detail = stderr.decode().strip() or stdout.decode().strip() or f"{resolved} exited with {proc.returncode}"
+            raise Exception(f"{resolved} CLI 调用失败: {detail}")
         return stdout.decode().strip()
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        raise Exception(f"Claude CLI 调用超时（{timeout}秒）")
+        raise Exception(f"{resolved} CLI 调用超时（{timeout}秒）")
 
 
-async def claude_json(prompt: str, prefs: dict | None = None) -> dict:
-    """调用 claude 并解析 JSON（自动剥离 markdown code fence）"""
-    raw = await claude(prompt, prefs=prefs)
+async def claude_json(prompt: str, prefs: dict | None = None, provider: str | None = None) -> dict:
+    """调用当前配置的 AI CLI 并解析 JSON（自动剥离 markdown code fence）"""
+    raw = await claude(prompt, prefs=prefs, provider=provider)
     match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
     text = match.group(1) if match else raw
     try:

@@ -25,7 +25,6 @@ Cookie 格式示例:
 简化格式（仅 web_session 值）:
 040069b05e586b57b240d72e833b4b9cd16a46
 """
-import asyncio
 import json
 import re
 from datetime import datetime, timedelta
@@ -34,6 +33,7 @@ from pathlib import Path
 import httpx
 
 from abo.sdk import Module, Item, Card, claude_json
+from abo.tools.xiaohongshu import XiaohongshuAPI
 
 
 class XiaohongshuTracker(Module):
@@ -105,6 +105,26 @@ class XiaohongshuTracker(Module):
         # Return as-is (assume it's already in cookie header format)
         return cookie_value
 
+    def _load_config(self) -> dict:
+        prefs_path = Path.home() / ".abo" / "preferences.json"
+        if not prefs_path.exists():
+            return {}
+        try:
+            data = json.loads(prefs_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+        return data.get("modules", {}).get(self.id, {})
+
+    def _build_cookie_from_config(self, config: dict) -> str:
+        web_session = config.get("web_session", "").strip()
+        id_token = config.get("id_token", "").strip()
+        if web_session:
+            parts = [f"web_session={web_session}"]
+            if id_token:
+                parts.append(f"id_token={id_token}")
+            return "; ".join(parts)
+        return self._parse_cookie(config.get("cookie", ""))
+
     async def fetch(
         self,
         user_ids: list[str] = None,
@@ -119,55 +139,112 @@ class XiaohongshuTracker(Module):
             keywords: List of keywords to search for
             max_results: Maximum number of results
         """
-        items = []
-
-        # For now, use a mock/sample approach
-        # In production, this would integrate with:
-        # 1. RSSHub: /xiaohongshu/user/{user_id}
-        # 2. Searx search results
-        # 3. Manual note list from user
-
-        prefs_path = Path.home() / ".abo" / "preferences.json"
-        config_keywords = []
-        config_users = []
-
-        # Build cookie from web_session and id_token (new format) or legacy cookie field
-        config_cookie = ""
-        if prefs_path.exists():
-            data = json.loads(prefs_path.read_text())
-            xhs_config = data.get("modules", {}).get("xiaohongshu-tracker", {})
-            config_keywords = xhs_config.get("keywords", [])
-            config_users = xhs_config.get("user_ids", [])
-
-            # New format: web_session and id_token as separate fields
-            web_session = xhs_config.get("web_session", "")
-            id_token = xhs_config.get("id_token", "")
-            if web_session:
-                config_cookie = f"web_session={web_session}"
-                if id_token:
-                    config_cookie += f"; id_token={id_token}"
-            else:
-                # Legacy format: single cookie field
-                raw_cookie = xhs_config.get("cookie", "")
-                config_cookie = self._parse_cookie(raw_cookie)
+        config = self._load_config()
+        max_results = max(1, int(config.get("max_results", max_results) or max_results))
+        config_keywords = config.get("keywords", [])
+        config_users = config.get("user_ids", [])
+        creator_push_enabled = bool(config.get("creator_push_enabled", True))
+        disabled_creator_ids = set(str(item) for item in config.get("disabled_creator_ids", []))
+        creator_groups = config.get("creator_groups", [])
+        creator_profiles = config.get("creator_profiles", {})
+        cookie = self._build_cookie_from_config(config)
 
         keywords = keywords or config_keywords or ["科研", "读博", "学术"]
         user_ids = user_ids or config_users
+        if not creator_push_enabled:
+            user_ids = []
+        if disabled_creator_ids:
+            user_ids = [user_id for user_id in user_ids if str(user_id) not in disabled_creator_ids]
+        if creator_groups:
+            filtered_user_ids = []
+            for user_id in user_ids:
+                profile = creator_profiles.get(user_id, {})
+                smart_groups = profile.get("smart_groups", [])
+                if any(group in smart_groups for group in creator_groups):
+                    filtered_user_ids.append(user_id)
+            user_ids = filtered_user_ids
 
-        # If user IDs are provided, try to fetch their notes
+        enable_keyword_search = config.get("enable_keyword_search", True)
+        keyword_min_likes = int(config.get("keyword_min_likes", 500) or 0)
+        keyword_per_keyword_limit = int(config.get("keyword_search_limit", 10) or 10)
+        follow_feed = bool(config.get("follow_feed", False))
+        fetch_follow_limit = int(config.get("fetch_follow_limit", 20) or 20)
+
+        items: list[Item] = []
+        seen_ids: set[str] = set()
+
+        async def append_unique(new_items: list[Item]) -> None:
+            for item in new_items:
+                note_id = str(item.raw.get("note_id") or item.id)
+                if note_id in seen_ids:
+                    continue
+                seen_ids.add(note_id)
+                items.append(item)
+                if len(items) >= max_results:
+                    return
+
         if user_ids:
-            for user_id in user_ids[:3]:  # Limit to 3 users
-                user_items = await self._fetch_user_notes(user_id, config_cookie, max_results // len(user_ids))
-                items.extend(user_items)
+            per_user_limit = max(1, min(10, max_results // max(len(user_ids), 1)))
+            for user_id in user_ids[:5]:
+                await append_unique(await self._fetch_user_notes(user_id, cookie, per_user_limit))
+                if len(items) >= max_results:
+                    return items[:max_results]
 
-        # If keywords are provided, search for matching notes
-        if keywords and len(items) < max_results:
-            keyword_items = await self._search_by_keywords(
-                keywords, max_results - len(items)
+        if follow_feed and cookie and len(items) < max_results:
+            await append_unique(
+                await self._fetch_following_notes(
+                    cookie=cookie,
+                    keywords=keywords,
+                    limit=min(fetch_follow_limit, max_results - len(items)),
+                )
             )
-            items.extend(keyword_items)
+            if len(items) >= max_results:
+                return items[:max_results]
+
+        if enable_keyword_search and keywords and cookie and len(items) < max_results:
+            await append_unique(
+                await self._search_by_keywords(
+                    keywords=keywords,
+                    cookie=cookie,
+                    limit=max_results - len(items),
+                    per_keyword_limit=keyword_per_keyword_limit,
+                    min_likes=keyword_min_likes,
+                )
+            )
 
         return items[:max_results]
+
+    def _note_to_item(
+        self,
+        note: object,
+        *,
+        source: str,
+        matched_keywords: list[str] | None = None,
+        user_id: str = "",
+    ) -> Item:
+        published_at = getattr(note, "published_at", None)
+        published = published_at.isoformat() if published_at else ""
+        note_id = getattr(note, "id", "") or self._extract_note_id(getattr(note, "url", "")) or source
+        return Item(
+            id=f"xhs-{source}-{note_id}",
+            raw={
+                "note_id": note_id,
+                "title": getattr(note, "title", "") or "无标题",
+                "content": getattr(note, "content", "") or "",
+                "url": getattr(note, "url", ""),
+                "user_id": user_id or getattr(note, "author_id", ""),
+                "author": getattr(note, "author", ""),
+                "published": published,
+                "platform": "xiaohongshu",
+                "likes": getattr(note, "likes", 0),
+                "collects": getattr(note, "collects", 0),
+                "comments_count": getattr(note, "comments_count", 0),
+                "tags": getattr(note, "tags", []),
+                "note_type": getattr(note, "note_type", "normal"),
+                "crawl_source": source,
+                "matched_keywords": matched_keywords or list(getattr(note, "matched_keywords", []) or []),
+            },
+        )
 
     async def _fetch_user_notes(self, user_id: str, cookie: str, limit: int) -> list[Item]:
         items = []
@@ -204,9 +281,13 @@ class XiaohongshuTracker(Module):
                                 "title": title,
                                 "content": desc,
                                 "url": link,
+                                "note_id": note_id,
                                 "user_id": clean_id,
+                                "author": clean_id,
                                 "published": pub_date,
                                 "platform": "xiaohongshu",
+                                "crawl_source": "user_id",
+                                "matched_keywords": [],
                             },
                         )
                     )
@@ -216,10 +297,67 @@ class XiaohongshuTracker(Module):
             print(f"[xiaohongshu] Failed to fetch user {clean_id}: {e}")
         return items
 
-    async def _search_by_keywords(self, keywords: list[str], limit: int) -> list[Item]:
-        """Search notes by keywords using alternative methods."""
-        # TODO: implement real keyword search (e.g. via RSSHub or Playwright)
-        return []
+    async def _fetch_following_notes(self, cookie: str, keywords: list[str], limit: int) -> list[Item]:
+        api = XiaohongshuAPI()
+        try:
+            notes = await api.get_following_feed_with_cookie(
+                cookie=cookie,
+                keywords=keywords or [""],
+                max_notes=max(limit, 1),
+            )
+            return [
+                self._note_to_item(
+                    note,
+                    source="following",
+                    matched_keywords=list(getattr(note, "matched_keywords", []) or []),
+                )
+                for note in notes[:limit]
+            ]
+        except Exception as e:
+            print(f"[xiaohongshu] Failed to fetch following feed: {e}")
+            return []
+        finally:
+            await api.close()
+
+    async def _search_by_keywords(
+        self,
+        keywords: list[str],
+        cookie: str,
+        limit: int,
+        per_keyword_limit: int,
+        min_likes: int,
+    ) -> list[Item]:
+        """Search notes by keywords using the verified Playwright-based tool flow."""
+        api = XiaohongshuAPI()
+        items: list[Item] = []
+        seen_ids: set[str] = set()
+        try:
+            for keyword in keywords:
+                if len(items) >= limit:
+                    break
+                try:
+                    notes = await api.search_by_keyword(
+                        keyword=keyword,
+                        sort_by="likes",
+                        max_results=min(per_keyword_limit, limit),
+                        min_likes=min_likes,
+                        cookie=cookie,
+                    )
+                except Exception as e:
+                    print(f"[xiaohongshu] Failed to search keyword '{keyword}': {e}")
+                    continue
+
+                for note in notes:
+                    note_id = getattr(note, "id", "") or self._extract_note_id(getattr(note, "url", ""))
+                    if note_id in seen_ids:
+                        continue
+                    seen_ids.add(note_id)
+                    items.append(self._note_to_item(note, source=f"keyword:{keyword}", matched_keywords=[keyword]))
+                    if len(items) >= limit:
+                        break
+            return items[:limit]
+        finally:
+            await api.close()
 
     def _extract_user_id(self, user_input: str) -> str:
         """Extract user ID from URL or return as-is."""
@@ -248,11 +386,14 @@ class XiaohongshuTracker(Module):
             # Parse date
             published_str = p.get("published", "")
             try:
-                # Try to parse RSS date format
-                pub_date = datetime.strptime(published_str, "%a, %d %b %Y %H:%M:%S %Z")
-                if pub_date < cutoff:
-                    continue
-            except:
+                if published_str:
+                    try:
+                        pub_date = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
+                    except ValueError:
+                        pub_date = datetime.strptime(published_str, "%a, %d %b %Y %H:%M:%S %Z")
+                    if pub_date.replace(tzinfo=None) < cutoff:
+                        continue
+            except Exception:
                 pass  # Include if date parsing fails
 
             # Skip if no content
@@ -285,13 +426,19 @@ class XiaohongshuTracker(Module):
                     score=min(result.get("score", 5), 10) / 10,
                     tags=result.get("tags", []) + ["小红书", result.get("category", "笔记")],
                     source_url=p["url"],
-                    obsidian_path=f"SocialMedia/Xiaohongshu/{safe_title}.md",
+                    obsidian_path=f"xhs/{safe_title}.md",
                     metadata={
                         "abo-type": "xiaohongshu-note",
                         "platform": "xiaohongshu",
                         "user_id": p.get("user_id"),
+                        "author": p.get("author"),
                         "published": p.get("published"),
                         "category": result.get("category", "笔记"),
+                        "likes": p.get("likes", 0),
+                        "collects": p.get("collects", 0),
+                        "comments_count": p.get("comments_count", 0),
+                        "crawl_source": p.get("crawl_source", ""),
+                        "matched_keywords": p.get("matched_keywords", []),
                         "content": content[:2000],  # Truncate for metadata
                     },
                 )

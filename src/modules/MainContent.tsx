@@ -11,12 +11,18 @@ import BubbleVault from "./vault/BubbleVault";
 import { ModuleManagementPanel } from "./modules/ModuleManagementPanel";
 import { XiaohongshuTool } from "./xiaohongshu/XiaohongshuTool";
 import { BilibiliTool } from "./bilibili/BilibiliTool";
+import { BilibiliFavoritesPage } from "./bilibili/BilibiliFavoritesPage";
 import { ArxivAPITool } from "./arxiv/ArxivAPITool";
 import Dashboard from "./dashboard/Dashboard";
 import Wiki from "./wiki/Wiki";
 
 export default function MainContent() {
   const activeTab = useStore((s) => s.activeTab);
+
+  const persistentTabStyle = (visible: boolean): React.CSSProperties => ({
+    display: visible ? "block" : "none",
+    height: "100%",
+  });
 
   // Overview tab with feed
   if (activeTab === "overview") {
@@ -56,8 +62,11 @@ export default function MainContent() {
       {activeTab === "health"     && <HealthDashboard />}
       {activeTab === "settings"   && <Settings />}
       {activeTab === "modules"    && <ModuleManagementPanel />}
-      {activeTab === "xiaohongshu" && <XiaohongshuTool />}
+      <div style={persistentTabStyle(activeTab === "xiaohongshu")}>
+        <XiaohongshuTool />
+      </div>
       {activeTab === "bilibili" && <BilibiliTool />}
+      {activeTab === "bilibili-favorites" && <BilibiliFavoritesPage />}
       {activeTab === "arxiv-api" && <ArxivAPITool />}
       {activeTab === "wiki"      && <Wiki />}
       {activeTab === "dashboard" && <Dashboard />}

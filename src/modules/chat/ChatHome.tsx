@@ -7,6 +7,7 @@ import { Sparkles, Send, Bot, Loader2, Zap, BookOpen, Lightbulb, Target, Clock, 
 import { PageContainer, PageContent, Card, LoadingState, EmptyState } from '../../components/Layout';
 import { detectClis } from '../../api/chat';
 import type { CliConfig } from '../../types/chat';
+import { useStore } from '../../core/store';
 
 // 快捷指令配置
 const QUICK_ACTIONS = [
@@ -24,6 +25,8 @@ interface ChatHomeProps {
 }
 
 export function ChatHome({ onStartChat, isLoading: externalLoading = false }: ChatHomeProps) {
+  const aiProvider = useStore((state) => state.aiProvider);
+
   // 后端检测状态
   const [isDetecting, setIsDetecting] = useState(true);
   const [availableClis, setAvailableClis] = useState<CliConfig[]>([]);
@@ -44,8 +47,11 @@ export function ChatHome({ onStartChat, isLoading: externalLoading = false }: Ch
       .then(clis => {
         const available = clis.filter(c => c.isAvailable);
         setAvailableClis(available);
-        if (available.length > 0 && !selectedCli) {
-          setSelectedCli(available[0]);
+        if (available.length > 0) {
+          const preferredCli = available.find((cli) => cli.id === aiProvider) ?? available[0];
+          if (!selectedCli || !available.some((cli) => cli.id === selectedCli.id) || selectedCli.id !== preferredCli.id) {
+            setSelectedCli(preferredCli);
+          }
         }
         setIsDetecting(false);
       })
@@ -54,7 +60,7 @@ export function ChatHome({ onStartChat, isLoading: externalLoading = false }: Ch
         setError("无法连接到后端服务");
         setIsDetecting(false);
       });
-  }, []);
+  }, [aiProvider, selectedCli]);
 
   const currentCli = selectedCli || availableClis[0];
   const isLoading = isDetecting || externalLoading;
@@ -123,7 +129,7 @@ export function ChatHome({ onStartChat, isLoading: externalLoading = false }: Ch
           <EmptyState
             icon={Bot}
             title="暂无可用的 AI 助手"
-            description="请安装 Claude Code 或其他支持的 CLI 工具"
+            description="请安装 Codex CLI、Claude Code 或其他支持的 CLI 工具"
           />
         </PageContent>
       </PageContainer>
@@ -254,7 +260,7 @@ export function ChatHome({ onStartChat, isLoading: externalLoading = false }: Ch
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               onInput={handleInput}
-              placeholder="Claude Code, 发消息、上传文件、打开文件夹或创建定时任务..."
+              placeholder={`${currentCli?.name || 'Codex'}, 发消息、上传文件、打开文件夹或创建定时任务...`}
               disabled={externalLoading}
               rows={1}
               style={{

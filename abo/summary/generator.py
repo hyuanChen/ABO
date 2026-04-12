@@ -4,28 +4,29 @@ from typing import Optional, List, Dict, Any
 import subprocess
 import json
 
+from ..sdk.tools import build_ai_command
+
 
 class DailySummaryGenerator:
     def __init__(self, activity_tracker):
         self.tracker = activity_tracker
 
     def generate_summary(self, date: str) -> Optional[str]:
-        """Generate daily summary using Claude CLI."""
+        """Generate daily summary using the configured AI CLI."""
         timeline = self.tracker.get_timeline(date)
 
         if not timeline.activities:
             print(f"[summary] No activities for {date}, skipping summary generation")
             return None
 
-        # Build prompt for Claude
+        # Build prompt for the configured AI assistant
         prompt = self._build_summary_prompt(timeline)
+        provider, command = build_ai_command(prompt)
 
         try:
-            print(f"[summary] Calling Claude CLI for {date} summary...")
-            # Call Claude CLI
+            print(f"[summary] Calling {provider} CLI for {date} summary...")
             result = subprocess.run(
-                ["claude", "--print"],
-                input=prompt,
+                command,
                 capture_output=True,
                 text=True,
                 timeout=120  # 2 minute timeout
@@ -38,11 +39,11 @@ class DailySummaryGenerator:
                 print(f"[summary] Generated summary ({len(summary)} chars)")
                 return summary
             else:
-                print(f"[summary] Claude error: {result.stderr}")
+                print(f"[summary] {provider} error: {result.stderr}")
                 return None
 
         except subprocess.TimeoutExpired:
-            print("[summary] Claude CLI timeout")
+            print(f"[summary] {provider} CLI timeout")
             return None
         except Exception as e:
             print(f"[summary] Error generating summary: {e}")

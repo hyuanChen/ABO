@@ -31,6 +31,14 @@ class CliDetector:
     """CLI 工具检测器 - 自动发现和验证本地 CLI"""
 
     REGISTRY: Dict[str, CliInfo] = {
+        "codex": CliInfo(
+            id="codex",
+            name="OpenAI Codex",
+            command="codex",
+            check_cmd="codex --version",
+            acp_args=["exec", "--full-auto", "--skip-git-repo-check", "--color", "never"],
+            protocol="raw"
+        ),
         "claude": CliInfo(
             id="claude",
             name="Claude Code",
@@ -54,14 +62,6 @@ class CliDetector:
             check_cmd="openclaw --version",
             acp_args=[],
             protocol="websocket"
-        ),
-        "codex": CliInfo(
-            id="codex",
-            name="OpenAI Codex",
-            command="codex",
-            check_cmd="codex --version",
-            acp_args=[],
-            protocol="acp"
         ),
     }
 
@@ -140,7 +140,7 @@ class CliDetector:
             for line in result.stdout.strip().split('\n'):
                 if '=' in line:
                     key, value = line.split('=', 1)
-                    if key in ['PATH', 'HOME', 'ANTHROPIC_API_KEY']:
+                    if key in ['PATH', 'HOME', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY']:
                         env[key] = value
         except Exception:
             pass

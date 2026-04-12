@@ -14,6 +14,7 @@ def load() -> dict:
     defaults = {
         "vault_path": "",
         "literature_path": "",
+        "ai_provider": "codex",
         "version": "1.0.0",
         "onboarding_completed": False,
         "onboarding_step": 0,
@@ -53,6 +54,14 @@ def get_literature_path() -> Path | None:
     """Return literature path, or None if not configured."""
     path = load().get("literature_path", "").strip()
     return Path(path) if path else None
+
+
+def get_ai_provider() -> str:
+    """Return the configured AI provider. Defaults to Codex."""
+    provider = str(load().get("ai_provider", "codex")).strip().lower()
+    if provider not in {"codex", "claude"}:
+        return "codex"
+    return provider
 
 
 def get_abo_dir() -> Path:

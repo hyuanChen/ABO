@@ -1,4 +1,4 @@
-"""Claude CLI bridge — Universal CLI Runner with multi-protocol support."""
+"""Legacy AI bridge helpers used by older modules."""
 import asyncio
 import json
 import os
@@ -6,9 +6,11 @@ import uuid
 from typing import Callable, Optional, Awaitable
 from asyncio.subprocess import PIPE
 
+from ..sdk.tools import build_ai_command
+
 
 class CliRunner:
-    """通用 CLI 运行器 - 支持 Claude/Gemini 等多 CLI"""
+    """兼容旧调用方的通用 CLI 运行器。"""
 
     CLI_CONFIGS = {
         'claude': {
@@ -80,15 +82,11 @@ class CliRunner:
                 await self.process.wait()
 
     async def _stream_raw(self, message: str, on_chunk: Callable[[dict], Awaitable[None]]):
+        provider, command = build_ai_command(message, provider=self.cli_type)
         self.process = await asyncio.create_subprocess_exec(
-            *self.config['command'],
-            stdin=PIPE, stdout=PIPE, stderr=PIPE,
+            *command,
+            stdout=PIPE, stderr=PIPE,
         )
-        if self.process.stdin is None:
-            raise RuntimeError("Process stdin is not available")
-        self.process.stdin.write(message.encode() + b'\n')
-        await self.process.stdin.drain()
-        self.process.stdin.close()
 
         if self.process.stdout is None:
             raise RuntimeError("Process stdout is not available")
@@ -130,7 +128,8 @@ class CliRunner:
 
 
 async def stream_call(prompt: str, context: str, websocket):
-    runner = CliRunner('claude', str(uuid.uuid4()))
+    provider, _ = build_ai_command(prompt)
+    runner = CliRunner(provider, str(uuid.uuid4()))
     full_prompt = f"{context}\n\n---\n\n{prompt}" if context else prompt
     async def on_chunk(event: dict):
         await websocket.send_text(json.dumps(event))
@@ -141,7 +140,8 @@ async def stream_call(prompt: str, context: str, websocket):
 
 
 async def batch_call(prompt: str, context: str = "") -> str:
-    runner = CliRunner('claude', str(uuid.uuid4()))
+    provider, _ = build_ai_command(prompt)
+    runner = CliRunner(provider, str(uuid.uuid4()))
     full_prompt = f"{context}\n\n---\n\n{prompt}" if context else prompt
     chunks = []
     async def on_chunk(event: dict):

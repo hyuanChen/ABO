@@ -17,6 +17,7 @@ export type ActiveTab =
   | "modules"
   | "xiaohongshu"
   | "bilibili"
+  | "bilibili-favorites"
   | "arxiv-api"
   | "dashboard";
 
@@ -122,6 +123,8 @@ export interface ArxivPaper {
   metadata: Record<string, unknown>;
 }
 
+export type AiProvider = "codex" | "claude";
+
 // ── Store ─────────────────────────────────────────────────────────
 
 interface AboStore {
@@ -148,10 +151,12 @@ interface AboStore {
   profileEnergy: number;
   profileSan: number;
   profileMotto: string;
+  profileCodename: string;
   profileStats: ProfileStats | null;
   setProfileEnergy: (e: number) => void;
   setProfileSan: (s: number) => void;
   setProfileMotto: (m: string) => void;
+  setProfileCodename: (c: string) => void;
   setProfileStats: (s: ProfileStats) => void;
 
   // Phase 2-3: Gamification
@@ -199,10 +204,30 @@ interface AboStore {
   appendArxivAndPaper: (paper: ArxivPaper) => void;
   appendArxivOrPaper: (paper: ArxivPaper) => void;
 
+  // Showcase Mode
+  showcaseMode: boolean;
+  setShowcaseMode: (mode: boolean) => void;
+
+  // Avatar hover target: false = hover shows MBTIAvatar, true = hover shows PixelAvatar (san/energy)
+  pixelAvatarOnHover: boolean;
+  setPixelAvatarOnHover: (v: boolean) => void;
+
+  // Whether hover switches the avatar style at all (off → always show SBTI)
+  sbtiHoverEnabled: boolean;
+  setSbtiHoverEnabled: (v: boolean) => void;
+
+  // Manual SBTI type override (null → derive from codename hash)
+  sbtiOverride: string | null;
+  setSbtiOverride: (v: string | null) => void;
+
   // Toast
   toasts: Toast[];
   addToast: (t: Omit<Toast, "id">) => void;
   removeToast: (id: string) => void;
+
+  // AI provider preference
+  aiProvider: AiProvider;
+  setAiProvider: (provider: AiProvider) => void;
 }
 
 export const useStore = create<AboStore>((set) => ({
@@ -225,10 +250,12 @@ export const useStore = create<AboStore>((set) => ({
   profileEnergy: 70,
   profileSan: 0,
   profileMotto: "",
+  profileCodename: "",
   profileStats: null,
   setProfileEnergy: (profileEnergy) => set({ profileEnergy }),
   setProfileSan: (profileSan) => set({ profileSan }),
   setProfileMotto: (profileMotto) => set({ profileMotto }),
+  setProfileCodename: (profileCodename) => set({ profileCodename }),
   setProfileStats: (profileStats) => set({ profileStats }),
 
   // Phase 2-3: Gamification
@@ -286,6 +313,39 @@ export const useStore = create<AboStore>((set) => ({
     set((s) => ({ arxivAndPapers: [...s.arxivAndPapers, paper] })),
   appendArxivOrPaper: (paper) =>
     set((s) => ({ arxivOrPapers: [...s.arxivOrPapers, paper] })),
+
+  // Showcase Mode (persisted to localStorage)
+  showcaseMode: localStorage.getItem("abo-showcase") === "true",
+  setShowcaseMode: (mode) => {
+    localStorage.setItem("abo-showcase", String(mode));
+    document.documentElement.classList.toggle("showcase", mode);
+    set({ showcaseMode: mode });
+  },
+
+  pixelAvatarOnHover: localStorage.getItem("abo-pixel-avatar-hover") === "true",
+  setPixelAvatarOnHover: (v) => {
+    localStorage.setItem("abo-pixel-avatar-hover", String(v));
+    set({ pixelAvatarOnHover: v });
+  },
+
+  sbtiHoverEnabled: localStorage.getItem("abo-sbti-hover-enabled") === "true",
+  setSbtiHoverEnabled: (v) => {
+    localStorage.setItem("abo-sbti-hover-enabled", String(v));
+    set({ sbtiHoverEnabled: v });
+  },
+
+  sbtiOverride: localStorage.getItem("abo-sbti-override"),
+  setSbtiOverride: (v) => {
+    if (v === null) localStorage.removeItem("abo-sbti-override");
+    else localStorage.setItem("abo-sbti-override", v);
+    set({ sbtiOverride: v });
+  },
+
+  aiProvider: (localStorage.getItem("abo-ai-provider") as AiProvider) || "codex",
+  setAiProvider: (aiProvider) => {
+    localStorage.setItem("abo-ai-provider", aiProvider);
+    set({ aiProvider });
+  },
 
   toasts: [],
   addToast: (t) =>

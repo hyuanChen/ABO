@@ -119,7 +119,8 @@ class TestCliDetector:
         codex = detector.REGISTRY["codex"]
         assert codex.id == "codex"
         assert codex.name == "OpenAI Codex"
-        assert codex.protocol == "acp"
+        assert codex.protocol == "raw"
+        assert codex.acp_args[:2] == ["exec", "--full-auto"]
 
 
 class TestCliDetectorDetection:

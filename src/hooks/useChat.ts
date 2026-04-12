@@ -6,6 +6,7 @@ import {
   getMessages,
   listConversations,
 } from '../api/chat';
+import { useStore } from '../core/store';
 
 interface UseChatReturn {
   // CLI
@@ -37,6 +38,8 @@ interface UseChatReturn {
 }
 
 export function useChat(): UseChatReturn {
+  const aiProvider = useStore((state) => state.aiProvider);
+
   // CLI state
   const [availableClis, setAvailableClis] = useState<CliConfig[]>([]);
   const [selectedCli, setSelectedCli] = useState<CliConfig | null>(null);
@@ -63,15 +66,18 @@ export function useChat(): UseChatReturn {
       .then((clis) => {
         console.log('[useChat] Detected CLIs:', clis);
         setAvailableClis(clis);
-        if (clis.length > 0 && !selectedCli) {
-          setSelectedCli(clis[0]);
+        if (clis.length > 0) {
+          const preferredCli = clis.find((cli) => cli.id === aiProvider) ?? clis[0];
+          if (!selectedCli || !clis.some((cli) => cli.id === selectedCli.id) || selectedCli.id !== preferredCli.id) {
+            setSelectedCli(preferredCli);
+          }
         }
       })
       .catch((e) => {
         console.error('[useChat] Failed to detect CLIs:', e);
         setError(e.message);
       });
-  }, []);
+  }, [aiProvider, selectedCli]);
 
   // Load initial conversations
   useEffect(() => {

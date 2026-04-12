@@ -129,6 +129,11 @@ body {
   line-height: 1.6;
 }
 
+.arxiv-api-select option {
+  background: var(--bg-card);
+  color: var(--text-main);
+}
+
 /* ============================================
    Custom Scrollbar - Minimal & Soft
    ============================================ */
@@ -492,4 +497,148 @@ body {
   background-size: 200% 100%;
   animation: shimmer 1.5s infinite;
   border-radius: var(--radius-md);
+}
+
+/* ============================================
+   Showcase Mode — 炫酷展示模式
+   Enhanced visuals for screenshots & marketing
+   ============================================ */
+
+/* Showcase light theme overrides */
+.showcase {
+  --shadow-soft: 0 8px 40px rgba(133, 114, 166, 0.18);
+  --shadow-medium: 0 16px 56px rgba(133, 114, 166, 0.22);
+  --shadow-float: 0 20px 72px rgba(133, 114, 166, 0.28);
+  --border-color: rgba(188, 164, 227, 0.35);
+  --border-light: rgba(188, 164, 227, 0.22);
+}
+
+.showcase.dark {
+  --shadow-soft: 0 8px 40px rgba(157, 123, 219, 0.20);
+  --shadow-medium: 0 16px 56px rgba(157, 123, 219, 0.28);
+  --shadow-float: 0 20px 72px rgba(157, 123, 219, 0.35);
+  --border-color: rgba(157, 123, 219, 0.35);
+  --border-light: rgba(157, 123, 219, 0.20);
+}
+
+/* Global glow on all cards in showcase mode */
+.showcase .glass-card,
+.showcase [style*="--bg-card"] {
+  box-shadow: var(--shadow-soft), 0 0 0 1px rgba(188, 164, 227, 0.08);
+}
+
+/* Enhanced card hover in showcase */
+.showcase .card-lift:hover {
+  transform: translateY(-8px) scale(1.01);
+  box-shadow: var(--shadow-float), 0 0 30px rgba(188, 164, 227, 0.15);
+}
+
+/* Enhanced spring hover in showcase */
+.showcase .spring-hover:hover {
+  transform: translateY(-4px) scale(1.02);
+}
+
+/* Showcase floating particles background */
+@keyframes showcase-float-1 {
+  0%, 100% { transform: translate(0, 0) scale(1); opacity: 0.3; }
+  33% { transform: translate(30px, -40px) scale(1.2); opacity: 0.5; }
+  66% { transform: translate(-20px, -80px) scale(0.9); opacity: 0.2; }
+}
+@keyframes showcase-float-2 {
+  0%, 100% { transform: translate(0, 0) scale(1); opacity: 0.2; }
+  50% { transform: translate(-40px, -60px) scale(1.3); opacity: 0.45; }
+}
+@keyframes showcase-float-3 {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); opacity: 0.25; }
+  50% { transform: translate(50px, -50px) rotate(180deg); opacity: 0.4; }
+}
+
+/* Neon glow pulse for showcase mode accent elements */
+@keyframes showcase-neon-pulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 6px rgba(188, 164, 227, 0.4))
+            drop-shadow(0 0 12px rgba(188, 164, 227, 0.2));
+  }
+  50% {
+    filter: drop-shadow(0 0 12px rgba(188, 164, 227, 0.6))
+            drop-shadow(0 0 24px rgba(188, 164, 227, 0.3));
+  }
+}
+
+@keyframes showcase-glow-ring {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes showcase-sparkle {
+  0%, 100% { opacity: 0; transform: scale(0) rotate(0deg); }
+  50% { opacity: 1; transform: scale(1) rotate(180deg); }
+}
+
+@keyframes showcase-counter-glow {
+  0%, 100% { text-shadow: 0 0 8px rgba(188, 164, 227, 0.3); }
+  50% { text-shadow: 0 0 20px rgba(188, 164, 227, 0.6), 0 0 40px rgba(188, 164, 227, 0.2); }
+}
+
+@keyframes showcase-aurora {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* Showcase pill glow for active nav */
+.showcase .pill-primary {
+  box-shadow: 0 4px 20px rgba(188, 164, 227, 0.5),
+              0 0 40px rgba(188, 164, 227, 0.15);
+}
+
+/* Showcase gradient text enhancement */
+.showcase .gradient-text {
+  background: linear-gradient(135deg, #BCA4E3, #FFB7B2, #A8D8FF, #BCA4E3);
+  background-size: 300% 300%;
+  animation: showcase-aurora 6s ease infinite;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Showcase tag glow */
+.showcase .tag:hover {
+  box-shadow: 0 2px 12px rgba(188, 164, 227, 0.3);
+  transform: scale(1.08);
+}
+
+/* Showcase status dot glow is more dramatic */
+.showcase .status-dot::after {
+  animation: pulse-glow 1.5s ease-in-out infinite;
+}
+
+/* Showcase enhanced scrollbar */
+.showcase::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--color-primary), var(--color-secondary));
+  box-shadow: 0 0 6px rgba(188, 164, 227, 0.3);
+}
+
+/* Showcase mode - enhanced section titles */
+.showcase .section-title {
+  background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Showcase hero radar neon utility */
+.showcase-neon-radar line {
+  filter: drop-shadow(0 0 3px rgba(99, 102, 241, 0.4));
+}
+.showcase-neon-radar polygon[fill="none"] {
+  stroke: rgba(188, 164, 227, 0.3);
+  filter: drop-shadow(0 0 2px rgba(188, 164, 227, 0.2));
+}
+.showcase-neon-radar path {
+  filter: drop-shadow(0 0 8px rgba(99, 102, 241, 0.5))
+          drop-shadow(0 0 16px rgba(99, 102, 241, 0.2));
+}
+.showcase-neon-radar circle {
+  filter: drop-shadow(0 0 6px currentColor);
 }

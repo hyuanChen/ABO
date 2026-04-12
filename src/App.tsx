@@ -19,8 +19,14 @@ interface AppConfig {
 export default function App() {
   const setConfig = useStore((s) => s.setConfig);
   const setFeedModules = useStore((s) => s.setFeedModules);
+  const showcaseMode = useStore((s) => s.showcaseMode);
   const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+
+  // Sync showcase class on mount and changes
+  useEffect(() => {
+    document.documentElement.classList.toggle("showcase", showcaseMode);
+  }, [showcaseMode]);
 
   // Check onboarding status on mount
   // NOTE: Onboarding is disabled by default for development.

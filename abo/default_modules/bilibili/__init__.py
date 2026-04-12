@@ -72,7 +72,19 @@ DEFAULT_CONFIG = {
     "keyword_filter": True,        # Filter by keywords
     "keywords": ["科研", "学术", "读博", "论文", "AI", "机器学习"],
     "up_uids": [],                 # Specific UIDs to track (backward compat)
+    "followed_up_groups": [],      # Followed UP group filters
+    "followed_up_original_groups": [],  # Native Bilibili followed group tag IDs
     "sessdata": None,              # Bilibili SESSDATA cookie
+}
+
+FOLLOWED_UP_GROUP_KEYWORDS = {
+    "ai-tech": ["ai", "人工智能", "大模型", "算法", "程序", "编程", "开发", "科技", "机器人", "芯片", "科普", "computer", "code"],
+    "study": ["教程", "学习", "知识", "考研", "读书", "数学", "英语", "教育", "课堂", "论文", "学术", "老师"],
+    "digital": ["数码", "手机", "相机", "耳机", "电脑", "测评", "评测", "影音", "摄影", "设备", "镜头"],
+    "game": ["游戏", "电竞", "主机", "steam", "switch", "moba", "fps", "实况", "攻略"],
+    "finance": ["财经", "商业", "投资", "股票", "基金", "创业", "营销", "副业", "理财", "经济"],
+    "creative": ["设计", "插画", "绘画", "ui", "产品", "建筑", "摄影后期", "创作", "剪辑", "3d", "建模"],
+    "entertainment": ["vlog", "生活", "旅行", "美食", "音乐", "舞蹈", "综艺", "动画", "影视", "电影", "追番", "二次元", "搞笑"],
 }
 
 
@@ -205,24 +217,35 @@ class BilibiliTracker(Module):
         up_uids = up_uids or config.get("up_uids", [])
         dynamic_types = dynamic_types or config.get("follow_feed_types", [8, 2, 4, 64])
         use_follow_feed = use_follow_feed and config.get("follow_feed", True)
+        followed_up_groups = config.get("followed_up_groups", []) or []
+        followed_up_original_groups = config.get("followed_up_original_groups", []) or []
 
         # Parse SESSDATA from various formats (Cookie-Editor JSON, simple string, etc.)
         raw_sessdata = config.get("sessdata", "")
         parsed_sessdata = self._parse_sessdata(raw_sessdata)
 
+        selected_follow_uids: set[str] | None = None
+
         # Method 1: Followed users feed (if enabled and has SESSDATA)
         if use_follow_feed and parsed_sessdata:
+            selected_follow_uids = await self._resolve_followed_uid_filters(
+                sessdata=parsed_sessdata,
+                explicit_uids=up_uids,
+                followed_up_groups=followed_up_groups,
+                followed_up_original_groups=followed_up_original_groups,
+            )
             follow_items = await self._fetch_follow_feed(
                 sessdata=parsed_sessdata,
                 dynamic_types=dynamic_types,
                 keywords=keywords if config.get("keyword_filter", True) else [],
                 limit=min(max_results, config.get("fetch_follow_limit", 20)),
                 seen=seen,
+                allowed_up_uids=selected_follow_uids,
             )
             items.extend(follow_items)
 
-        # Method 2: Specific UP主s (backward compatibility)
-        if up_uids:
+        # Method 2: Specific UP主s (fallback when follow feed is unavailable)
+        if up_uids and (not use_follow_feed or not parsed_sessdata):
             remaining = max_results - len(items)
             if remaining > 0:
                 for uid in up_uids[:5]:
@@ -267,6 +290,7 @@ class BilibiliTracker(Module):
         keywords: list[str],
         limit: int,
         seen: set[str],
+        allowed_up_uids: set[str] | None = None,
     ) -> list[Item]:
         """Fetch followed users' dynamics from Bilibili API.
 
@@ -305,6 +329,8 @@ class BilibiliTracker(Module):
                 for card in cards[:limit // len(valid_types) + 2]:
                     item = self._parse_dynamic_card(card, keywords, seen)
                     if item:
+                        if allowed_up_uids and str(item.raw.get("up_uid", "")) not in allowed_up_uids:
+                            continue
                         items.append(item)
                         seen.add(item.id)
 
@@ -312,6 +338,136 @@ class BilibiliTracker(Module):
                 print(f"[bilibili] Failed to fetch type={type_val}: {e}")
 
         return items
+
+    async def _resolve_followed_uid_filters(
+        self,
+        sessdata: str,
+        explicit_uids: list[str] | None,
+        followed_up_groups: list[str] | None,
+        followed_up_original_groups: list[str | int] | None,
+    ) -> set[str] | None:
+        """Resolve allowed followed UPs from explicit UIDs and configured groups."""
+        normalized_uids = {
+            self._extract_uid(uid)
+            for uid in (explicit_uids or [])
+            if str(uid).strip()
+        }
+        normalized_groups = {
+            str(group).strip()
+            for group in (followed_up_groups or [])
+            if str(group).strip() and str(group).strip() != "all"
+        }
+        normalized_original_groups = {
+            int(str(group).strip())
+            for group in (followed_up_original_groups or [])
+            if str(group).strip() and str(group).strip() != "all"
+        }
+
+        if not normalized_uids and not normalized_groups and not normalized_original_groups:
+            return None
+
+        allowed_uids = set(normalized_uids)
+        if not normalized_groups and not normalized_original_groups:
+            return allowed_uids
+
+        try:
+            followed_ups = await self._fetch_followed_ups(sessdata=sessdata)
+        except Exception as e:
+            print(f"[bilibili] Failed to load followed UPs for group filters: {e}")
+            return allowed_uids or None
+
+        for up in followed_ups:
+            up_group_hit = self._classify_followed_up(up) in normalized_groups if normalized_groups else False
+            up_original_tags = {
+                int(tag_id)
+                for tag_id in (up.get("tag") or [])
+                if str(tag_id).lstrip("-").isdigit()
+            }
+            up_original_hit = bool(up_original_tags & normalized_original_groups) if normalized_original_groups else False
+
+            if up_group_hit or up_original_hit:
+                mid = str(up.get("mid", "")).strip()
+                if mid:
+                    allowed_uids.add(mid)
+
+        return allowed_uids or None
+
+    async def _fetch_followed_ups(self, sessdata: str, max_count: int = 5000) -> list[dict]:
+        """Fetch followed UP list for group-based filtering."""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Cookie": f"SESSDATA={sessdata}",
+            "Referer": "https://www.bilibili.com/",
+        }
+
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            nav_resp = await client.get(f"{self.API_BASE}/x/web-interface/nav", headers=headers)
+            nav_resp.raise_for_status()
+            nav_data = nav_resp.json()
+            if nav_data.get("code") != 0:
+                raise ValueError(nav_data.get("message", "获取 Bilibili 登录信息失败"))
+            vmid = str(nav_data.get("data", {}).get("mid") or "")
+            if not vmid:
+                raise ValueError("未能从 Bilibili 登录信息中获取 mid")
+
+            followings_api = f"{self.API_BASE}/x/relation/followings"
+            page = 1
+            page_size = 20
+            results: list[dict] = []
+
+            while len(results) < max_count:
+                data = None
+                for attempt in range(4):
+                    resp = await client.get(
+                        followings_api,
+                        params={
+                            "vmid": vmid,
+                            "pn": page,
+                            "ps": page_size,
+                            "order_type": "attention",
+                        },
+                        headers={
+                            **headers,
+                            "Referer": f"https://space.bilibili.com/{vmid}/fans/follow",
+                        },
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if data.get("code") == 0:
+                        break
+                    if data.get("code") == -352 and attempt < 3:
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                        continue
+                    raise ValueError(data.get("message", "获取关注列表失败"))
+                items = data.get("data", {}).get("list", []) or []
+                if not items:
+                    break
+                results.extend(items)
+                if len(items) < page_size:
+                    break
+                await asyncio.sleep(0.8)
+                page += 1
+
+            return results[:max_count]
+
+    def _classify_followed_up(self, up: dict) -> str:
+        """Match the Bilibili tool's followed-UP grouping heuristic."""
+        official = up.get("official_desc")
+        if not official and isinstance(up.get("official_verify"), dict):
+            official = up.get("official_verify", {}).get("desc", "")
+        haystack = " ".join(
+            str(part or "")
+            for part in (
+                up.get("uname"),
+                up.get("sign"),
+                official,
+            )
+        ).lower()
+
+        for group, keywords in FOLLOWED_UP_GROUP_KEYWORDS.items():
+            if any(keyword in haystack for keyword in keywords):
+                return group
+        return "other"
 
     def _parse_dynamic_card(
         self,
@@ -409,7 +565,7 @@ class BilibiliTracker(Module):
         timestamp = desc.get("timestamp", 0)
 
         # Get images
-        pictures = item_content.get("pictures", [])
+        pictures = item_content.get("pictures") or []
         image_urls = [p.get("img_src", "") for p in pictures if p.get("img_src")]
 
         return Item(

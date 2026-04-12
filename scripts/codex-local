@@ -1,0 +1,11 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT="/Users/huanc/Desktop/ABO"
+
+cd "$ROOT"
+exec codex \
+  --cd "$ROOT" \
+  --sandbox workspace-write \
+  --ask-for-approval never \
+  "$@"

@@ -67,6 +67,43 @@ class TestBilibiliFetch:
 
         assert isinstance(items, list)
 
+    @pytest.mark.asyncio
+    async def test_resolve_followed_uid_filters_merges_explicit_and_group_matches(self):
+        """Test followed group filters resolve into allowed followed UP ids."""
+        tracker = BilibiliTracker()
+
+        async def fake_fetch_followed_ups(sessdata: str, max_count: int = 500):
+            return [
+                {"mid": "1001", "uname": "AI研究社", "sign": "人工智能与大模型", "official_desc": ""},
+                {"mid": "1002", "uname": "普通生活", "sign": "旅行美食", "official_desc": ""},
+            ]
+
+        tracker._fetch_followed_ups = fake_fetch_followed_ups  # type: ignore[method-assign]
+
+        allowed = await tracker._resolve_followed_uid_filters(
+            sessdata="dummy",
+            explicit_uids=["https://space.bilibili.com/42"],
+            followed_up_groups=["ai-tech"],
+        )
+
+        assert allowed == {"42", "1001"}
+
+    def test_classify_followed_up_matches_tool_groups(self):
+        """Test followed UP grouping stays aligned with the Bilibili tool."""
+        tracker = BilibiliTracker()
+
+        assert tracker._classify_followed_up({
+            "uname": "AI实验室",
+            "sign": "大模型与算法",
+            "official_desc": "",
+        }) == "ai-tech"
+
+        assert tracker._classify_followed_up({
+            "uname": "今日旅行",
+            "sign": "旅行 美食 生活",
+            "official_desc": "",
+        }) == "entertainment"
+
 
 class TestBilibiliProcess:
     """Test Bilibili process functionality."""

@@ -10,7 +10,9 @@
 依赖：bilibili-tracker 模块的 API 调用逻辑
 """
 
+import asyncio
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
@@ -38,67 +40,90 @@ class BiliDynamic:
             self.images = []
 
 
+@dataclass
+class BiliFollowedUp:
+    """哔哩哔哩关注 UP 数据结构"""
+    mid: str
+    uname: str
+    face: str = ""
+    sign: str = ""
+    official_desc: str = ""
+    special: int = 0
+    tag_ids: list[int] = None
+
+    def __post_init__(self):
+        if self.tag_ids is None:
+            self.tag_ids = []
+
+
 class BilibiliToolAPI:
     """哔哩哔哩工具 API 封装"""
 
     API_BASE = "https://api.bilibili.com"
     DYNAMIC_API = "https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/dynamic_new"
+    POLYMER_DYNAMIC_API = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all"
+    POLYMER_DYNAMIC_FEATURES = (
+        "itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote,"
+        "decorationCard,forwardListHidden,ugcDelete,onlyfansQaCard"
+    )
+    NAV_API = "https://api.bilibili.com/x/web-interface/nav"
+    FOLLOWINGS_API = "https://api.bilibili.com/x/relation/followings"
+    TAGS_API = "https://api.bilibili.com/x/relation/tags"
 
     def __init__(self, sessdata: str = None, timeout: int = 30):
         self.sessdata = sessdata
         self.timeout = timeout
         self.client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
 
-    async def _fetch_single_type(
-        self,
-        type_list: int,
-        keywords: list[str] = None,
-        limit: int = 20,
-        days_back: int = 7,
-    ) -> list[BiliDynamic]:
-        """获取单个类型的动态（内部方法）"""
-        headers = {
+    def _build_headers(self, referer: str = "https://t.bilibili.com/") -> dict[str, str]:
+        return {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Cookie": f"SESSDATA={self.sessdata}",
-            "Referer": "https://t.bilibili.com/",
+            "Referer": referer,
         }
 
-        params = {"type_list": type_list}
+    def _normalize_url(self, url: str) -> str:
+        if not url:
+            return ""
+        if url.startswith("//"):
+            return f"https:{url}"
+        return url
+
+    def _keyword_matches(self, text_parts: list[str], keywords: list[str] | None) -> bool:
+        if not keywords:
+            return True
+        haystack = " ".join(part for part in text_parts if part).lower()
+        return any(kw.lower() in haystack for kw in keywords if kw)
+
+    async def _fetch_polymer_page(self, offset: str | None = None) -> dict:
+        params = {
+            "type": "all",
+            "features": self.POLYMER_DYNAMIC_FEATURES,
+        }
+        if offset:
+            params["offset"] = offset
+        else:
+            params["page"] = 1
 
         try:
             resp = await self.client.get(
-                self.DYNAMIC_API, params=params, headers=headers
+                self.POLYMER_DYNAMIC_API,
+                params=params,
+                headers=self._build_headers(),
             )
 
             if resp.status_code != 200:
-                print(f"[bilibili-tool] API error for type_list={type_list}: {resp.status_code}")
-                return []
+                raise ValueError(f"HTTP {resp.status_code}")
 
             data = resp.json()
 
             if data.get("code") != 0:
-                print(f"[bilibili-tool] API error for type_list={type_list}: {data.get('message')}")
-                return []
-
-            cards = data.get("data", {}).get("cards", [])
-            dynamics = []
-            cutoff = datetime.now() - timedelta(days=days_back)
-
-            for card in cards[:limit]:
-                dynamic = self._parse_dynamic_card(card, keywords)
-                if dynamic:
-                    # 时间过滤
-                    if dynamic.published_at and dynamic.published_at < cutoff:
-                        continue
-                    dynamics.append(dynamic)
-                    if len(dynamics) >= limit:
-                        break
-
-            return dynamics
+                raise ValueError(data.get("message") or "获取动态失败")
+            return data.get("data", {}) or {}
 
         except Exception as e:
-            print(f"[bilibili-tool] Failed to fetch type_list={type_list}: {e}")
-            return []
+            print(f"[bilibili-tool] Failed to fetch polymer dynamics: {e}")
+            raise
 
     async def fetch_followed_dynamics(
         self,
@@ -107,25 +132,10 @@ class BilibiliToolAPI:
         limit: int = 20,
         days_back: int = 7,
     ) -> list[BiliDynamic]:
-        """
-        获取关注列表的动态
-
-        Note: Bilibili API 不支持组合 type_list，只能传单个类型或 268435455 (all)
-        所以我们需要分别获取每种类型，然后合并
-
-        Args:
-            dynamic_types: 动态类型 [8=视频, 2=图文, 4=文字, 64=专栏]
-            keywords: 关键词过滤列表
-            limit: 最大返回数量
-            days_back: 只返回几天内的动态
-
-        Returns:
-            BiliDynamic 列表
-        """
+        """获取关注列表的动态。"""
         if not self.sessdata:
             raise ValueError("SESSDATA is required to fetch followed dynamics")
 
-        # 默认获取视频、图文、文字、专栏
         if dynamic_types is None:
             dynamic_types = [8, 2, 4, 64]
 
@@ -134,32 +144,209 @@ class BilibiliToolAPI:
 
         print(f"[bilibili-tool] Fetching types: {valid_types}, limit={limit}, days_back={days_back}")
 
-        all_dynamics = []
+        if not valid_types:
+            return []
 
-        # Bilibili API 不支持组合 type_list，需要分别获取每种类型
-        for type_val in valid_types:
-            type_dynamics = await self._fetch_single_type(
-                type_list=type_val,
-                keywords=keywords,
-                limit=limit // len(valid_types) + 5,  # 每种类型分配限额
-                days_back=days_back,
-            )
-            print(f"[bilibili-tool] Type {type_val}: got {len(type_dynamics)} dynamics")
-            all_dynamics.extend(type_dynamics)
+        type_map = {
+            1: "DYNAMIC_TYPE_FORWARD",
+            2: "DYNAMIC_TYPE_DRAW",
+            4: "DYNAMIC_TYPE_WORD",
+            8: "DYNAMIC_TYPE_AV",
+            64: "DYNAMIC_TYPE_ARTICLE",
+        }
+        allowed_type_names = {type_map[t] for t in valid_types if t in type_map}
+        cutoff = datetime.now() - timedelta(days=days_back)
 
-        # 按时间排序
-        all_dynamics.sort(key=lambda x: x.published_at or datetime.min, reverse=True)
-
-        # 去重（按 dynamic_id）
+        all_dynamics: list[BiliDynamic] = []
         seen_ids = set()
-        unique_dynamics = []
-        for d in all_dynamics:
-            if d.dynamic_id not in seen_ids:
-                seen_ids.add(d.dynamic_id)
-                unique_dynamics.append(d)
+        offset: str | None = None
+        max_pages = max(5, math.ceil(max(limit, 1) / 20) + 8)
 
-        print(f"[bilibili-tool] Total: {len(unique_dynamics)} unique dynamics (after dedup)")
-        return unique_dynamics[:limit]
+        for page in range(1, max_pages + 1):
+            page_data = await self._fetch_polymer_page(offset=offset)
+            items = page_data.get("items", []) or []
+            if not items:
+                break
+
+            page_new_count = 0
+            page_has_recent = False
+            page_type_counts: dict[str, int] = {}
+
+            for item in items:
+                item_type = item.get("type") or ""
+                page_type_counts[item_type] = page_type_counts.get(item_type, 0) + 1
+                if item_type not in allowed_type_names:
+                    continue
+
+                dynamic = self._parse_polymer_item(item, keywords)
+                if not dynamic:
+                    continue
+                if dynamic.published_at and dynamic.published_at < cutoff:
+                    continue
+
+                page_has_recent = True
+                if dynamic.dynamic_id in seen_ids:
+                    continue
+
+                seen_ids.add(dynamic.dynamic_id)
+                all_dynamics.append(dynamic)
+                page_new_count += 1
+
+                if len(all_dynamics) >= limit:
+                    break
+
+            print(
+                f"[bilibili-tool] Polymer page {page}: total_items={len(items)}, "
+                f"matched={page_new_count}, offset={page_data.get('offset')}, "
+                f"types={page_type_counts}"
+            )
+
+            if len(all_dynamics) >= limit:
+                break
+
+            offset = page_data.get("offset")
+            if not page_data.get("has_more") or not offset:
+                break
+            if not page_has_recent:
+                break
+
+            await asyncio.sleep(0.3)
+
+        all_dynamics.sort(key=lambda x: x.published_at or datetime.min, reverse=True)
+        print(f"[bilibili-tool] Total: {len(all_dynamics)} dynamics (after pagination)")
+        return all_dynamics[:limit]
+
+    async def _get_self_mid(self) -> str:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Cookie": f"SESSDATA={self.sessdata}",
+            "Referer": "https://www.bilibili.com/",
+        }
+        resp = await self.client.get(self.NAV_API, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise ValueError(data.get("message", "获取 Bilibili 登录信息失败"))
+        mid = data.get("data", {}).get("mid")
+        if not mid:
+            raise ValueError("未能从 Bilibili 登录信息中获取 mid")
+        return str(mid)
+
+    async def fetch_followed_ups(
+        self,
+        max_count: int = 5000,
+        progress_callback=None,
+    ) -> list[BiliFollowedUp]:
+        """获取关注的 UP 列表"""
+        if not self.sessdata:
+            raise ValueError("SESSDATA is required to fetch followed users")
+
+        vmid = await self._get_self_mid()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Cookie": f"SESSDATA={self.sessdata}",
+            "Referer": f"https://space.bilibili.com/{vmid}/fans/follow",
+        }
+
+        page = 1
+        page_size = 50
+        results: list[BiliFollowedUp] = []
+
+        if progress_callback:
+            progress_callback(
+                {
+                    "stage": "正在读取关注列表",
+                    "current_page": 0,
+                    "page_size": page_size,
+                    "fetched_count": 0,
+                }
+            )
+
+        while len(results) < max_count:
+            params = {
+                "vmid": vmid,
+                "pn": page,
+                "ps": page_size,
+                "order_type": "attention",
+            }
+            data = None
+            for attempt in range(4):
+                resp = await self.client.get(self.FOLLOWINGS_API, params=params, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("code") == 0:
+                    break
+                if data.get("code") == -352 and attempt < 3:
+                    await asyncio.sleep(1.5 * (attempt + 1))
+                    continue
+                raise ValueError(data.get("message", "获取关注列表失败"))
+
+            items = (data or {}).get("data", {}).get("list", []) or []
+            if not items:
+                break
+
+            for item in items:
+                results.append(
+                    BiliFollowedUp(
+                        mid=str(item.get("mid", "")),
+                        uname=item.get("uname") or "UP主",
+                        face=item.get("face") or "",
+                        sign=item.get("sign") or "",
+                        official_desc=(item.get("official_verify") or {}).get("desc", "") or "",
+                        special=int(item.get("special") or 0),
+                        tag_ids=[int(tag_id) for tag_id in (item.get("tag") or []) if str(tag_id).lstrip("-").isdigit()],
+                    )
+                )
+                if len(results) >= max_count:
+                    break
+
+            if progress_callback:
+                progress_callback(
+                    {
+                        "stage": f"已抓取第 {page} 页",
+                        "current_page": page,
+                        "page_size": page_size,
+                        "fetched_count": len(results),
+                    }
+                )
+
+            if len(items) < page_size:
+                break
+            await asyncio.sleep(0.8)
+            page += 1
+
+        return results
+
+    async def fetch_followed_tags(self) -> list[dict]:
+        """获取原生关注分组列表"""
+        if not self.sessdata:
+            raise ValueError("SESSDATA is required to fetch followed tags")
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Cookie": f"SESSDATA={self.sessdata}",
+            "Referer": "https://space.bilibili.com/",
+        }
+        resp = await self.client.get(self.TAGS_API, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise ValueError(data.get("message", "获取原生关注分组失败"))
+
+        tags = []
+        for item in data.get("data", []) or []:
+            tag_id = item.get("tagid")
+            if tag_id is None:
+                continue
+            tags.append(
+                {
+                    "tag_id": int(tag_id),
+                    "name": item.get("name") or "未命名分组",
+                    "count": int(item.get("count") or 0),
+                    "tip": item.get("tip") or "",
+                }
+            )
+        return tags
 
     def _parse_dynamic_card(
         self,
@@ -186,6 +373,91 @@ class BilibiliToolAPI:
             return self._parse_text_card(dynamic_id, desc, card_content, keywords)
         elif dynamic_type == 64:  # 专栏
             return self._parse_article_card(dynamic_id, desc, card_content, keywords)
+
+        return None
+
+    def _parse_polymer_item(
+        self,
+        item: dict,
+        keywords: list[str] = None,
+    ) -> BiliDynamic | None:
+        item_type = item.get("type") or ""
+        dynamic_id = str(item.get("id_str") or "")
+        modules = item.get("modules", {}) or {}
+        author_mod = modules.get("module_author", {}) or {}
+        dynamic_mod = modules.get("module_dynamic", {}) or {}
+        major = dynamic_mod.get("major", {}) or {}
+        major_type = major.get("type") or ""
+        author = author_mod.get("name") or "UP主"
+        author_id = str(author_mod.get("mid") or "")
+        desc_text = ((dynamic_mod.get("desc") or {}).get("text")) or ""
+
+        published_at = None
+        pub_ts = author_mod.get("pub_ts")
+        if pub_ts:
+            try:
+                published_at = datetime.fromtimestamp(int(pub_ts))
+            except Exception:
+                published_at = None
+
+        if item_type == "DYNAMIC_TYPE_AV":
+            archive = major.get("archive", {}) or {}
+            title = archive.get("title") or desc_text[:100]
+            content = archive.get("desc") or desc_text
+            if not self._keyword_matches([title, content], keywords):
+                return None
+            bvid = archive.get("bvid") or ""
+            return BiliDynamic(
+                id=f"bili-dyn-{dynamic_id}",
+                dynamic_id=dynamic_id,
+                title=title,
+                content=content,
+                author=author,
+                author_id=author_id,
+                url=self._normalize_url(archive.get("jump_url")) or f"https://www.bilibili.com/video/{bvid}",
+                published_at=published_at,
+                dynamic_type="video",
+                pic=archive.get("cover") or "",
+            )
+
+        if item_type in {"DYNAMIC_TYPE_DRAW", "DYNAMIC_TYPE_ARTICLE"}:
+            opus = major.get("opus", {}) if major_type == "MAJOR_TYPE_OPUS" else {}
+            summary = (opus.get("summary") or {}).get("text") or desc_text
+            title = opus.get("title") or summary[:100]
+            if not self._keyword_matches([title, summary], keywords):
+                return None
+            pics = opus.get("pics") or []
+            images = [pic.get("url") for pic in pics if pic.get("url")]
+            dynamic_type = "article" if item_type == "DYNAMIC_TYPE_ARTICLE" else "image"
+            return BiliDynamic(
+                id=f"bili-dyn-{dynamic_id}",
+                dynamic_id=dynamic_id,
+                title=title,
+                content=summary,
+                author=author,
+                author_id=author_id,
+                url=self._normalize_url(opus.get("jump_url")) or f"https://www.bilibili.com/opus/{dynamic_id}",
+                published_at=published_at,
+                dynamic_type=dynamic_type,
+                images=images,
+                pic=images[0] if images else "",
+            )
+
+        if item_type == "DYNAMIC_TYPE_WORD":
+            content = desc_text
+            if not self._keyword_matches([content], keywords):
+                return None
+            return BiliDynamic(
+                id=f"bili-dyn-{dynamic_id}",
+                dynamic_id=dynamic_id,
+                title=content[:100],
+                content=content,
+                author=author,
+                author_id=author_id,
+                url=f"https://t.bilibili.com/{dynamic_id}",
+                published_at=published_at,
+                dynamic_type="text",
+            )
 
         return None
 
@@ -236,7 +508,7 @@ class BilibiliToolAPI:
         up_uid = str(desc.get("user_profile", {}).get("uid", ""))
         timestamp = desc.get("timestamp", 0)
 
-        pictures = item.get("pictures", [])
+        pictures = item.get("pictures") or []
         images = [p.get("img_src", "") for p in pictures if p.get("img_src")]
 
         return BiliDynamic(
@@ -392,5 +664,37 @@ async def bilibili_verify_sessdata(sessdata: str) -> dict:
 
     except Exception as e:
         return {"valid": False, "message": str(e)}
+    finally:
+        await api.close()
+
+
+async def bilibili_fetch_followed_ups(
+    sessdata: str,
+    max_count: int = 5000,
+    progress_callback=None,
+) -> dict:
+    """获取关注 UP 列表"""
+    api = BilibiliToolAPI(sessdata=sessdata)
+    try:
+        tags = await api.fetch_followed_tags()
+        tag_name_map = {tag["tag_id"]: tag["name"] for tag in tags}
+        ups = await api.fetch_followed_ups(max_count=max_count, progress_callback=progress_callback)
+        return {
+            "total": len(ups),
+            "groups": tags,
+            "ups": [
+                {
+                    "mid": up.mid,
+                    "uname": up.uname,
+                    "face": up.face,
+                    "sign": up.sign,
+                    "official_desc": up.official_desc,
+                    "special": up.special,
+                    "tag_ids": up.tag_ids,
+                    "tag_names": [tag_name_map[tag_id] for tag_id in up.tag_ids if tag_id in tag_name_map],
+                }
+                for up in ups
+            ],
+        }
     finally:
         await api.close()

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Play, Clock, Calendar, User, Plus, X, Trash2, HelpCircle, History, Info } from "lucide-react";
+import { ArrowLeft, Play, Clock, Calendar, User, Plus, X, Trash2, HelpCircle, History, Info, ChevronDown, ChevronUp } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, FeedModule } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
@@ -12,6 +12,34 @@ const SCHEDULE_OPTIONS = [
   { label: "11:00", value: "0 11 * * *" },
   { label: "13:00", value: "0 13 * * *" },
   { label: "20:00", value: "0 20 * * *" },
+];
+
+const BILIBILI_GROUP_OPTIONS = [
+  { value: "ai-tech", label: "AI科技" },
+  { value: "study", label: "学习知识" },
+  { value: "digital", label: "数码影音" },
+  { value: "game", label: "游戏" },
+  { value: "finance", label: "财经商业" },
+  { value: "creative", label: "设计创作" },
+  { value: "entertainment", label: "生活娱乐" },
+  { value: "other", label: "其他" },
+];
+
+const XHS_CREATOR_GROUP_OPTIONS = [
+  { value: "research", label: "科研学习" },
+  { value: "writing", label: "论文写作" },
+  { value: "ai", label: "AI工具" },
+  { value: "productivity", label: "效率知识库" },
+  { value: "study_abroad", label: "留学读博" },
+  { value: "lifestyle", label: "日常生活" },
+  { value: "other", label: "其他" },
+];
+
+const BILIBILI_DYNAMIC_TYPE_OPTIONS = [
+  { value: 8, label: "视频" },
+  { value: 2, label: "图文" },
+  { value: 4, label: "文字" },
+  { value: 64, label: "专栏" },
 ];
 
 // 各模块的订阅配置（仅支持订阅类型的模块）
@@ -71,12 +99,49 @@ interface ModuleConfig {
   user_ids?: string[];
   folder_path?: string;
   up_uids?: string[];
-  follow_feed?: boolean;
+  followed_up_groups?: string[];
+  followed_up_original_groups?: number[];
   sessdata?: string;
   api_key?: string;
   cookie?: string;
   web_session?: string;
   id_token?: string;
+  enable_keyword_search?: boolean;
+  keyword_min_likes?: number;
+  keyword_search_limit?: number;
+  follow_feed?: boolean;
+  follow_feed_types?: number[];
+  fetch_follow_limit?: number;
+  creator_push_enabled?: boolean;
+  keyword_filter?: boolean;
+  followed_up_group_options?: { value: string; label: string }[];
+  creator_groups?: string[];
+  creator_group_options?: { value: string; label: string }[];
+  creator_profiles?: Record<string, {
+    author?: string;
+    author_id?: string;
+    smart_groups?: string[];
+    latest_title?: string;
+    sample_titles?: string[];
+  }>;
+}
+
+interface BilibiliOriginalGroupOption {
+  tag_id: number;
+  name: string;
+  count: number;
+  tip: string;
+}
+
+interface BilibiliFollowedUpsConfigResponse {
+  total: number;
+  groups: BilibiliOriginalGroupOption[];
+  ups: Array<{
+    mid: string;
+    uname: string;
+    tag_ids: number[];
+    tag_names: string[];
+  }>;
 }
 
 interface SubscriptionDetail {
@@ -126,6 +191,9 @@ export default function ModuleDetail({ module, onBack }: Props) {
   const [selectedType, setSelectedType] = useState("");
   const [inputValue, setInputValue] = useState("");
   const [showHistory, setShowHistory] = useState(false);
+  const [bilibiliOriginalGroups, setBilibiliOriginalGroups] = useState<BilibiliOriginalGroupOption[]>([]);
+  const [loadingBilibiliGroups, setLoadingBilibiliGroups] = useState(false);
+  const [showXhsCreatorConfig, setShowXhsCreatorConfig] = useState(false);
 
   const subConfig = MODULE_SUB_CONFIG[module.id] || { types: [], desc: "" };
 
@@ -147,6 +215,40 @@ export default function ModuleDetail({ module, onBack }: Props) {
 
     fetchSubscriptionDetails();
   }, [module.id]);
+
+  useEffect(() => {
+    if (module.id !== "bilibili-tracker") return;
+    if (!moduleConfig.sessdata?.trim()) {
+      setBilibiliOriginalGroups([]);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingBilibiliGroups(true);
+    api.post<BilibiliFollowedUpsConfigResponse>("/api/tools/bilibili/followed-ups", {
+      sessdata: moduleConfig.sessdata,
+      max_count: 5000,
+    })
+      .then((res) => {
+        if (!cancelled) {
+          setBilibiliOriginalGroups(res.groups || []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setBilibiliOriginalGroups([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingBilibiliGroups(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [module.id, moduleConfig.sessdata]);
 
   // 设置默认选中类型
   useEffect(() => {
@@ -255,6 +357,52 @@ export default function ModuleDetail({ module, onBack }: Props) {
   }
 
   const currentTypeConfig = subConfig.types.find(t => t.type === selectedType);
+
+  async function saveModuleConfig(patch: Partial<ModuleConfig>, successTitle = "已保存") {
+    try {
+      const nextConfig = { ...moduleConfig, ...patch };
+      await api.post(`/api/modules/${module.id}/config`, nextConfig);
+      setModuleConfig(nextConfig);
+      toast.success(successTitle);
+    } catch {
+      toast.error("保存失败");
+    }
+  }
+
+  function toggleBilibiliGroup(group: string) {
+    const current = moduleConfig.followed_up_groups || [];
+    const next = current.includes(group)
+      ? current.filter((item) => item !== group)
+      : [...current, group];
+    setModuleConfig({ ...moduleConfig, followed_up_groups: next });
+  }
+
+  function toggleBilibiliOriginalGroup(groupId: number) {
+    const current = moduleConfig.followed_up_original_groups || [];
+    const next = current.includes(groupId)
+      ? current.filter((item) => item !== groupId)
+      : [...current, groupId];
+    setModuleConfig({ ...moduleConfig, followed_up_original_groups: next });
+  }
+
+  function toggleXhsCreatorGroup(group: string) {
+    const current = moduleConfig.creator_groups || [];
+    const next = current.includes(group)
+      ? current.filter((item) => item !== group)
+      : [...current, group];
+    setModuleConfig({ ...moduleConfig, creator_groups: next });
+  }
+
+  function toggleBilibiliDynamicType(type: number) {
+    const current = moduleConfig.follow_feed_types || [8, 2, 4, 64];
+    if (current.includes(type) && current.length === 1) {
+      return;
+    }
+    const next = current.includes(type)
+      ? current.filter((item) => item !== type)
+      : [...current, type].sort((a, b) => a - b);
+    setModuleConfig({ ...moduleConfig, follow_feed_types: next });
+  }
 
   return (
     <PageContainer>
@@ -815,12 +963,9 @@ export default function ModuleDetail({ module, onBack }: Props) {
                 <CookieGuide platform="bilibili" cookieName="SESSDATA" />
                 <button
                   onClick={async () => {
-                    try {
-                      await api.post("/api/preferences", { modules: { [module.id]: { sessdata: moduleConfig.sessdata } } });
-                      toast.success("已保存");
-                    } catch {
-                      toast.error("保存失败");
-                    }
+                    await saveModuleConfig({
+                      sessdata: moduleConfig.sessdata || "",
+                    }, "Cookie 已保存");
                   }}
                   style={{
                     padding: "8px 16px",
@@ -835,6 +980,298 @@ export default function ModuleDetail({ module, onBack }: Props) {
                   }}
                 >
                   保存 Cookie
+                </button>
+              </div>
+            </Card>
+          )}
+
+          {module.id === "bilibili-tracker" && (
+            <Card title="自动爬取策略" icon={<span style={{ fontSize: "16px" }}>🕸️</span>}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                  padding: "12px 14px",
+                  borderRadius: "var(--radius-md)",
+                  background: "var(--bg-hover)",
+                  border: "1px solid var(--border-light)",
+                }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px", flex: 1 }}>
+                    <span style={{ fontSize: "0.875rem", color: "var(--text-main)", fontWeight: 500 }}>
+                      关注流自动爬取
+                    </span>
+                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                      定时抓取你的关注动态，再按指定 UP 和关注分组过滤。
+                    </span>
+                  </div>
+                  <input
+                    type="number"
+                    min={1}
+                    value={moduleConfig.fetch_follow_limit ?? 20}
+                    onChange={(e) => setModuleConfig({
+                      ...moduleConfig,
+                      fetch_follow_limit: Number(e.target.value || 1),
+                    })}
+                    style={{
+                      width: "88px",
+                      padding: "8px 10px",
+                      borderRadius: "var(--radius-md)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-app)",
+                      color: "var(--text-main)",
+                      fontSize: "0.8125rem",
+                      outline: "none",
+                    }}
+                  />
+                  <div
+                    onClick={() => setModuleConfig({ ...moduleConfig, follow_feed: !(moduleConfig.follow_feed ?? false) })}
+                    style={{
+                      width: "40px",
+                      height: "22px",
+                      borderRadius: "11px",
+                      background: (moduleConfig.follow_feed ?? false) ? "var(--color-primary)" : "var(--text-muted)",
+                      position: "relative",
+                      cursor: "pointer",
+                      transition: "background 0.2s",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <div style={{
+                      width: "18px",
+                      height: "18px",
+                      borderRadius: "50%",
+                      background: "white",
+                      position: "absolute",
+                      top: "2px",
+                      left: (moduleConfig.follow_feed ?? false) ? "20px" : "2px",
+                      transition: "left 0.2s",
+                    }} />
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                    关键词推送
+                  </label>
+                  <input
+                    type="text"
+                    value={(moduleConfig.keywords || []).join(", ")}
+                    onChange={(e) => setModuleConfig({
+                      ...moduleConfig,
+                      keywords: e.target.value.split(",").map(s => s.trim()).filter(Boolean),
+                    })}
+                    placeholder="科研, 学术, AI, 论文"
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: "var(--radius-md)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-app)",
+                      color: "var(--text-main)",
+                      fontSize: "0.875rem",
+                      outline: "none",
+                    }}
+                  />
+                </div>
+
+                <div style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "8px",
+                  padding: "12px 14px",
+                  borderRadius: "var(--radius-md)",
+                  background: "var(--bg-hover)",
+                  border: "1px solid var(--border-light)",
+                }}>
+                  <div style={{ fontSize: "0.875rem", color: "var(--text-main)", fontWeight: 600 }}>
+                    分组推送
+                  </div>
+                  <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+                    你可以在这里决定具体开启哪些分组的推送。原始分组是 B 站里手动维护的分组，智能分组是在原始分组基础上的进一步细分。
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                    <span>已开原始分组 {(moduleConfig.followed_up_original_groups || []).length} 个</span>
+                    <span>已开智能分组 {(moduleConfig.followed_up_groups || []).length} 个</span>
+                    <span>都不选时表示不过滤分组，按关键词抓全部关注动态</span>
+                  </div>
+                </div>
+
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                  padding: "12px 14px",
+                  borderRadius: "var(--radius-md)",
+                  background: "var(--bg-hover)",
+                  border: "1px solid var(--border-light)",
+                }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px", flex: 1 }}>
+                    <span style={{ fontSize: "0.875rem", color: "var(--text-main)", fontWeight: 500 }}>
+                      启用关键词过滤
+                    </span>
+                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                      关闭后会抓取选中的 UP 和分组下的全部动态。
+                    </span>
+                  </div>
+                  <div
+                    onClick={() => setModuleConfig({ ...moduleConfig, keyword_filter: !(moduleConfig.keyword_filter ?? true) })}
+                    style={{
+                      width: "40px",
+                      height: "22px",
+                      borderRadius: "11px",
+                      background: (moduleConfig.keyword_filter ?? true) ? "var(--color-primary)" : "var(--text-muted)",
+                      position: "relative",
+                      cursor: "pointer",
+                      transition: "background 0.2s",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <div style={{
+                      width: "18px",
+                      height: "18px",
+                      borderRadius: "50%",
+                      background: "white",
+                      position: "absolute",
+                      top: "2px",
+                      left: (moduleConfig.keyword_filter ?? true) ? "20px" : "2px",
+                      transition: "left 0.2s",
+                    }} />
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                    动态类型
+                  </label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                    {BILIBILI_DYNAMIC_TYPE_OPTIONS.map((option) => {
+                      const active = (moduleConfig.follow_feed_types || [8, 2, 4, 64]).includes(option.value);
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => toggleBilibiliDynamicType(option.value)}
+                          style={{
+                            padding: "7px 12px",
+                            borderRadius: "999px",
+                            border: `1px solid ${active ? "var(--color-primary)" : "var(--border-light)"}`,
+                            background: active ? "rgba(99, 102, 241, 0.12)" : "var(--bg-app)",
+                            color: active ? "var(--color-primary)" : "var(--text-secondary)",
+                            fontSize: "0.8125rem",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                    开启原始分组推送
+                  </label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                    {loadingBilibiliGroups ? (
+                      <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>正在读取 B 站原始分组...</span>
+                    ) : bilibiliOriginalGroups.length > 0 ? (
+                      bilibiliOriginalGroups.map((group) => {
+                        const active = (moduleConfig.followed_up_original_groups || []).includes(group.tag_id);
+                        return (
+                          <button
+                            key={group.tag_id}
+                            type="button"
+                            onClick={() => toggleBilibiliOriginalGroup(group.tag_id)}
+                            title={group.tip || group.name}
+                            style={{
+                              padding: "7px 12px",
+                              borderRadius: "999px",
+                              border: `1px solid ${active ? "#FB7299" : "var(--border-light)"}`,
+                              background: active ? "rgba(251, 114, 153, 0.12)" : "var(--bg-app)",
+                              color: active ? "#D64078" : "var(--text-secondary)",
+                              fontSize: "0.8125rem",
+                              fontWeight: 600,
+                              cursor: "pointer",
+                            }}
+                          >
+                            {group.name} {group.count ? `· ${group.count}` : ""}
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                        保存有效 SESSDATA 后会自动读取你在 B 站里的原始关注分组。
+                      </span>
+                    )}
+                  </div>
+                  <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: 0 }}>
+                    这里对应的是你在 B 站里手动建的分组。选中的分组才会进入定时推送。
+                  </p>
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                    开启智能分组推送
+                  </label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                    {(moduleConfig.followed_up_group_options || BILIBILI_GROUP_OPTIONS).map((option) => {
+                      const active = (moduleConfig.followed_up_groups || []).includes(option.value);
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          onClick={() => toggleBilibiliGroup(option.value)}
+                          style={{
+                            padding: "7px 12px",
+                            borderRadius: "999px",
+                            border: `1px solid ${active ? "var(--color-primary)" : "var(--border-light)"}`,
+                            background: active ? "rgba(99, 102, 241, 0.12)" : "var(--bg-app)",
+                            color: active ? "var(--color-primary)" : "var(--text-secondary)",
+                            fontSize: "0.8125rem",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: 0 }}>
+                    智能分组会在原始分组基础上进一步细分。选中的细分组才会进入定时推送。
+                  </p>
+                </div>
+
+                <button
+                  onClick={async () => {
+                    await saveModuleConfig({
+                      sessdata: moduleConfig.sessdata || "",
+                      keywords: moduleConfig.keywords || [],
+                      follow_feed: moduleConfig.follow_feed ?? false,
+                      follow_feed_types: moduleConfig.follow_feed_types || [8, 2, 4, 64],
+                      fetch_follow_limit: moduleConfig.fetch_follow_limit ?? 20,
+                      keyword_filter: moduleConfig.keyword_filter ?? true,
+                      followed_up_original_groups: moduleConfig.followed_up_original_groups || [],
+                      followed_up_groups: moduleConfig.followed_up_groups || [],
+                    }, "B站爬取策略已保存");
+                  }}
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--color-primary)",
+                    color: "white",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    border: "none",
+                    cursor: "pointer",
+                    alignSelf: "flex-start",
+                  }}
+                >
+                  保存爬取策略
                 </button>
               </div>
             </Card>
@@ -994,15 +1431,10 @@ export default function ModuleDetail({ module, onBack }: Props) {
                 <CookieGuide platform="xiaohongshu" cookieName="Cookie" />
                 <button
                   onClick={async () => {
-                    try {
-                      const cookieData: Record<string, string> = {};
-                      if (moduleConfig.web_session) cookieData.web_session = moduleConfig.web_session;
-                      if (moduleConfig.id_token) cookieData.id_token = moduleConfig.id_token;
-                      await api.post("/api/preferences", { modules: { [module.id]: cookieData } });
-                      toast.success("已保存");
-                    } catch {
-                      toast.error("保存失败");
-                    }
+                    await saveModuleConfig({
+                      web_session: moduleConfig.web_session || "",
+                      id_token: moduleConfig.id_token || "",
+                    });
                   }}
                   style={{
                     padding: "8px 16px",
@@ -1017,6 +1449,347 @@ export default function ModuleDetail({ module, onBack }: Props) {
                   }}
                 >
                   保存 Cookie
+                </button>
+              </div>
+            </Card>
+          )}
+
+          {module.id === "xiaohongshu-tracker" && (
+            <Card title="自动爬取策略" icon={<span style={{ fontSize: "16px" }}>🕸️</span>}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+                <div
+                  onClick={() => setShowXhsCreatorConfig(!showXhsCreatorConfig)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "10px",
+                    padding: "12px 14px",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--bg-hover)",
+                    border: "1px solid var(--border-light)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <span style={{ fontSize: "0.875rem", color: "var(--text-main)", fontWeight: 600 }}>
+                      博主推送配置
+                    </span>
+                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                      已同步博主 {(moduleConfig.user_ids || []).length} 个 · 已开智能分组 {(moduleConfig.creator_groups || []).length} 个
+                    </span>
+                  </div>
+                  {showXhsCreatorConfig ? (
+                    <ChevronUp style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
+                  ) : (
+                    <ChevronDown style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
+                  )}
+                </div>
+
+                {showXhsCreatorConfig && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                    <div style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "8px",
+                      padding: "12px 14px",
+                      borderRadius: "var(--radius-md)",
+                      background: "var(--bg-hover)",
+                      border: "1px solid var(--border-light)",
+                    }}>
+                      <div style={{ fontSize: "0.875rem", color: "var(--text-main)", fontWeight: 600 }}>
+                        智能分组推送
+                      </div>
+                      <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+                        和 B 站一样，博主先进入原始池，再根据最近样本内容做智能分组。选中的分组才会进入定时推送；都不选表示所有已同步博主都推送。
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                      <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                        开启智能分组推送
+                      </label>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                        {(moduleConfig.creator_group_options || XHS_CREATOR_GROUP_OPTIONS).map((option) => {
+                          const active = (moduleConfig.creator_groups || []).includes(option.value);
+                          const profileCount = Object.values(moduleConfig.creator_profiles || {}).filter((profile) =>
+                            (profile.smart_groups || []).includes(option.value)
+                          ).length;
+                          return (
+                            <button
+                              key={option.value}
+                              type="button"
+                              onClick={() => toggleXhsCreatorGroup(option.value)}
+                              style={{
+                                padding: "7px 12px",
+                                borderRadius: "999px",
+                                border: `1px solid ${active ? "var(--color-primary)" : "var(--border-light)"}`,
+                                background: active ? "rgba(99, 102, 241, 0.12)" : "var(--bg-app)",
+                                color: active ? "var(--color-primary)" : "var(--text-secondary)",
+                                fontSize: "0.8125rem",
+                                fontWeight: 600,
+                                cursor: "pointer",
+                              }}
+                            >
+                              {option.label} {profileCount ? `· ${profileCount}` : ""}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                      <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                        已同步博主池
+                      </label>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                        {(moduleConfig.user_ids || []).length > 0 ? (
+                          (moduleConfig.user_ids || []).map((userId) => {
+                            const profile = moduleConfig.creator_profiles?.[userId];
+                            const label = profile?.author || userId;
+                            const groups = (profile?.smart_groups || []).map((group) =>
+                              (moduleConfig.creator_group_options || XHS_CREATOR_GROUP_OPTIONS).find((item) => item.value === group)?.label || group
+                            );
+                            return (
+                              <div
+                                key={userId}
+                                style={{
+                                  padding: "8px 10px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border-light)",
+                                  background: "var(--bg-app)",
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  gap: "4px",
+                                }}
+                              >
+                                <span style={{ fontSize: "0.8125rem", color: "var(--text-main)", fontWeight: 600 }}>{label}</span>
+                                <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{userId}</span>
+                                {groups.length > 0 && (
+                                  <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                                    {groups.join(" · ")}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })
+                        ) : (
+                          <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                            先去小红书工具的“收藏反推博主”里同步候选博主，这里才会出现原始池和智能分组。
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                    关键词
+                  </label>
+                  <input
+                    type="text"
+                    value={(moduleConfig.keywords || []).join(", ")}
+                    onChange={(e) => setModuleConfig({
+                      ...moduleConfig,
+                      keywords: e.target.value.split(",").map(s => s.trim()).filter(Boolean),
+                    })}
+                    placeholder="科研工具, 论文写作, 学术日常"
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: "var(--radius-md)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-app)",
+                      color: "var(--text-main)",
+                      fontSize: "0.875rem",
+                      outline: "none",
+                    }}
+                  />
+                  <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", margin: 0 }}>
+                    每个关键词会走小红书搜索页抓取，并按高赞优先回收笔记。
+                  </p>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "12px" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                      最低点赞数
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={moduleConfig.keyword_min_likes ?? 500}
+                      onChange={(e) => setModuleConfig({
+                        ...moduleConfig,
+                        keyword_min_likes: Number(e.target.value || 0),
+                      })}
+                      style={{
+                        padding: "10px 14px",
+                        borderRadius: "var(--radius-md)",
+                        border: "1px solid var(--border-light)",
+                        background: "var(--bg-app)",
+                        color: "var(--text-main)",
+                        fontSize: "0.875rem",
+                        outline: "none",
+                      }}
+                    />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
+                      每个关键词抓取数
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      value={moduleConfig.keyword_search_limit ?? 10}
+                      onChange={(e) => setModuleConfig({
+                        ...moduleConfig,
+                        keyword_search_limit: Number(e.target.value || 1),
+                      })}
+                      style={{
+                        padding: "10px 14px",
+                        borderRadius: "var(--radius-md)",
+                        border: "1px solid var(--border-light)",
+                        background: "var(--bg-app)",
+                        color: "var(--text-main)",
+                        fontSize: "0.875rem",
+                        outline: "none",
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                  padding: "12px 14px",
+                  borderRadius: "var(--radius-md)",
+                  background: "var(--bg-hover)",
+                  border: "1px solid var(--border-light)",
+                }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <span style={{ fontSize: "0.875rem", color: "var(--text-main)", fontWeight: 500 }}>
+                      关键词高赞爬取
+                    </span>
+                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                      按关键词搜索并按点赞排序抓取。
+                    </span>
+                  </div>
+                  <div
+                    onClick={() => setModuleConfig({ ...moduleConfig, enable_keyword_search: !(moduleConfig.enable_keyword_search ?? true) })}
+                    style={{
+                      width: "40px",
+                      height: "22px",
+                      borderRadius: "11px",
+                      background: (moduleConfig.enable_keyword_search ?? true) ? "var(--color-primary)" : "var(--text-muted)",
+                      position: "relative",
+                      cursor: "pointer",
+                      transition: "background 0.2s",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <div style={{
+                      width: "18px",
+                      height: "18px",
+                      borderRadius: "50%",
+                      background: "white",
+                      position: "absolute",
+                      top: "2px",
+                      left: (moduleConfig.enable_keyword_search ?? true) ? "20px" : "2px",
+                      transition: "left 0.2s",
+                    }} />
+                  </div>
+                </div>
+
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                  padding: "12px 14px",
+                  borderRadius: "var(--radius-md)",
+                  background: "var(--bg-hover)",
+                  border: "1px solid var(--border-light)",
+                }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px", flex: 1 }}>
+                    <span style={{ fontSize: "0.875rem", color: "var(--text-main)", fontWeight: 500 }}>
+                      关注流爬取
+                    </span>
+                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                      用当前账号的关注页抓取，再按关键词筛选。
+                    </span>
+                  </div>
+                  <input
+                    type="number"
+                    min={1}
+                    value={moduleConfig.fetch_follow_limit ?? 20}
+                    onChange={(e) => setModuleConfig({
+                      ...moduleConfig,
+                      fetch_follow_limit: Number(e.target.value || 1),
+                    })}
+                    style={{
+                      width: "88px",
+                      padding: "8px 10px",
+                      borderRadius: "var(--radius-md)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-app)",
+                      color: "var(--text-main)",
+                      fontSize: "0.8125rem",
+                      outline: "none",
+                    }}
+                  />
+                  <div
+                    onClick={() => setModuleConfig({ ...moduleConfig, follow_feed: !moduleConfig.follow_feed })}
+                    style={{
+                      width: "40px",
+                      height: "22px",
+                      borderRadius: "11px",
+                      background: moduleConfig.follow_feed ? "var(--color-primary)" : "var(--text-muted)",
+                      position: "relative",
+                      cursor: "pointer",
+                      transition: "background 0.2s",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <div style={{
+                      width: "18px",
+                      height: "18px",
+                      borderRadius: "50%",
+                      background: "white",
+                      position: "absolute",
+                      top: "2px",
+                      left: moduleConfig.follow_feed ? "20px" : "2px",
+                      transition: "left 0.2s",
+                    }} />
+                  </div>
+                </div>
+
+                <button
+                  onClick={async () => {
+                    await saveModuleConfig({
+                      keywords: moduleConfig.keywords || [],
+                      enable_keyword_search: moduleConfig.enable_keyword_search ?? true,
+                      keyword_min_likes: moduleConfig.keyword_min_likes ?? 500,
+                      keyword_search_limit: moduleConfig.keyword_search_limit ?? 10,
+                      follow_feed: moduleConfig.follow_feed ?? false,
+                      fetch_follow_limit: moduleConfig.fetch_follow_limit ?? 20,
+                      creator_groups: moduleConfig.creator_groups || [],
+                    }, "爬取策略已保存");
+                  }}
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--color-primary)",
+                    color: "white",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    border: "none",
+                    cursor: "pointer",
+                    alignSelf: "flex-start",
+                  }}
+                >
+                  保存爬取策略
                 </button>
               </div>
             </Card>

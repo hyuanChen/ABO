@@ -17,6 +17,8 @@ import {
   Trash2,
   Loader2,
   Eye,
+  Sparkles,
+  User,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
 import { api } from "../../core/api";
@@ -397,14 +399,36 @@ function GeneralSection() {
     document.documentElement.classList.contains("dark")
   );
   const [demoMode, setDemoMode] = useState(false);
-  const { addToast } = useStore();
+  const {
+    aiProvider, setAiProvider,
+    addToast, showcaseMode, setShowcaseMode,
+    pixelAvatarOnHover, setPixelAvatarOnHover,
+    sbtiHoverEnabled, setSbtiHoverEnabled,
+  } = useStore();
 
   // Load demo mode state from config
   useEffect(() => {
     api.get<Record<string, unknown>>("/api/config").then((cfg) => {
       setDemoMode(Boolean(cfg.demo_mode));
+      const provider = cfg.ai_provider;
+      if (provider === "codex" || provider === "claude") {
+        setAiProvider(provider);
+      }
     }).catch(() => {});
-  }, []);
+  }, [setAiProvider]);
+
+  async function updateAiProvider(provider: "codex" | "claude") {
+    try {
+      await api.post("/api/config", { ai_provider: provider });
+      setAiProvider(provider);
+      addToast({
+        kind: "success",
+        title: `默认 AI 已切换为 ${provider === "codex" ? "Codex" : "Claude"}`,
+      });
+    } catch {
+      addToast({ kind: "error", title: "保存默认 AI 失败" });
+    }
+  }
 
   async function toggleDemoMode() {
     const newVal = !demoMode;
@@ -455,6 +479,56 @@ function GeneralSection() {
         </div>
       </Card>
 
+      <Card title="AI 助手" icon={<Sparkles style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <SettingItem
+            icon={<Sparkles style={{ width: "20px", height: "20px" }} />}
+            title="默认后台 Agent"
+            description={aiProvider === "codex" ? "当前默认使用 Codex" : "当前默认使用 Claude"}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              {[
+                { id: "codex" as const, label: "Codex" },
+                { id: "claude" as const, label: "Claude" },
+              ].map((provider) => {
+                const active = aiProvider === provider.id;
+                return (
+                  <button
+                    key={provider.id}
+                    onClick={() => updateAiProvider(provider.id)}
+                    style={{
+                      padding: "8px 14px",
+                      borderRadius: "8px",
+                      border: `1px solid ${active ? "var(--color-primary)" : "var(--border-light)"}`,
+                      background: active ? "rgba(188, 164, 227, 0.15)" : "var(--bg-card)",
+                      color: active ? "var(--color-primary)" : "var(--text-secondary)",
+                      fontSize: "0.8125rem",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      transition: "all 0.2s ease",
+                    }}
+                  >
+                    {provider.label}
+                  </button>
+                );
+              })}
+            </div>
+          </SettingItem>
+          <div
+            style={{
+              padding: "10px 14px",
+              borderRadius: "var(--radius-md)",
+              background: "var(--bg-hover)",
+              fontSize: "0.75rem",
+              color: "var(--text-muted)",
+              lineHeight: 1.6,
+            }}
+          >
+            这个设置会影响聊天入口的默认选择，以及后端统一 AI 调用链路。新安装时默认使用 Codex。
+          </div>
+        </div>
+      </Card>
+
       {/* Appearance */}
       <Card title="外观设置" icon={<Palette style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
@@ -465,6 +539,106 @@ function GeneralSection() {
           >
             <Toggle enabled={darkMode} onToggle={() => setDarkMode(!darkMode)} />
           </SettingItem>
+        </div>
+      </Card>
+
+      {/* Showcase Mode */}
+      <Card title="炫酷展示模式" icon={<Sparkles style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <SettingItem
+            icon={<Sparkles style={{ width: "20px", height: "20px" }} />}
+            title="炫酷展示模式"
+            description={showcaseMode
+              ? "已开启：增强光效、霓虹雷达、粒子背景、Hero 角色卡"
+              : "开启后增强视觉效果，适合截图分享和宣传"
+            }
+          >
+            <Toggle
+              enabled={showcaseMode}
+              onToggle={() => {
+                setShowcaseMode(!showcaseMode);
+                addToast({
+                  kind: "success",
+                  title: !showcaseMode ? "炫酷模式已开启" : "炫酷模式已关闭",
+                  message: !showcaseMode ? "光效增强、霓虹雷达、Hero 角色卡已激活" : "已恢复标准 UI",
+                });
+              }}
+            />
+          </SettingItem>
+          {showcaseMode && (
+            <div
+              style={{
+                padding: "12px 16px",
+                borderRadius: "var(--radius-md)",
+                background: "linear-gradient(135deg, rgba(188, 164, 227, 0.12), rgba(255, 183, 178, 0.08))",
+                border: "1px solid rgba(188, 164, 227, 0.2)",
+                fontSize: "0.8125rem",
+                color: "var(--text-secondary)",
+                lineHeight: 1.7,
+              }}
+            >
+              <strong style={{ color: "var(--color-primary)" }}>展示增强已激活：</strong>
+              <br />
+              Hero 角色卡 / 霓虹六维雷达 / 浮动粒子背景 / 增强光影卡片 / 渐变文字
+            </div>
+          )}
+        </div>
+      </Card>
+
+      {/* Avatar Hover Behavior */}
+      <Card title="角色头像" icon={<User style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <SettingItem
+            icon={<User style={{ width: "20px", height: "20px" }} />}
+            title="启用悬停切换形态"
+            description={sbtiHoverEnabled
+              ? "悬停头像时会切换到第二形态（MBTI 或 PixelAvatar）"
+              : "始终显示 SBTI 像素头像，不响应悬停"
+            }
+          >
+            <Toggle
+              enabled={sbtiHoverEnabled}
+              onToggle={() => {
+                setSbtiHoverEnabled(!sbtiHoverEnabled);
+                addToast({
+                  kind: "success",
+                  title: "悬停切换已" + (!sbtiHoverEnabled ? "开启" : "关闭"),
+                });
+              }}
+            />
+          </SettingItem>
+          <SettingItem
+            icon={<User style={{ width: "20px", height: "20px" }} />}
+            title="悬停第二形态"
+            description={pixelAvatarOnHover
+              ? "悬停显示 PixelAvatar（随 SAN / 精力变化的 8 态小人）"
+              : "悬停显示 MBTIAvatar（16 种 MBTI 人格像素小人）"
+            }
+          >
+            <Toggle
+              enabled={pixelAvatarOnHover}
+              onToggle={() => {
+                setPixelAvatarOnHover(!pixelAvatarOnHover);
+                addToast({
+                  kind: "success",
+                  title: "头像悬停目标已切换",
+                  message: !pixelAvatarOnHover ? "悬停显示 PixelAvatar（状态反馈）" : "悬停显示 MBTIAvatar",
+                });
+              }}
+            />
+          </SettingItem>
+          <div
+            style={{
+              padding: "10px 14px",
+              borderRadius: "var(--radius-md)",
+              background: "var(--bg-hover)",
+              fontSize: "0.75rem",
+              color: "var(--text-muted)",
+              lineHeight: 1.6,
+            }}
+          >
+            默认显示 SBTI 像素头像（27 种人格）。可在角色卡右上角手动切换 SBTI 类型。
+          </div>
         </div>
       </Card>
 

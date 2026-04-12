@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Settings,
   ArrowLeft,
@@ -13,9 +13,24 @@ import {
   Check,
   Cookie,
   Loader2,
+  Globe,
+  CheckCircle2,
+  AlertCircle,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { api } from "../../../core/api";
 import { useStore } from "../../../core/store";
+import {
+  bilibiliGetConfig,
+  bilibiliGetCookieFromBrowser,
+  bilibiliVerifySessdata,
+} from "../../../api/bilibili";
+import {
+  xiaohongshuGetConfig,
+  xiaohongshuGetCookieFromBrowser,
+  xiaohongshuVerifyCookie,
+} from "../../../api/xiaohongshu";
 
 interface QuickConfigStepProps {
   onNext: () => void;
@@ -32,6 +47,20 @@ interface ModuleConfig {
   description: string;
 }
 
+type CookiePlatform = "bilibili" | "xiaohongshu";
+
+interface CookieSetupState {
+  configured: boolean;
+  verified: boolean;
+  loading: boolean;
+  testing: boolean;
+  expanded: boolean;
+  preview: string | null;
+  source?: string;
+  message?: string;
+  error?: string;
+}
+
 const DEFAULT_KEYWORDS: Record<string, string[]> = {
   "arxiv-tracker": ["machine learning", "artificial intelligence", "neural networks"],
   "bilibili-tracker": ["机器学习", "AI技术", "编程教程"],
@@ -46,6 +75,26 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
   const { addToast } = useStore();
   const [isSaving, setIsSaving] = useState(false);
   const [showCookieHint, setShowCookieHint] = useState(false);
+  const [cookieSetup, setCookieSetup] = useState<Record<CookiePlatform, CookieSetupState>>({
+    bilibili: {
+      configured: false,
+      verified: false,
+      loading: false,
+      testing: false,
+      expanded: true,
+      preview: null,
+      message: "一键读取浏览器 Cookie 后，会自动检测 SESSDATA 是否可用。",
+    },
+    xiaohongshu: {
+      configured: false,
+      verified: false,
+      loading: false,
+      testing: false,
+      expanded: true,
+      preview: null,
+      message: "一键读取浏览器 Cookie 后，会自动检测 web_session 是否可用。",
+    },
+  });
 
   const [modules, setModules] = useState<ModuleConfig[]>([
     {
@@ -129,6 +178,221 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
     );
   };
 
+  useEffect(() => {
+    void loadCookieStatus();
+  }, []);
+
+  const setCookiePlatformState = (
+    platform: CookiePlatform,
+    updater: (current: CookieSetupState) => CookieSetupState
+  ) => {
+    setCookieSetup((prev) => ({
+      ...prev,
+      [platform]: updater(prev[platform]),
+    }));
+  };
+
+  const extractCookieValue = (cookieText: string | undefined, name: string): string | null => {
+    if (!cookieText?.trim()) return null;
+
+    try {
+      if (cookieText.startsWith("[") || cookieText.startsWith("{")) {
+        const parsed = JSON.parse(cookieText);
+        if (Array.isArray(parsed)) {
+          const matched = parsed.find((item: any) => item?.name === name);
+          if (matched?.value) return String(matched.value);
+        }
+      }
+    } catch (error) {
+      console.error(`Failed to parse cookie JSON for ${name}:`, error);
+    }
+
+    const match = cookieText.match(new RegExp(`${name}=([^;\\s]+)`));
+    return match ? match[1] : null;
+  };
+
+  const loadCookieStatus = async () => {
+    try {
+      const [bilibiliConfig, xiaohongshuConfig] = await Promise.all([
+        bilibiliGetConfig(),
+        xiaohongshuGetConfig(),
+      ]);
+
+      setCookieSetup((prev) => ({
+        ...prev,
+        bilibili: {
+          ...prev.bilibili,
+          configured: bilibiliConfig.cookie_configured,
+          preview: bilibiliConfig.cookie_preview,
+          message: bilibiliConfig.cookie_configured
+            ? "已检测到已保存的浏览器 Cookie，可以直接重新测试。"
+            : prev.bilibili.message,
+        },
+        xiaohongshu: {
+          ...prev.xiaohongshu,
+          configured: xiaohongshuConfig.cookie_configured,
+          preview: xiaohongshuConfig.cookie_preview,
+          message: xiaohongshuConfig.cookie_configured
+            ? "已检测到已保存的浏览器 Cookie，可以直接重新测试。"
+            : prev.xiaohongshu.message,
+        },
+      }));
+    } catch (error) {
+      console.error("Failed to load onboarding cookie status:", error);
+    }
+  };
+
+  const handleBilibiliCookieFetch = async () => {
+    setCookiePlatformState("bilibili", (current) => ({
+      ...current,
+      loading: true,
+      testing: false,
+      error: undefined,
+      message: "正在从浏览器读取 B 站 Cookie...",
+    }));
+
+    try {
+      const result = await bilibiliGetCookieFromBrowser();
+      if (!result.success) {
+        throw new Error(result.error || "未找到哔哩哔哩 Cookie");
+      }
+
+      const sessdata = extractCookieValue(result.cookie, "SESSDATA");
+      if (!sessdata) {
+        throw new Error("已获取 Cookie，但没有解析到 SESSDATA");
+      }
+
+      setCookiePlatformState("bilibili", (current) => ({
+        ...current,
+        configured: true,
+        preview: result.cookie_preview || result.cookie || current.preview,
+        source: "浏览器",
+        loading: false,
+        testing: true,
+        message: "Cookie 已读取，正在验证登录态...",
+      }));
+
+      const verify = await bilibiliVerifySessdata({ sessdata });
+
+      setCookiePlatformState("bilibili", (current) => ({
+        ...current,
+        verified: verify.valid,
+        configured: true,
+        loading: false,
+        testing: false,
+        error: verify.valid ? undefined : verify.message,
+        message: verify.valid ? "测试通过，可以直接用于引导后的模块配置。" : verify.message,
+      }));
+
+      if (verify.valid) {
+        addToast({
+          kind: "success",
+          title: "B 站 Cookie 可用",
+          message: verify.message,
+        });
+      } else {
+        addToast({
+          kind: "info",
+          title: "B 站 Cookie 校验失败",
+          message: verify.message,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "获取浏览器 Cookie 失败";
+      setCookiePlatformState("bilibili", (current) => ({
+        ...current,
+        loading: false,
+        testing: false,
+        verified: false,
+        error: message,
+        message,
+      }));
+      addToast({
+        kind: "error",
+        title: "B 站一键获取失败",
+        message,
+      });
+    }
+  };
+
+  const handleXiaohongshuCookieFetch = async () => {
+    setCookiePlatformState("xiaohongshu", (current) => ({
+      ...current,
+      loading: true,
+      testing: false,
+      error: undefined,
+      message: "正在从浏览器读取小红书 Cookie...",
+    }));
+
+    try {
+      const result = await xiaohongshuGetCookieFromBrowser();
+      if (!result.success) {
+        throw new Error(result.error || "未找到小红书 Cookie");
+      }
+
+      const webSession = result.web_session || extractCookieValue(result.cookie, "web_session");
+      const idToken = result.id_token || extractCookieValue(result.cookie, "id_token") || undefined;
+
+      if (!webSession) {
+        throw new Error("已获取 Cookie，但没有解析到 web_session");
+      }
+
+      setCookiePlatformState("xiaohongshu", (current) => ({
+        ...current,
+        configured: true,
+        preview: result.cookie_preview || result.cookie || current.preview,
+        source: result.source,
+        loading: false,
+        testing: true,
+        message: "Cookie 已读取，正在验证登录态...",
+      }));
+
+      const verify = await xiaohongshuVerifyCookie({
+        web_session: webSession,
+        id_token: idToken,
+      });
+
+      setCookiePlatformState("xiaohongshu", (current) => ({
+        ...current,
+        verified: verify.valid,
+        configured: true,
+        loading: false,
+        testing: false,
+        error: verify.valid ? undefined : verify.message,
+        message: verify.valid ? "测试通过，可以直接用于搜索和入库。" : verify.message,
+      }));
+
+      if (verify.valid) {
+        addToast({
+          kind: "success",
+          title: "小红书 Cookie 可用",
+          message: verify.message,
+        });
+      } else {
+        addToast({
+          kind: "info",
+          title: "小红书 Cookie 校验失败",
+          message: verify.message,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "获取浏览器 Cookie 失败";
+      setCookiePlatformState("xiaohongshu", (current) => ({
+        ...current,
+        loading: false,
+        testing: false,
+        verified: false,
+        error: message,
+        message,
+      }));
+      addToast({
+        kind: "error",
+        title: "小红书一键获取失败",
+        message,
+      });
+    }
+  };
+
   const handleContinue = async () => {
     setIsSaving(true);
     try {
@@ -172,6 +436,198 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
 
   const enabledCount = modules.filter((m) => m.enabled).length;
   const cookieRequiredCount = modules.filter((m) => m.enabled && m.requiresCookie).length;
+  const showCookieSetup = modules.some(
+    (module) =>
+      module.enabled && (module.id === "bilibili-tracker" || module.id === "xiaohongshu-tracker")
+  );
+
+  const renderCookieSetupCard = (
+    platform: CookiePlatform,
+    title: string,
+    description: string,
+    onFetch: () => Promise<void>
+  ) => {
+    const state = cookieSetup[platform];
+    const isBusy = state.loading || state.testing;
+    const statusText = isBusy
+      ? state.testing
+        ? "测试中"
+        : "获取中"
+      : state.verified
+        ? "测试通过"
+        : state.configured
+          ? "已获取，待测试"
+          : "未配置";
+
+    const statusColor = isBusy
+      ? "#D48984"
+      : state.verified
+        ? "#22c55e"
+        : state.configured
+          ? "#E89B96"
+          : "var(--text-muted)";
+
+    return (
+      <div
+        style={{
+          padding: "16px",
+          borderRadius: "var(--radius-lg)",
+          background: "var(--bg-card)",
+          border: "1px solid var(--border-light)",
+          display: "flex",
+          flexDirection: "column",
+          gap: "12px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px" }}>
+          <div>
+            <div style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)" }}>{title}</div>
+            <div style={{ marginTop: "4px", fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+              {description}
+            </div>
+          </div>
+
+          <span
+            style={{
+              padding: "4px 10px",
+              borderRadius: "999px",
+              background: `${statusColor}18`,
+              color: statusColor,
+              fontSize: "0.75rem",
+              fontWeight: 700,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {statusText}
+          </span>
+        </div>
+
+        <div
+          style={{
+            padding: "12px",
+            borderRadius: "var(--radius-md)",
+            background: state.verified ? "rgba(34, 197, 94, 0.08)" : "var(--bg-hover)",
+            border: `1px solid ${state.verified ? "rgba(34, 197, 94, 0.2)" : "var(--border-light)"}`,
+            color: state.verified ? "#22c55e" : "var(--text-secondary)",
+            fontSize: "0.8125rem",
+            lineHeight: 1.6,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            {state.verified ? (
+              <CheckCircle2 style={{ width: "16px", height: "16px", color: "#22c55e" }} />
+            ) : (
+              <AlertCircle style={{ width: "16px", height: "16px", color: statusColor }} />
+            )}
+            <span>{state.message}</span>
+          </div>
+          {state.source && <div style={{ marginTop: "6px", color: "var(--text-muted)" }}>来源：{state.source}</div>}
+        </div>
+
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
+          <button
+            onClick={() => void onFetch()}
+            disabled={isBusy}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "8px",
+              padding: "10px 16px",
+              borderRadius: "var(--radius-md)",
+              border: "none",
+              background: isBusy ? "var(--bg-muted)" : "var(--color-primary)",
+              color: "white",
+              fontSize: "0.875rem",
+              fontWeight: 700,
+              cursor: isBusy ? "not-allowed" : "pointer",
+            }}
+          >
+            {isBusy ? (
+              <>
+                <Loader2 style={{ width: "16px", height: "16px", animation: "spin 1s linear infinite" }} />
+                {state.testing ? "测试中..." : "获取中..."}
+              </>
+            ) : (
+              <>
+                <Globe style={{ width: "16px", height: "16px" }} />
+                一键获取并测试
+              </>
+            )}
+          </button>
+
+          <button
+            onClick={() =>
+              setCookiePlatformState(platform, (current) => ({
+                ...current,
+                expanded: !current.expanded,
+              }))
+            }
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              padding: "10px 14px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border-light)",
+              background: "var(--bg-app)",
+              color: "var(--text-secondary)",
+              fontSize: "0.8125rem",
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            {state.expanded ? <ChevronUp style={{ width: "14px", height: "14px" }} /> : <ChevronDown style={{ width: "14px", height: "14px" }} />}
+            {state.expanded ? "收起详情" : "查看详情"}
+          </button>
+        </div>
+
+        {state.expanded && (
+          <div
+            style={{
+              padding: "12px",
+              borderRadius: "var(--radius-md)",
+              background: "var(--bg-hover)",
+              border: "1px dashed var(--border-light)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px",
+            }}
+          >
+            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.7 }}>
+              会直接复用当前工具页的 Cookie 获取方式，并写入 ABO 全局配置。
+            </div>
+            {state.preview ? (
+              <textarea
+                readOnly
+                value={state.preview}
+                style={{
+                  width: "100%",
+                  minHeight: "92px",
+                  resize: "vertical",
+                  padding: "10px 12px",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-app)",
+                  color: "var(--text-secondary)",
+                  fontFamily: "monospace",
+                  fontSize: "0.75rem",
+                  lineHeight: 1.55,
+                }}
+              />
+            ) : (
+              <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+                还没有读取到 Cookie。先确认浏览器已经登录对应站点。
+              </div>
+            )}
+            {state.error && (
+              <div style={{ fontSize: "0.8125rem", color: "#ef4444", lineHeight: 1.6 }}>{state.error}</div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div
@@ -227,7 +683,7 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
         </p>
       </div>
 
-      {/* Cookie Hint Toggle */}
+      {/* Cookie Setup */}
       <div
         style={{
           padding: "16px 20px",
@@ -262,28 +718,32 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
         {showCookieHint && (
           <div style={{ marginTop: "16px", paddingTop: "16px", borderTop: "1px solid rgba(255, 183, 178, 0.2)" }}>
             <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", lineHeight: 1.7, marginBottom: "12px" }}>
-              部分模块（B站、小红书、知乎）需要 Cookie 才能正常工作。你可以：
+              引导里已经接入当前工具页的一键获取逻辑。B 站和小红书会在获取后立刻测试；知乎仍然可以稍后到模块管理页手动配置。
             </p>
-            <ul style={{ fontSize: "0.875rem", color: "var(--text-secondary)", lineHeight: 1.8, marginLeft: "20px" }}>
-              <li>现在跳过，稍后到「模块管理」页面配置</li>
-              <li>现在启用模块，ABO 会提示你如何获取 Cookie</li>
-            </ul>
-            <div style={{ marginTop: "12px", display: "flex", gap: "12px" }}>
-              <button
-                onClick={() => setShowCookieHint(false)}
-                style={{
-                  padding: "8px 16px",
-                  borderRadius: "var(--radius-md)",
-                  background: "var(--bg-card)",
-                  border: "1px solid var(--border-light)",
-                  fontSize: "0.875rem",
-                  color: "var(--text-secondary)",
-                  cursor: "pointer",
-                }}
-              >
-                稍后再说
-              </button>
-            </div>
+            {showCookieSetup && (
+              <div style={{ display: "grid", gap: "12px", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
+                {modules.some((module) => module.enabled && module.id === "bilibili-tracker") &&
+                  renderCookieSetupCard(
+                    "bilibili",
+                    "哔哩哔哩 Cookie",
+                    "读取浏览器登录态，自动验证 SESSDATA，并保存到引导后的模块环境。",
+                    handleBilibiliCookieFetch
+                  )}
+                {modules.some((module) => module.enabled && module.id === "xiaohongshu-tracker") &&
+                  renderCookieSetupCard(
+                    "xiaohongshu",
+                    "小红书 Cookie",
+                    "读取浏览器登录态，自动验证 web_session，并保存到后续搜索和入库流程。",
+                    handleXiaohongshuCookieFetch
+                  )}
+              </div>
+            )}
+
+            {!showCookieSetup && (
+              <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+                只有启用 B 站或小红书模块时，才会显示对应的一键获取入口。
+              </div>
+            )}
           </div>
         )}
       </div>

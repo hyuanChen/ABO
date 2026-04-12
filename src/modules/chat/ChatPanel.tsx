@@ -58,7 +58,7 @@ export function ChatPanel() {
     try {
       // 先创建对话（这会连接 WebSocket）
       const conv = await createNewConversation(
-        selectedCli?.id,
+        targetCliId,
         initialMessage.slice(0, 30)
       );
 

@@ -77,3 +77,29 @@ crontab -e
 - `vault_path`: 如果未配置文献库，则使用 `Vault/Literature`
 
 如果配置文件不存在，请先启动 ABO 应用完成初始化。
+
+---
+
+## bilibili/
+
+Bilibili 一键爬取脚本，默认保存到配置的情报库路径下的 `bilibili/` 文件夹。
+
+### 常用命令
+
+```bash
+python scripts/bilibili/verify.py
+python scripts/bilibili/crawl_all.py
+python scripts/bilibili/crawl_dynamics.py --limit 9
+python scripts/bilibili/crawl_favorites.py --folder-limit 1 --item-limit 5
+python scripts/bilibili/crawl_watch_later.py --limit 5
+```
+
+### Cookie
+
+推荐先打开 Edge 调试端口：
+
+```bash
+open -a "Microsoft Edge" --args --remote-debugging-port=9222
+```
+
+脚本会优先通过 CDP 读取完整 Bilibili Cookie。完整说明见 `scripts/bilibili/README.md`。

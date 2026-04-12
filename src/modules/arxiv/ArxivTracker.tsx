@@ -4,7 +4,6 @@ import {
   RefreshCw,
   ExternalLink,
   Star,
-  Filter,
   Save,
   Search,
   Calendar,
@@ -13,7 +12,6 @@ import {
   ChevronDown,
   ChevronUp,
   Check,
-  Layers,
   Cpu,
   GitBranch,
   Square,
@@ -103,35 +101,15 @@ interface CrawlProgress {
 export default function ArxivTracker() {
   const {
     config,
-    arxivAndPapers, arxivOrPapers,
-    arxivAndCrawling, arxivOrCrawling,
-    arxivAndProgress, arxivOrProgress,
-    arxivAndKeywords, arxivOrKeywords,
-    setArxivAndPapers, setArxivOrPapers,
-    setArxivAndCrawling, setArxivOrCrawling,
-    setArxivAndProgress, setArxivOrProgress,
-    setArxivAndKeywords, setArxivOrKeywords,
+    arxivAndPapers,
+    arxivAndCrawling,
+    arxivAndProgress,
+    arxivAndKeywords,
+    setArxivAndPapers,
+    setArxivAndCrawling,
+    setArxivAndProgress,
+    setArxivAndKeywords,
   } = useStore();
-
-  // AND 搜索模式状态 - use store state
-  const andKeywords = arxivAndKeywords;
-  const setAndKeywords = setArxivAndKeywords;
-  const andPapers = arxivAndPapers;
-  const setAndPapers = setArxivAndPapers;
-  const andCrawling = arxivAndCrawling;
-  const setAndCrawling = setArxivAndCrawling;
-  const andProgress = arxivAndProgress;
-  const setAndProgress = setArxivAndProgress;
-
-  // OR 搜索模式状态 - use store state
-  const orKeywords = arxivOrKeywords;
-  const setOrKeywords = setArxivOrKeywords;
-  const orPapers = arxivOrPapers;
-  const setOrPapers = setArxivOrPapers;
-  const orCrawling = arxivOrCrawling;
-  const setOrCrawling = setArxivOrCrawling;
-  const orProgress = arxivOrProgress;
-  const setOrProgress = setArxivOrProgress;
 
   // Semantic Scholar 状态
   const [arxivIdInput, _setArxivIdInput] = useState("");
@@ -142,13 +120,14 @@ export default function ArxivTracker() {
   const [_fetchReferences, _setFetchReferences] = useState(false);
 
   // 通用状态
-  const [activeTab, setActiveTab] = useState<"and" | "or" | "followups">("and");
-  const [filterScore, setFilterScore] = useState(0);
+  const [activeTab, setActiveTab] = useState<"search" | "followups">("search");
   const [loading, setLoading] = useState(false);
   const [savedPapers, setSavedPapers] = useState<Set<string>>(new Set());
   const [_savedS2Papers, _setSavedS2Papers] = useState<Set<string>>(new Set());
   const [autoSave, setAutoSave] = useState(false);
   const [csOnly, setCsOnly] = useState(true);
+  const [searchMaxResults, setSearchMaxResults] = useState(50);
+  const [searchDaysBack, setSearchDaysBack] = useState(180);
 
   const toast = useToast();
   const wsRef = useRef<WebSocket | null>(null);
@@ -158,8 +137,7 @@ export default function ArxivTracker() {
   // WebSocket 连接 - 使用 ref 来避免依赖问题，确保事件处理始终可用
   const activeTabRef = useRef(activeTab);
   const autoSaveRef = useRef(autoSave);
-  const andCrawlingRef = useRef(andCrawling);
-  const orCrawlingRef = useRef(orCrawling);
+  const searchCrawlingRef = useRef(arxivAndCrawling);
 
   useEffect(() => {
     activeTabRef.current = activeTab;
@@ -170,12 +148,8 @@ export default function ArxivTracker() {
   }, [autoSave]);
 
   useEffect(() => {
-    andCrawlingRef.current = andCrawling;
-  }, [andCrawling]);
-
-  useEffect(() => {
-    orCrawlingRef.current = orCrawling;
-  }, [orCrawling]);
+    searchCrawlingRef.current = arxivAndCrawling;
+  }, [arxivAndCrawling]);
 
   // Track which mode is currently crawling using a crawling ID
   const crawlingIdRef = useRef<string | null>(null);
@@ -251,10 +225,8 @@ export default function ArxivTracker() {
             }
           } else if (data.type === "crawl_cancelled") {
             toast.info("已取消", data.message || "爬取任务已取消");
-            setAndCrawling(false);
-            setOrCrawling(false);
-            setAndProgress(null);
-            setOrProgress(null);
+            setArxivAndCrawling(false);
+            setArxivAndProgress(null);
             crawlingIdRef.current = null;
             setCrawlingMode(null);
             setCrawlSessionId(null);
@@ -267,48 +239,30 @@ export default function ArxivTracker() {
               message: data.message,
               currentPaperTitle: data.currentPaperTitle,
             };
-            setAndProgress(progress);
-            setOrProgress(progress);
+            setArxivAndProgress(progress);
           } else if (data.type === "crawl_paper") {
             const store = useStore.getState();
-            const currentMode = crawlingModeRef.current || crawlingIdRef.current;
-            console.log("[arXiv] Received paper:", data.paper?.id, "mode:", currentMode);
-            if (!currentMode || currentMode === "AND") {
-              const exists = store.arxivAndPapers.find(p => p.id === data.paper.id);
-              if (!exists) {
-                console.log("[arXiv] Adding to AND list");
-                store.appendArxivAndPaper(data.paper);
-                if (shouldAutoSave && saveSinglePaperRef.current) {
-                  saveSinglePaperRef.current(data.paper);
-                }
-              }
-            }
-            if (currentMode === "OR") {
-              const exists = store.arxivOrPapers.find(p => p.id === data.paper.id);
-              if (!exists) {
-                console.log("[arXiv] Adding to OR list");
-                store.appendArxivOrPaper(data.paper);
-                if (shouldAutoSave && saveSinglePaperRef.current) {
-                  saveSinglePaperRef.current(data.paper);
-                }
+            console.log("[arXiv] Received paper:", data.paper?.id, "mode:", crawlingModeRef.current || crawlingIdRef.current);
+            const exists = store.arxivAndPapers.find(p => p.id === data.paper.id);
+            if (!exists) {
+              console.log("[arXiv] Adding to search list");
+              store.appendArxivAndPaper(data.paper);
+              if (shouldAutoSave && saveSinglePaperRef.current) {
+                saveSinglePaperRef.current(data.paper);
               }
             }
           } else if (data.type === "crawl_complete") {
             console.log("[arXiv] Crawl complete:", data.count);
             toast.success("爬取完成", `共找到 ${data.count} 篇论文`);
-            setAndCrawling(false);
-            setOrCrawling(false);
-            setAndProgress(null);
-            setOrProgress(null);
+            setArxivAndCrawling(false);
+            setArxivAndProgress(null);
             crawlingIdRef.current = null;
             setCrawlingMode(null);
           } else if (data.type === "crawl_error") {
             console.error("[arXiv] Crawl error:", data.error);
             toast.error("爬取失败", data.error);
-            setAndCrawling(false);
-            setOrCrawling(false);
-            setAndProgress(null);
-            setOrProgress(null);
+            setArxivAndCrawling(false);
+            setArxivAndProgress(null);
             crawlingIdRef.current = null;
             setCrawlingMode(null);
           } else if (data.type === "s2_progress") {
@@ -395,8 +349,7 @@ export default function ArxivTracker() {
         const dateB = b.metadata?.published || "";
         return dateB.localeCompare(dateA);
       });
-      // 默认加载到 AND 列表
-      setAndPapers(sorted);
+      setArxivAndPapers(sorted);
     } catch (err) {
       console.error("Failed to load papers:", err);
     } finally {
@@ -426,12 +379,9 @@ export default function ArxivTracker() {
             local_figures: result.figures,
           },
         };
-        // Update in both lists using store
         const store = useStore.getState();
-        const newAndPapers = store.arxivAndPapers.map(p => p.id === paper.id ? updatedPaper : p);
-        const newOrPapers = store.arxivOrPapers.map(p => p.id === paper.id ? updatedPaper : p);
-        setAndPapers(newAndPapers);
-        setOrPapers(newOrPapers);
+        const newPapers = store.arxivAndPapers.map(p => p.id === paper.id ? updatedPaper : p);
+        setArxivAndPapers(newPapers);
       }
     } catch (e) {
       console.error(`Failed to save paper ${paper.id}:`, e);
@@ -443,8 +393,9 @@ export default function ArxivTracker() {
     saveSinglePaperRef.current = saveSinglePaper;
   }, []);
 
-  async function runCrawl(mode: "AND" | "OR" | "AND_OR") {
-    const keywords = mode === "AND" ? andKeywords : orKeywords;
+  async function runCrawl() {
+    const keywords = arxivAndKeywords;
+    const mode: "AND" | "AND_OR" = keywords.includes("|") ? "AND_OR" : "AND";
 
     // For AND_OR mode, pass the raw keywords string (with | separator) as a single item
     // For other modes, split by comma
@@ -461,25 +412,19 @@ export default function ArxivTracker() {
     crawlingIdRef.current = mode;
     setCrawlingMode(mode);
 
-    if (mode === "AND") {
-      setAndCrawling(true);
-      setAndPapers([]);
-      setAndProgress({ current: 0, total: 20, phase: "fetching", message: "正在获取论文列表..." });
-    } else {
-      setOrCrawling(true);
-      setOrPapers([]);
-      setOrProgress({ current: 0, total: 20, phase: "fetching", message: "正在获取论文列表..." });
-    }
+    setArxivAndCrawling(true);
+    setArxivAndPapers([]);
+    setArxivAndProgress({ current: 0, total: searchMaxResults, phase: "fetching", message: "正在获取论文列表..." });
 
     try {
       // 启动爬取，结果会通过 WebSocket 推送
       console.log("[arXiv] Starting crawl API call with mode:", mode);
       await api.post("/api/modules/arxiv-tracker/crawl", {
         keywords: keywordList,
-        max_results: 20,
+        max_results: searchMaxResults,
         mode: mode,
         cs_only: csOnly,
-        days_back: 3,
+        days_back: searchDaysBack,
       });
       console.log("[arXiv] Crawl API call completed");
     } catch (err) {
@@ -489,11 +434,7 @@ export default function ArxivTracker() {
       setCrawlingMode(null);
       setCrawlSessionId(null);
       crawlSessionIdRef.current = null;
-      if (mode === "AND") {
-        setAndCrawling(false);
-      } else {
-        setOrCrawling(false);
-      }
+      setArxivAndCrawling(false);
     }
   }
 
@@ -533,12 +474,9 @@ export default function ArxivTracker() {
             local_figures: result.figures,
           },
         };
-        // Update in state using store
         const store = useStore.getState();
-        const newAndPapers = store.arxivAndPapers.map(p => p.id === paper.id ? updatedPaper : p);
-        const newOrPapers = store.arxivOrPapers.map(p => p.id === paper.id ? updatedPaper : p);
-        setAndPapers(newAndPapers);
-        setOrPapers(newOrPapers);
+        const newPapers = store.arxivAndPapers.map(p => p.id === paper.id ? updatedPaper : p);
+        setArxivAndPapers(newPapers);
       }
 
       toast.success("保存成功", `已保存到文献库/arxiv/${paper.id}${result.figures ? ` (${result.figures.length} 张图片)` : ""}`);
@@ -547,12 +485,9 @@ export default function ArxivTracker() {
     }
   }
 
-  const currentPapers = activeTab === "and" ? andPapers : activeTab === "or" ? orPapers : s2Papers;
-  const filteredPapers = activeTab === "followups" ? currentPapers : currentPapers.filter(p => p.score >= filterScore);
-  const isCrawling = activeTab === "and" ? andCrawling : activeTab === "or" ? orCrawling : s2Crawling;
-  const currentProgress = activeTab === "and" ? andProgress : activeTab === "or" ? orProgress : s2Progress;
-  const currentKeywords = activeTab === "and" ? andKeywords : orKeywords;
-  const setCurrentKeywords = activeTab === "and" ? setAndKeywords : setOrKeywords;
+  const currentPapers = activeTab === "search" ? arxivAndPapers : s2Papers;
+  const isCrawling = activeTab === "search" ? arxivAndCrawling : s2Crawling;
+  const currentProgress = activeTab === "search" ? arxivAndProgress : s2Progress;
 
   // Fetch follow-up papers from Semantic Scholar
   async function fetchS2FollowUps() {
@@ -667,10 +602,10 @@ export default function ArxivTracker() {
       />
 
       <PageContent maxWidth="1200px">
-        {/* Mode Tabs */}
+        {/* Search Tabs */}
         <div style={{ display: "flex", gap: "8px", marginBottom: "20px" }}>
           <button
-            onClick={() => setActiveTab("and")}
+            onClick={() => setActiveTab("search")}
             style={{
               flex: 1,
               display: "flex",
@@ -679,32 +614,9 @@ export default function ArxivTracker() {
               gap: "8px",
               padding: "16px 24px",
               borderRadius: "var(--radius-lg)",
-              background: activeTab === "and" ? "var(--color-primary)" : "var(--bg-card)",
-              border: `1px solid ${activeTab === "and" ? "transparent" : "var(--border-light)"}`,
-              color: activeTab === "and" ? "white" : "var(--text-secondary)",
-              fontSize: "0.9375rem",
-              fontWeight: 600,
-              cursor: "pointer",
-              transition: "all 0.3s ease",
-            }}
-          >
-            <Layers style={{ width: "18px", height: "18px" }} />
-            AND 模式
-            <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>(摘要包含所有关键词)</span>
-          </button>
-          <button
-            onClick={() => setActiveTab("or")}
-            style={{
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "8px",
-              padding: "16px 24px",
-              borderRadius: "var(--radius-lg)",
-              background: activeTab === "or" ? "var(--color-primary)" : "var(--bg-card)",
-              border: `1px solid ${activeTab === "or" ? "transparent" : "var(--border-light)"}`,
-              color: activeTab === "or" ? "white" : "var(--text-secondary)",
+              background: activeTab === "search" ? "var(--color-primary)" : "var(--bg-card)",
+              border: `1px solid ${activeTab === "search" ? "transparent" : "var(--border-light)"}`,
+              color: activeTab === "search" ? "white" : "var(--text-secondary)",
               fontSize: "0.9375rem",
               fontWeight: 600,
               cursor: "pointer",
@@ -712,8 +624,8 @@ export default function ArxivTracker() {
             }}
           >
             <Search style={{ width: "18px", height: "18px" }} />
-            AND-OR 模式
-            <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>(| 分隔多组 AND)</span>
+            关键词搜索
+            <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>(AND / AND-OR)</span>
           </button>
           <button
             onClick={() => setActiveTab("followups")}
@@ -860,12 +772,12 @@ export default function ArxivTracker() {
                 </div>
               </>
             ) : (
-              // AND/OR Tab UI
+              // Keyword search UI
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
                   <Search style={{ width: "20px", height: "20px", color: "var(--color-primary)" }} />
                   <span style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>
-                    {activeTab === "and" ? "AND 关键词搜索" : "AND-OR 组合搜索"}
+                    arXiv 关键词搜索
                   </span>
                   <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "12px" }}>
                     <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
@@ -884,18 +796,73 @@ export default function ArxivTracker() {
                   </div>
                 </div>
 
+                <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+                  <label style={{ display: "flex", flexDirection: "column", gap: "6px", width: "120px" }}>
+                    <span style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-secondary)" }}>
+                      最大结果数
+                    </span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={200}
+                      value={searchMaxResults}
+                      onChange={(e) => {
+                        const value = Number(e.target.value);
+                        setSearchMaxResults(Number.isFinite(value) ? Math.min(200, Math.max(1, value)) : 50);
+                      }}
+                      disabled={isCrawling}
+                      style={{
+                        height: "38px",
+                        padding: "8px 12px",
+                        borderRadius: "var(--radius-md)",
+                        border: "1px solid var(--border-light)",
+                        background: "var(--bg-app)",
+                        color: "var(--text-main)",
+                        fontSize: "0.875rem",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  </label>
+
+                  <label style={{ display: "flex", flexDirection: "column", gap: "6px", width: "140px" }}>
+                    <span style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-secondary)" }}>
+                      截止时间范围(天)
+                    </span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={3650}
+                      value={searchDaysBack}
+                      onChange={(e) => {
+                        const value = Number(e.target.value);
+                        setSearchDaysBack(Number.isFinite(value) ? Math.min(3650, Math.max(1, value)) : 180);
+                      }}
+                      disabled={isCrawling}
+                      style={{
+                        height: "38px",
+                        padding: "8px 12px",
+                        borderRadius: "var(--radius-md)",
+                        border: "1px solid var(--border-light)",
+                        background: "var(--bg-app)",
+                        color: "var(--text-main)",
+                        fontSize: "0.875rem",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  </label>
+                </div>
+
                 <div style={{ display: "flex", gap: "12px", alignItems: "stretch" }}>
                   <input
                     type="text"
-                    value={currentKeywords}
-                    onChange={(e) => setCurrentKeywords(e.target.value)}
+                    value={arxivAndKeywords}
+                    onChange={(e) => setArxivAndKeywords(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !isCrawling) {
-                        const mode = activeTab === "or" ? "AND_OR" : "AND";
-                        runCrawl(mode);
+                        runCrawl();
                       }
                     }}
-                    placeholder={activeTab === "and" ? "输入关键词(AND)，如：robotics, manipulation" : "AND-OR模式：vision,robotics | manipulation,gripper"}
+                    placeholder="AND：robotics, manipulation；AND-OR：vision,language | robot,manipulation"
                     disabled={isCrawling}
                     style={{
                       flex: 1,
@@ -934,10 +901,7 @@ export default function ArxivTracker() {
                     </button>
                   ) : (
                     <button
-                      onClick={() => {
-                        const mode = activeTab === "or" ? "AND_OR" : "AND";
-                        runCrawl(mode);
-                      }}
+                      onClick={runCrawl}
                       disabled={isCrawling}
                       style={{
                         display: "flex",
@@ -958,13 +922,13 @@ export default function ArxivTracker() {
                       }}
                     >
                       <RefreshCw style={{ width: "16px", height: "16px", animation: isCrawling ? "spin 1s linear infinite" : "none" }} />
-                      {isCrawling ? "爬取中..." : `立即爬取 (20篇)`}
+                      {isCrawling ? "爬取中..." : `立即爬取 (${searchMaxResults}篇)`}
                     </button>
                   )}
                 </div>
 
                 {/* AND-OR Mode Help Text */}
-                {activeTab === "or" && !isCrawling && (
+                {!isCrawling && (
                   <div style={{
                     marginTop: "12px",
                     padding: "12px 16px",
@@ -975,9 +939,9 @@ export default function ArxivTracker() {
                     color: "var(--text-secondary)",
                     lineHeight: 1.6,
                   }}>
-                    <strong style={{ color: "var(--text-main)" }}>AND-OR 模式说明：</strong>
+                    <strong style={{ color: "var(--text-main)" }}>搜索规则：</strong>
                     <br />
-                    用 <code style={{ background: "var(--bg-card)", padding: "2px 6px", borderRadius: "4px" }}>|</code> 分隔多组 AND 条件
+                    逗号分隔的关键词按 AND 搜索；用 <code style={{ background: "var(--bg-card)", padding: "2px 6px", borderRadius: "4px" }}>|</code> 分隔多组 AND 条件
                     <br />
                     例如：
                     <code style={{ background: "var(--bg-card)", padding: "2px 6px", borderRadius: "4px" }}>
@@ -1013,7 +977,9 @@ export default function ArxivTracker() {
                     <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>
                       {currentProgress.phase === "fetching"
                         ? "正在获取论文列表..."
-                        : `正在处理第 ${currentProgress.current}/${currentProgress.total} 篇`}
+                        : activeTab === "search"
+                          ? `正在推送第 ${currentProgress.current}/${currentProgress.total} 篇`
+                          : `正在处理第 ${currentProgress.current}/${currentProgress.total} 篇`}
                     </div>
                     <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", marginTop: "2px" }}>
                       {currentProgress.message || "正在爬取..."}
@@ -1193,61 +1159,17 @@ export default function ArxivTracker() {
           </div>
         </Card>
 
-        {/* Filter Bar */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "16px",
-            marginBottom: "20px",
-            padding: "12px 20px",
-            background: "var(--bg-card)",
-            borderRadius: "var(--radius-full)",
-            border: "1px solid var(--border-light)",
-            width: "fit-content",
-          }}
-        >
-          <Filter style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
-          <span style={{ fontSize: "0.875rem", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
-            最低评分
-          </span>
-          <input
-            type="range"
-            min="0"
-            max="1"
-            step="0.1"
-            value={filterScore}
-            onChange={(e) => setFilterScore(parseFloat(e.target.value))}
-            style={{ width: "120px" }}
-          />
-          <span
-            style={{
-              fontSize: "0.875rem",
-              fontWeight: 700,
-              color: filterScore >= 0.8 ? "#10B981" : filterScore >= 0.6 ? "#F59E0B" : "var(--text-main)",
-              minWidth: "40px",
-            }}
-          >
-            {(filterScore * 10).toFixed(0)}
-          </span>
-          <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)", marginLeft: "8px" }}>
-            {filteredPapers.length} / {currentPapers.length} 篇
-          </span>
-        </div>
-
         {/* Papers List */}
         {loading && currentPapers.length === 0 ? (
           <LoadingState message="加载论文中..." />
-        ) : filteredPapers.length === 0 ? (
+        ) : currentPapers.length === 0 ? (
           <EmptyState
             icon={FileText}
             title="暂无论文"
             description={
-              currentPapers.length === 0
-                ? activeTab === "followups"
-                  ? "输入 arXiv ID 点击「查找后续论文」开始搜索"
-                  : `输入关键词点击「立即爬取」开始${activeTab === "and" ? "AND" : "OR"}搜索`
-                : "没有符合评分筛选条件的论文"
+              activeTab === "followups"
+                ? "输入 arXiv ID 点击「查找后续论文」开始搜索"
+                : "输入关键词点击「立即爬取」开始搜索"
             }
           />
         ) : (
@@ -1262,7 +1184,7 @@ export default function ArxivTracker() {
                     hasLiteraturePath={!!(config?.literature_path || config?.vault_path)}
                   />
                 ))
-              : filteredPapers.map((paper) => (
+              : currentPapers.map((paper) => (
                   <PaperCard
                     key={paper.id}
                     paper={paper}
@@ -1301,12 +1223,8 @@ function PaperCard({
   hasLiteraturePath: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const score = Math.round(paper.score * 10);
   const meta = paper.metadata || {};
   const authors = meta.authors || [];
-
-  const scoreColor = score >= 8 ? "#10B981" : score >= 6 ? "#F59E0B" : "#94A3B8";
-  const scoreBg = score >= 8 ? "rgba(16, 185, 129, 0.1)" : score >= 6 ? "rgba(245, 158, 11, 0.1)" : "rgba(148, 163, 184, 0.1)";
 
   const formatDate = (dateStr: string) => {
     if (!dateStr) return "";
@@ -1321,29 +1239,8 @@ function PaperCard({
   return (
     <Card noPadding>
       <div style={{ padding: "20px 24px" }}>
-        {/* Header: Score + Title + Actions */}
+        {/* Header: Title + Actions */}
         <div style={{ display: "flex", gap: "16px", marginBottom: "12px" }}>
-          {/* Score Badge */}
-          <div
-            style={{
-              width: "48px",
-              height: "48px",
-              borderRadius: "var(--radius-md)",
-              background: scoreBg,
-              border: `2px solid ${scoreColor}`,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              flexShrink: 0,
-            }}
-          >
-            <span style={{ fontSize: "1.25rem", fontWeight: 700, color: scoreColor, lineHeight: 1 }}>
-              {score}
-            </span>
-            <span style={{ fontSize: "0.625rem", color: scoreColor, opacity: 0.8 }}>分</span>
-          </div>
-
           {/* Title & Meta */}
           <div style={{ flex: 1, minWidth: 0 }}>
             <a

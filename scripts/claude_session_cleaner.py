@@ -80,6 +80,134 @@ def _iso_to_epoch_ms(iso_str: str) -> int:
         return 0
 
 
+def _flatten_text_content(content) -> str:
+    """Extract plain text from Claude transcript content payloads."""
+    if isinstance(content, str):
+        return content.strip()
+
+    if not isinstance(content, list):
+        return ""
+
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            text = block.strip()
+            if text:
+                parts.append(text)
+            continue
+
+        if not isinstance(block, dict):
+            continue
+
+        block_type = block.get("type")
+        if block_type == "text":
+            text = str(block.get("text", "")).strip()
+            if text:
+                parts.append(text)
+        elif block_type == "thinking":
+            text = str(block.get("thinking", "")).strip()
+            if text:
+                parts.append(text)
+
+    return "\n\n".join(parts).strip()
+
+
+def _extract_message_text(message) -> str:
+    """Extract plain text from a transcript message object."""
+    if isinstance(message, str):
+        return message.strip()
+    if isinstance(message, dict):
+        return _flatten_text_content(message.get("content", ""))
+    return ""
+
+
+def _build_session_timeline(session_id: str) -> list[dict]:
+    """Read transcript entries and return text-centric timeline items for the UI."""
+    if not PROJECTS_DIR.exists():
+        return []
+
+    for project_dir in PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+
+        jsonl = project_dir / f"{session_id}.jsonl"
+        if not jsonl.exists():
+            continue
+
+        timeline = []
+        try:
+            with open(jsonl, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    entry_type = obj.get("type")
+                    if entry_type == "user":
+                        if obj.get("isMeta") or obj.get("toolUseResult") is not None:
+                            continue
+                        text = _extract_message_text(obj.get("message"))
+                        if text:
+                            timeline.append({
+                                "role": "user",
+                                "kind": "prompt",
+                                "content": text[:8000],
+                                "timestamp": obj.get("timestamp", ""),
+                            })
+                        continue
+
+                    if entry_type != "assistant":
+                        continue
+
+                    message = obj.get("message", {})
+                    content = message.get("content", []) if isinstance(message, dict) else []
+                    if not isinstance(content, list):
+                        continue
+
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+
+                        block_type = block.get("type")
+                        if block_type == "tool_use":
+                            continue
+
+                        if block_type == "text":
+                            text = str(block.get("text", "")).strip()
+                            if text:
+                                timeline.append({
+                                    "role": "assistant",
+                                    "kind": "reply",
+                                    "content": text[:12000],
+                                    "timestamp": obj.get("timestamp", ""),
+                                })
+
+        except Exception:
+            return []
+
+        merged = []
+        for item in timeline:
+            if (
+                merged
+                and item.get("kind") == "reply"
+                and merged[-1].get("kind") == "reply"
+            ):
+                prev = merged[-1]
+                prev_content = prev.get("content", "").rstrip()
+                item_content = item.get("content", "").lstrip()
+                prev["content"] = f"{prev_content}\n\n{item_content}".strip()
+                prev["timestamp"] = item.get("timestamp", "") or prev.get("timestamp", "")
+            else:
+                merged.append(dict(item))
+
+        return merged
+
+    return []
+
+
 def parse_sessions() -> list[dict]:
     """Scan ~/.claude/projects/*/*.jsonl to build session list (matches /resume)."""
     sessions = []
@@ -169,50 +297,8 @@ def delete_sessions(session_ids: list[str]) -> dict:
 
 
 def get_session_messages(session_id: str) -> list[dict]:
-    """Read all user messages from a session transcript file."""
-    messages = []
-    if not PROJECTS_DIR.exists():
-        return messages
-    for project_dir in PROJECTS_DIR.iterdir():
-        if not project_dir.is_dir():
-            continue
-        jsonl = project_dir / f"{session_id}.jsonl"
-        if not jsonl.exists():
-            continue
-        try:
-            with open(jsonl, "r", encoding="utf-8") as f:
-                for line in f:
-                    if not line.strip():
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if obj.get("type") != "user":
-                        continue
-                    msg = obj.get("message", {})
-                    content = ""
-                    if isinstance(msg, dict):
-                        content = msg.get("content", "")
-                        if isinstance(content, list):
-                            parts = []
-                            for block in content:
-                                if isinstance(block, dict) and block.get("type") == "text":
-                                    parts.append(block.get("text", ""))
-                                elif isinstance(block, str):
-                                    parts.append(block)
-                            content = " ".join(parts)
-                    elif isinstance(msg, str):
-                        content = msg
-                    if content:
-                        messages.append({
-                            "content": str(content)[:500],
-                            "timestamp": obj.get("timestamp", ""),
-                        })
-        except Exception:
-            pass
-        break  # Found the file, no need to check other project dirs
-    return messages
+    """Read user prompts plus Claude text replies from a session transcript file."""
+    return _build_session_timeline(session_id)
 
 
 # ── HTML template (inline) ───────────────────────────────────────────
@@ -254,10 +340,17 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .display-text:hover { color: #58a6ff; }
   .msg-detail { display: none; margin-top: 8px; }
   .msg-detail.open { display: block; }
-  .msg-detail-item { padding: 6px 10px; margin: 4px 0; background: #0d1117; border-left: 2px solid #30363d;
-    border-radius: 4px; font-size: 12px; color: #c9d1d9; white-space: pre-wrap; word-break: break-all; line-height: 1.5;
+  .msg-detail-item { padding: 10px 12px; margin: 8px 0; background: #0d1117; border: 1px solid #21262d;
+    border-left: 3px solid #30363d; border-radius: 8px; font-size: 12px; color: #c9d1d9; white-space: pre-wrap; word-break: break-word; line-height: 1.55;
     user-select: text; cursor: text; }
+  .msg-detail-item.reply { border-left-color: #58a6ff; }
+  .msg-detail-item.prompt { border-left-color: #238636; }
   .msg-detail-item .msg-time { color: #484f58; font-size: 11px; margin-bottom: 2px; }
+  .msg-detail-item .msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .msg-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+    line-height: 1.4; border: 1px solid #30363d; color: #c9d1d9; background: #161b22; }
+  .msg-badge.reply { border-color: rgba(88,166,255,.4); color: #79c0ff; }
+  .msg-badge.prompt { border-color: rgba(35,134,54,.35); color: #3fb950; }
   .msg-detail-loading { color: #8b949e; font-size: 12px; padding: 6px 0; }
   .project-text { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8b949e; font-size: 12px; }
   .time-text { color: #8b949e; font-size: 12px; white-space: nowrap; }
@@ -360,7 +453,7 @@ function render() {
     return `<tr class="${cls}" data-sid="${s.sessionId}" data-idx="${i}">
       <td><input type="checkbox" ${checked} data-sid="${s.sessionId}" data-idx="${i}"></td>
       <td>
-        <div class="display-text" data-expand="${s.sessionId}" title="Click to expand messages">${esc(s.firstDisplay) || '<em style="color:#484f58">(no user message)</em>'}</div>
+        <div class="display-text" data-expand="${s.sessionId}" title="Single click to expand, double click to collapse">${esc(s.firstDisplay) || '<em style="color:#484f58">(no user message)</em>'}</div>
         <div class="msg-detail" id="detail-${s.sessionId}"></div>
       </td>
       <td><div class="project-text" title="${esc(s.project)}">${esc(s.project.replace(/^\/Users\/huanc\//,'~/'))}</div></td>
@@ -382,6 +475,10 @@ function updateDeleteBtn() {
 // Expand/collapse message detail on display-text click
 let expandedCache = {}; // sessionId -> messages array
 document.getElementById('tbody').addEventListener('click', async e => {
+  if (e.target.closest('.msg-detail')) {
+    return;
+  }
+
   // Handle display-text click -> expand messages
   const expandEl = e.target.closest('[data-expand]');
   if (expandEl) {
@@ -390,23 +487,33 @@ document.getElementById('tbody').addEventListener('click', async e => {
     const detail = document.getElementById('detail-' + sid);
     if (!detail) return;
     if (detail.classList.contains('open')) {
-      detail.classList.remove('open');
       return;
     }
     // Load messages if not cached
     if (!expandedCache[sid]) {
-      detail.innerHTML = '<div class="msg-detail-loading">Loading messages...</div>';
+      detail.innerHTML = '<div class="msg-detail-loading">Loading transcript...</div>';
       detail.classList.add('open');
       const res = await fetch('/api/messages/' + sid);
       expandedCache[sid] = await res.json();
     }
     const msgs = expandedCache[sid];
     if (msgs.length === 0) {
-      detail.innerHTML = '<div class="msg-detail-loading">No user messages found</div>';
+      detail.innerHTML = '<div class="msg-detail-loading">No readable conversation text found in this session</div>';
     } else {
       detail.innerHTML = msgs.map(m => {
         const t = m.timestamp ? new Date(m.timestamp).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
-        return `<div class="msg-detail-item"><div class="msg-time">${t}</div>${esc(m.content)}</div>`;
+        const labels = {
+          prompt: '你的消息',
+          reply: 'Claude 回复'
+        };
+        const kind = m.kind || 'reply';
+        return `<div class="msg-detail-item ${kind}">
+          <div class="msg-head">
+            <span class="msg-badge ${kind}">${labels[kind] || kind}</span>
+            <div class="msg-time">${t}</div>
+          </div>
+          <div>${esc(m.content)}</div>
+        </div>`;
       }).join('');
     }
     detail.classList.add('open');
@@ -434,6 +541,17 @@ document.getElementById('tbody').addEventListener('click', async e => {
   }
   lastClickedIndex = idx;
   render();
+});
+
+document.getElementById('tbody').addEventListener('dblclick', e => {
+  if (e.target.closest('.msg-detail')) return;
+  const expandEl = e.target.closest('[data-expand]');
+  if (!expandEl) return;
+  e.stopPropagation();
+  const sid = expandEl.dataset.expand;
+  const detail = document.getElementById('detail-' + sid);
+  if (!detail || !detail.classList.contains('open')) return;
+  detail.classList.remove('open');
 });
 
 // Prevent checkbox default so our click handler manages everything

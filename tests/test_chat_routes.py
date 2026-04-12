@@ -189,6 +189,22 @@ class TestConversationEndpoints:
         data = response.json()
         assert "New Claude Code chat" in data["title"]
 
+    def test_create_conversation_uses_configured_default_cli(self, client):
+        """Test creating conversation without cli_type uses configured default provider."""
+        mock_cli = MagicMock()
+        mock_cli.id = "codex"
+        mock_cli.name = "OpenAI Codex"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.get_ai_provider", return_value="codex"), \
+             patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            response = client.post("/api/chat/conversations", json={})
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["cli_type"] == "codex"
+        assert "New OpenAI Codex chat" in data["title"]
+
     def test_list_conversations_endpoint(self, client):
         """Test GET /api/chat/conversations returns conversation list."""
         # First create a conversation
@@ -548,10 +564,6 @@ class TestRequestResponseModels:
 
     def test_create_conversation_request_validation(self, client):
         """Test CreateConversationRequest validation."""
-        # Missing cli_type should fail
-        response = client.post("/api/chat/conversations", json={})
-        assert response.status_code == 422
-
         # Invalid type for cli_type
         response = client.post("/api/chat/conversations", json={"cli_type": 123})
         assert response.status_code == 422

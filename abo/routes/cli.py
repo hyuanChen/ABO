@@ -13,6 +13,7 @@ class CliConfig(TypedDict):
 
 
 CLI_REGISTRY: dict[str, CliConfig] = {
+    'codex': {'name': 'OpenAI Codex', 'check': 'codex --version'},
     'claude': {'name': 'Claude Code', 'check': 'claude --version'},
     'gemini': {'name': 'Gemini CLI', 'check': 'gemini --version'},
 }

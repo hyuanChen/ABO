@@ -1,5 +1,5 @@
 import { Star, ChevronDown, ExternalLink, BookHeart } from "lucide-react";
-import type { FeedCard } from "../../core/store";
+import { useStore, type FeedCard } from "../../core/store";
 
 interface Props {
   card: FeedCard;
@@ -87,8 +87,41 @@ const EXT_ACTIONS = [
   },
 ];
 
+function metadataString(metadata: Record<string, unknown>, key: string): string {
+  const value = metadata[key];
+  return typeof value === "string" ? value : "";
+}
+
+function proxiedImage(url: string): string {
+  if (!url) return "";
+  return `http://127.0.0.1:8765/api/proxy/image?url=${encodeURIComponent(url)}`;
+}
+
 export default function CardView({ card, focused, onClick, onFeedback, onRating, userRating }: Props) {
   const scorePercent = Math.round(card.score * 100);
+  const showcaseMode = useStore((s) => s.showcaseMode);
+  const isBilibiliCard = card.module_id === "bilibili-tracker";
+  const upName = metadataString(card.metadata, "up_name");
+  const dynamicType = metadataString(card.metadata, "dynamic_type");
+  const published = metadataString(card.metadata, "published");
+  const thumbnail = metadataString(card.metadata, "thumbnail");
+  const thumbnailUrl = thumbnail ? proxiedImage(thumbnail) : "";
+  const bilibiliTypeLabel =
+    dynamicType === "video"
+      ? "视频"
+      : dynamicType === "article"
+      ? "专栏"
+      : dynamicType === "image"
+      ? "图文"
+      : dynamicType === "text"
+      ? "动态"
+      : "";
+
+  const focusedShadow = showcaseMode
+    ? "0 8px 40px rgba(188, 164, 227, 0.35), 0 0 0 4px rgba(188, 164, 227, 0.15), 0 0 60px rgba(188, 164, 227, 0.08)"
+    : "0 8px 32px rgba(188, 164, 227, 0.25), 0 0 0 4px rgba(188, 164, 227, 0.1)";
+  const normalShadow = showcaseMode ? "var(--shadow-medium)" : "var(--shadow-soft)";
+  const hoverShadow = showcaseMode ? "var(--shadow-float)" : "var(--shadow-medium)";
 
   return (
     <article
@@ -101,25 +134,25 @@ export default function CardView({ card, focused, onClick, onFeedback, onRating,
         backdropFilter: "blur(16px) saturate(160%)",
         WebkitBackdropFilter: "blur(16px) saturate(160%)",
         border: focused
-          ? "2px solid var(--color-primary)"
-          : "1px solid var(--border-light)",
-        boxShadow: focused
-          ? "0 8px 32px rgba(188, 164, 227, 0.25), 0 0 0 4px rgba(188, 164, 227, 0.1)"
-          : "var(--shadow-soft)",
+          ? (showcaseMode ? "2px solid var(--color-primary-light)" : "2px solid var(--color-primary)")
+          : (showcaseMode ? "1px solid var(--border-color)" : "1px solid var(--border-light)"),
+        boxShadow: focused ? focusedShadow : normalShadow,
         cursor: "pointer",
         transition: "all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)",
         transform: focused ? "scale(1.01)" : "scale(1)",
       }}
       onMouseEnter={(e) => {
         if (!focused) {
-          e.currentTarget.style.transform = "translateY(-4px)";
-          e.currentTarget.style.boxShadow = "var(--shadow-medium)";
+          e.currentTarget.style.transform = showcaseMode ? "translateY(-6px) scale(1.005)" : "translateY(-4px)";
+          e.currentTarget.style.boxShadow = hoverShadow;
+          if (showcaseMode) e.currentTarget.style.borderColor = "var(--border-medium)";
         }
       }}
       onMouseLeave={(e) => {
         if (!focused) {
-          e.currentTarget.style.transform = "translateY(0)";
-          e.currentTarget.style.boxShadow = "var(--shadow-soft)";
+          e.currentTarget.style.transform = "translateY(0) scale(1)";
+          e.currentTarget.style.boxShadow = normalShadow;
+          if (showcaseMode) e.currentTarget.style.borderColor = "var(--border-color)";
         }
       }}
     >
@@ -189,7 +222,9 @@ export default function CardView({ card, focused, onClick, onFeedback, onRating,
                   : "linear-gradient(90deg, #FFE4B5, #F5C88C)",
               borderRadius: "var(--radius-full)",
               transition: "width 0.5s ease",
-              boxShadow: "0 0 12px rgba(188, 164, 227, 0.3)",
+              boxShadow: showcaseMode
+                ? "0 0 16px rgba(188, 164, 227, 0.5), 0 0 32px rgba(188, 164, 227, 0.15)"
+                : "0 0 12px rgba(188, 164, 227, 0.3)",
             }}
           />
         </div>
@@ -263,6 +298,76 @@ export default function CardView({ card, focused, onClick, onFeedback, onRating,
           </a>
         )}
       </div>
+
+      {isBilibiliCard && (upName || dynamicType || published) && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: "8px",
+            marginBottom: "12px",
+          }}
+        >
+          {upName && (
+            <span
+              style={{
+                fontSize: "0.875rem",
+                fontWeight: 700,
+                color: "var(--text-main)",
+              }}
+            >
+              @{upName}
+            </span>
+          )}
+          {bilibiliTypeLabel && (
+            <span
+              style={{
+                fontSize: "0.75rem",
+                fontWeight: 600,
+                padding: "4px 10px",
+                borderRadius: "var(--radius-full)",
+                background: "rgba(0, 174, 236, 0.12)",
+                color: "#0087B8",
+                border: "1px solid rgba(0, 174, 236, 0.18)",
+              }}
+            >
+              {bilibiliTypeLabel}
+            </span>
+          )}
+          {published && (
+            <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+              {published.replace("T", " ").slice(0, 16)}
+            </span>
+          )}
+        </div>
+      )}
+
+      {thumbnailUrl && (
+        <div
+          style={{
+            marginBottom: "14px",
+            borderRadius: "var(--radius-sm)",
+            overflow: "hidden",
+            border: "1px solid var(--border-light)",
+            background: "var(--bg-hover)",
+          }}
+        >
+          <img
+            src={thumbnailUrl}
+            alt={card.title}
+            style={{
+              width: "100%",
+              maxHeight: "220px",
+              objectFit: "cover",
+              display: "block",
+            }}
+            onError={(e) => {
+              e.currentTarget.style.display = "none";
+            }}
+          />
+        </div>
+      )}
 
       {/* Title */}
       <h3

@@ -664,16 +664,15 @@ async def run_module(module_id: str):
 @app.post("/api/modules/arxiv-tracker/crawl")
 async def crawl_arxiv_live(data: dict = None):
     """Real-time arXiv crawl with keyword support, deduplication, and progress via WebSocket."""
-    from .default_modules.arxiv import ArxivTracker
+    from .default_modules.arxiv.category import ALL_SUBCATEGORIES, get_category_name
+    from .tools.arxiv_api import arxiv_api_search
     import re
-    import asyncio
 
-    prefs = _prefs.get_prefs_for_module("arxiv-tracker")
     keywords = data.get("keywords", []) if data else []
-    max_results = data.get("max_results", 20) if data else 20
+    max_results = data.get("max_results", 50) if data else 50
     search_mode = data.get("mode", "AND") if data else "AND"  # "AND", "OR", or "AND_OR"
     cs_only = data.get("cs_only", True) if data else True  # Default to CS only
-    days_back = data.get("days_back", 3) if data else 3  # Default to last 3 days
+    days_back = data.get("days_back", 180) if data else 180
 
     # Get existing arXiv IDs from literature library to avoid duplicates
     existing_ids = set()
@@ -691,7 +690,6 @@ async def crawl_arxiv_live(data: dict = None):
     except Exception:
         pass
 
-    tracker = ArxivTracker()
     results = []
     session_id = _generate_crawl_session_id()
 
@@ -721,83 +719,136 @@ async def crawl_arxiv_live(data: dict = None):
             _cleanup_crawl_session(session_id)
             return {"papers": [], "count": 0, "cancelled": True}
 
-        items = await tracker.fetch(
-            custom_keywords=keywords if keywords else None,
-            max_results=max_results,
-            existing_ids=existing_ids,
-            mode=search_mode,  # AND or OR mode
-            cs_only=cs_only,
-            days_back=days_back  # Last N days
-        )
+        cs_categories = [
+            code for code in ALL_SUBCATEGORIES
+            if code.startswith("cs.")
+        ] if cs_only else None
 
-        # Process each paper with progress update
-        for i, item in enumerate(items):
-            # Check for cancellation before processing each paper
+        def normalize_keywords(raw_keywords: list[str]) -> list[str]:
+            parsed: list[str] = []
+            for kw in raw_keywords:
+                parsed.extend(part.strip() for part in re.split(r"[,，\s]+", str(kw)) if part.strip())
+            return parsed
+
+        async def search_with_arxiv_api() -> list[dict]:
+            if search_mode == "AND_OR":
+                raw_query = " ".join(str(kw) for kw in keywords).strip()
+                groups = [group.strip() for group in raw_query.split("|") if group.strip()]
+                seen: set[str] = set()
+                merged: list[dict] = []
+                per_group_limit = max(max_results, 20)
+                for group in groups:
+                    group_keywords = normalize_keywords([group])
+                    if not group_keywords:
+                        continue
+                    group_papers = await arxiv_api_search(
+                        keywords=group_keywords,
+                        categories=cs_categories,
+                        mode="AND",
+                        max_results=per_group_limit,
+                        days_back=days_back,
+                        sort_by="submittedDate",
+                    )
+                    for paper in group_papers:
+                        paper_id = paper.get("id")
+                        if not paper_id or paper_id in seen or paper_id in existing_ids:
+                            continue
+                        seen.add(paper_id)
+                        merged.append(paper)
+                        if len(merged) >= max_results:
+                            return merged
+                return merged
+
+            api_mode = "AND" if search_mode == "AND" else "OR"
+            papers = await arxiv_api_search(
+                keywords=normalize_keywords(keywords),
+                categories=cs_categories,
+                mode=api_mode,
+                max_results=max_results,
+                days_back=days_back,
+                sort_by="submittedDate",
+            )
+            return [
+                paper for paper in papers
+                if paper.get("id") and paper.get("id") not in existing_ids
+            ][:max_results]
+
+        def paper_to_card_data(paper: dict) -> dict:
+            arxiv_id = paper.get("id", "")
+            categories = paper.get("categories") or []
+            primary_category = paper.get("primary_category") or (categories[0] if categories else "")
+            published = paper.get("published") or ""
+            updated = paper.get("updated") or published
+            authors = paper.get("authors", [])
+            abs_url = paper.get("arxiv_url") or f"https://arxiv.org/abs/{arxiv_id}"
+            pdf_url = paper.get("pdf_url") or f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+            metadata = {
+                "abo-type": "arxiv-api-paper",
+                "authors": authors,
+                "author_count": len(authors),
+                "arxiv-id": arxiv_id,
+                "primary_category": primary_category,
+                "primary_category_name": get_category_name(primary_category),
+                "categories": categories,
+                "all_categories": [get_category_name(c) for c in categories],
+                "published": published,
+                "updated": updated,
+                "comments": paper.get("comment") or "",
+                "journal_ref": paper.get("journal_ref") or "",
+                "doi": paper.get("doi") or "",
+                "pdf-url": pdf_url,
+                "html-url": f"https://arxiv.org/html/{arxiv_id}",
+                "abstract": paper.get("summary", ""),
+                "keywords": categories,
+                "links": {
+                    "abs": abs_url,
+                    "pdf": pdf_url,
+                    "html": f"https://arxiv.org/html/{arxiv_id}",
+                },
+            }
+            return {
+                "id": arxiv_id,
+                "title": paper.get("title", "Untitled"),
+                "summary": paper.get("summary", ""),
+                # arXiv API 搜索不再做 Claude 打分；保留字段只为兼容前端/保存接口。
+                "score": 1.0,
+                "tags": categories,
+                "source_url": abs_url,
+                "metadata": metadata,
+            }
+
+        api_papers = await search_with_arxiv_api()
+
+        # 旧路径已停用：不再调用 ArxivTracker.fetch/process，不抓 HTML figures，不跑 Claude 打分。
+        # 这里直接把 arXiv API 结果转换为前端卡片数据并通过 WebSocket 推送。
+        for i, paper in enumerate(api_papers):
             if _should_cancel_crawl(session_id):
                 await broadcaster.send_event({
                     "type": "crawl_cancelled",
-                    "message": f"爬取任务已取消，已处理 {i}/{len(items)} 篇论文"
+                    "message": f"爬取任务已取消，已推送 {i}/{len(api_papers)} 篇论文"
                 })
                 _cleanup_crawl_session(session_id)
                 return {"papers": results, "count": len(results), "cancelled": True}
-            paper_title = item.raw.get('title', '')
-            paper_id = item.id
-            print(f"[arxiv-crawl] Processing {i+1}/{len(items)}: {paper_id}")
 
-            # Send progress before processing
+            paper_data = paper_to_card_data(paper)
+            results.append(paper_data)
+
             await broadcaster.send_event({
                 "type": "crawl_progress",
                 "phase": "processing",
                 "current": i + 1,
-                "total": len(items),
-                "message": f"正在处理第 {i+1}/{len(items)} 篇论文...",
-                "currentPaperTitle": paper_title[:80] + "..." if len(paper_title) > 80 else paper_title
+                "total": len(api_papers),
+                "message": f"正在推送第 {i+1}/{len(api_papers)} 篇论文...",
+                "currentPaperTitle": paper_data["title"][:80] + "..." if len(paper_data["title"]) > 80 else paper_data["title"]
             })
 
-            try:
-                # Add delay between processing papers to avoid rate limiting
-                if i > 0:
-                    await asyncio.sleep(3)  # 3 second delay between papers
-
-                # Process single paper with 60s timeout
-                card_list = await asyncio.wait_for(
-                    tracker.process([item], prefs),
-                    timeout=60
-                )
-                if card_list:
-                    card = card_list[0]
-                    paper_data = {
-                        "id": card.id,
-                        "title": card.title,
-                        "summary": card.summary,
-                        "score": card.score,
-                        "tags": card.tags,
-                        "source_url": card.source_url,
-                        "metadata": card.metadata,
-                    }
-                    results.append(paper_data)
-
-                    # Send partial result
-                    await broadcaster.send_event({
-                        "type": "crawl_paper",
-                        "paper": paper_data,
-                        "current": i + 1,
-                        "total": len(items)
-                    })
-                    print(f"[arxiv-crawl] Completed {paper_id}: {card.title[:50]}...")
-            except asyncio.TimeoutError:
-                print(f"[arxiv-crawl] Timeout processing {paper_id}, skipping")
-                await broadcaster.send_event({
-                    "type": "crawl_progress",
-                    "phase": "processing",
-                    "current": i + 1,
-                    "total": len(items),
-                    "message": f"处理超时，跳过第 {i+1} 篇...",
-                    "currentPaperTitle": paper_title[:80] + "..." if len(paper_title) > 80 else paper_title
-                })
-            except Exception as e:
-                print(f"[arxiv-crawl] Error processing {paper_id}: {e}")
-                # Continue with next paper
+            await broadcaster.send_event({
+                "type": "crawl_paper",
+                "paper": paper_data,
+                "current": i + 1,
+                "total": len(api_papers)
+            })
+            print(f"[arxiv-api-search] Pushed {paper_data['id']}: {paper_data['title'][:50]}...")
 
         # Sort by published date (descending)
         results.sort(key=lambda x: x.get("metadata", {}).get("published", ""), reverse=True)
@@ -861,10 +912,13 @@ async def proxy_image(url: str):
     """Proxy image requests to avoid CORS issues."""
     import httpx
     try:
+        referer = "https://arxiv.org/"
+        if "hdslb.com" in url or "bilibili.com" in url:
+            referer = "https://www.bilibili.com/"
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, headers={
-                "User-Agent": "ABO-arXiv-Tracker/1.0",
-                "Referer": "https://arxiv.org/"
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+                "Referer": referer,
             })
         if resp.status_code != 200:
             raise HTTPException(404, "Image not found")
@@ -1065,23 +1119,21 @@ async def crawl_arxiv_by_category(data: dict = None):
         "categories": ["cs.CV", "cs.LG"],  # Subcategories to search
         "keywords": ["vision", "image"],   # Optional keywords
         "max_results": 50,
-        "days_back": 7,                    # Only papers from last N days
+        "days_back": 180,                  # Only papers from last N days
         "sort_by": "submittedDate",        # or "lastUpdatedDate", "relevance"
         "sort_order": "descending"
     }
     """
-    from .default_modules.arxiv import ArxivTracker
-    import asyncio
+    from .default_modules.arxiv.category import ALL_SUBCATEGORIES, get_category_name
+    from .tools.arxiv_api import arxiv_api_search
 
     data = data or {}
     categories = data.get("categories", ["cs.*"])
     keywords = data.get("keywords", [])
     max_results = data.get("max_results", 50)
-    days_back = data.get("days_back", 7)
+    days_back = data.get("days_back", 180)
     sort_by = data.get("sort_by", "submittedDate")
     sort_order = data.get("sort_order", "descending")
-
-    prefs = _prefs.get_prefs_for_module("arxiv-tracker")
 
     # Get existing arXiv IDs for deduplication
     existing_ids = set()
@@ -1099,8 +1151,55 @@ async def crawl_arxiv_by_category(data: dict = None):
     except Exception:
         pass
 
-    tracker = ArxivTracker()
     results = []
+
+    def expand_categories(raw_categories: list[str]) -> list[str]:
+        expanded: list[str] = []
+        for category in raw_categories:
+            if category.endswith(".*"):
+                prefix = category[:-1]
+                expanded.extend(code for code in ALL_SUBCATEGORIES if code.startswith(prefix))
+            else:
+                expanded.append(category)
+        return expanded
+
+    def paper_to_card_data(paper: dict) -> dict:
+        arxiv_id = paper.get("id", "")
+        paper_categories = paper.get("categories") or []
+        primary_category = paper.get("primary_category") or (paper_categories[0] if paper_categories else "")
+        published = paper.get("published") or ""
+        updated = paper.get("updated") or published
+        authors = paper.get("authors", [])
+        abs_url = paper.get("arxiv_url") or f"https://arxiv.org/abs/{arxiv_id}"
+        pdf_url = paper.get("pdf_url") or f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+        metadata = {
+            "abo-type": "arxiv-api-paper",
+            "authors": authors,
+            "author_count": len(authors),
+            "arxiv-id": arxiv_id,
+            "primary_category": primary_category,
+            "primary_category_name": get_category_name(primary_category),
+            "categories": paper_categories,
+            "all_categories": [get_category_name(c) for c in paper_categories],
+            "published": published,
+            "updated": updated,
+            "comments": paper.get("comment") or "",
+            "journal_ref": paper.get("journal_ref") or "",
+            "doi": paper.get("doi") or "",
+            "pdf-url": pdf_url,
+            "html-url": f"https://arxiv.org/html/{arxiv_id}",
+            "abstract": paper.get("summary", ""),
+            "keywords": paper_categories,
+        }
+        return {
+            "id": arxiv_id,
+            "title": paper.get("title", "Untitled"),
+            "summary": paper.get("summary", ""),
+            "score": 1.0,
+            "tags": paper_categories,
+            "source_url": abs_url,
+            "metadata": metadata,
+        }
 
     try:
         # Send initial progress
@@ -1112,18 +1211,22 @@ async def crawl_arxiv_by_category(data: dict = None):
             "message": f"正在从 arXiv 获取论文 (分类: {', '.join(categories)})..."
         })
 
-        # Fetch papers by category
-        items = await tracker.fetch_by_category(
-            categories=categories,
-            keywords=keywords if keywords else None,
+        api_categories = expand_categories(categories)
+        api_papers = await arxiv_api_search(
+            categories=api_categories,
+            keywords=keywords,
             max_results=max_results,
             days_back=days_back,
             sort_by=sort_by,
             sort_order=sort_order,
-            existing_ids=existing_ids,
+            mode="AND" if keywords else "OR",
         )
+        api_papers = [
+            paper for paper in api_papers
+            if paper.get("id") and paper.get("id") not in existing_ids
+        ][:max_results]
 
-        if not items:
+        if not api_papers:
             await broadcaster.send_event({
                 "type": "crawl_complete",
                 "papers": [],
@@ -1132,53 +1235,26 @@ async def crawl_arxiv_by_category(data: dict = None):
             })
             return {"papers": [], "count": 0}
 
-        # Process each paper
-        for i, item in enumerate(items):
-            paper_title = item.raw.get('title', '')
-            paper_id = item.id
+        # 旧路径已停用：分类搜索也直接使用 arXiv API 结果，不跑 HTML 抓图或 Claude 打分。
+        for i, paper in enumerate(api_papers):
+            paper_data = paper_to_card_data(paper)
+            results.append(paper_data)
 
             await broadcaster.send_event({
                 "type": "crawl_progress",
                 "phase": "processing",
                 "current": i + 1,
-                "total": len(items),
-                "message": f"正在分析第 {i+1}/{len(items)} 篇论文...",
-                "currentPaperTitle": paper_title[:80] + "..." if len(paper_title) > 80 else paper_title
+                "total": len(api_papers),
+                "message": f"正在推送第 {i+1}/{len(api_papers)} 篇论文...",
+                "currentPaperTitle": paper_data["title"][:80] + "..." if len(paper_data["title"]) > 80 else paper_data["title"]
             })
 
-            try:
-                # Process single paper
-                card_list = await asyncio.wait_for(
-                    tracker.process([item], prefs),
-                    timeout=60
-                )
-
-                if card_list:
-                    card = card_list[0]
-                    paper_data = {
-                        "id": card.id,
-                        "title": card.title,
-                        "summary": card.summary,
-                        "score": card.score,
-                        "tags": card.tags,
-                        "source_url": card.source_url,
-                        "metadata": card.metadata,
-                    }
-                    results.append(paper_data)
-
-                    # Send real-time update
-                    await broadcaster.send_event({
-                        "type": "crawl_paper",
-                        "paper": paper_data,
-                        "current": i + 1,
-                        "total": len(items)
-                    })
-            except asyncio.TimeoutError:
-                print(f"[arxiv-crawl] Timeout processing {paper_id}, skipping")
-                continue
-            except Exception as e:
-                print(f"[arxiv-crawl] Error processing {paper_id}: {e}")
-                continue
+            await broadcaster.send_event({
+                "type": "crawl_paper",
+                "paper": paper_data,
+                "current": i + 1,
+                "total": len(api_papers)
+            })
 
         # Send completion
         await broadcaster.send_event({
@@ -2047,12 +2123,35 @@ class ModuleConfig(BaseModel):
     """Module configuration schema for crawler subscriptions."""
     keywords: list[str] = []
     up_uids: list[str] = []  # Bilibili
+    followed_up_groups: list[str] = []  # Bilibili followed groups
     user_ids: list[str] = []  # Xiaohongshu
     users: list[str] = []  # Zhihu users
     topics: list[str] = []  # Zhihu topics
     podcast_ids: list[str] = []  # Xiaoyuzhou
     max_results: int = 20
     enabled: bool = True
+    enable_keyword_search: bool = True
+    keyword_min_likes: int = 500
+    keyword_search_limit: int = 10
+    follow_feed: bool = False
+    follow_feed_types: list[int] = [8, 2, 4, 64]
+    fetch_follow_limit: int = 20
+    creator_groups: list[str] = []
+    creator_profiles: dict = {}
+    creator_group_options: list[dict] = []
+    keyword_filter: bool = True
+
+
+BILIBILI_FOLLOWED_GROUP_OPTIONS = [
+    {"value": "ai-tech", "label": "AI科技"},
+    {"value": "study", "label": "学习知识"},
+    {"value": "digital", "label": "数码影音"},
+    {"value": "game", "label": "游戏"},
+    {"value": "finance", "label": "财经商业"},
+    {"value": "creative", "label": "设计创作"},
+    {"value": "entertainment", "label": "生活娱乐"},
+    {"value": "other", "label": "其他"},
+]
 
 
 @app.get("/api/modules/{module_id}/config")
@@ -2074,14 +2173,23 @@ async def get_module_config(module_id: str):
         "enabled": getattr(module, "enabled", True),
         "keywords": module_prefs.get("keywords", []),
         "up_uids": module_prefs.get("up_uids", []),
+        "followed_up_groups": module_prefs.get("followed_up_groups", []),
         "user_ids": module_prefs.get("user_ids", []),
         "users": module_prefs.get("users", []),
         "topics": module_prefs.get("topics", []),
         "podcast_ids": module_prefs.get("podcast_ids", []),
         "max_results": module_prefs.get("max_results", 20),
-        "follow_feed": module_prefs.get("follow_feed", True),
+        "enable_keyword_search": module_prefs.get("enable_keyword_search", True),
+        "keyword_min_likes": module_prefs.get("keyword_min_likes", 500),
+        "keyword_search_limit": module_prefs.get("keyword_search_limit", 10),
+        "follow_feed": module_prefs.get("follow_feed", False),
         "follow_feed_types": module_prefs.get("follow_feed_types", [8, 2, 4, 64]),
         "fetch_follow_limit": module_prefs.get("fetch_follow_limit", 20),
+        "creator_push_enabled": module_prefs.get("creator_push_enabled", True),
+        "disabled_creator_ids": module_prefs.get("disabled_creator_ids", []),
+        "creator_groups": module_prefs.get("creator_groups", []),
+        "creator_profiles": module_prefs.get("creator_profiles", {}),
+        "creator_group_options": module_prefs.get("creator_group_options", []),
         "keyword_filter": module_prefs.get("keyword_filter", True),
         "sessdata": module_prefs.get("sessdata", ""),
         "cookie": module_prefs.get("cookie", ""),
@@ -2091,8 +2199,11 @@ async def get_module_config(module_id: str):
         "subscription_types": subscription_types,
     }
 
+    if module_id == "bilibili-tracker":
+        config["followed_up_group_options"] = BILIBILI_FOLLOWED_GROUP_OPTIONS
+
     # Add module-specific defaults if empty
-    if not config["keywords"]:
+    if "keywords" not in module_prefs and not config["keywords"]:
         config["keywords"] = get_default_keywords_for_module(module_id)
 
     return config
@@ -2119,6 +2230,8 @@ async def update_module_config(module_id: str, data: dict):
         module_prefs["keywords"] = data["keywords"]
     if "up_uids" in data:
         module_prefs["up_uids"] = data["up_uids"]
+    if "followed_up_groups" in data:
+        module_prefs["followed_up_groups"] = data["followed_up_groups"]
     if "user_ids" in data:
         module_prefs["user_ids"] = data["user_ids"]
     if "users" in data:
@@ -2128,14 +2241,30 @@ async def update_module_config(module_id: str, data: dict):
     if "podcast_ids" in data:
         module_prefs["podcast_ids"] = data["podcast_ids"]
     if "max_results" in data:
-        module_prefs["max_results"] = data["max_results"]
+        module_prefs["max_results"] = max(1, int(data["max_results"] or 1))
+    if "enable_keyword_search" in data:
+        module_prefs["enable_keyword_search"] = bool(data["enable_keyword_search"])
+    if "keyword_min_likes" in data:
+        module_prefs["keyword_min_likes"] = max(0, int(data["keyword_min_likes"] or 0))
+    if "keyword_search_limit" in data:
+        module_prefs["keyword_search_limit"] = max(1, int(data["keyword_search_limit"] or 1))
     # Bilibili-specific config
     if "follow_feed" in data:
         module_prefs["follow_feed"] = data["follow_feed"]
     if "follow_feed_types" in data:
         module_prefs["follow_feed_types"] = data["follow_feed_types"]
     if "fetch_follow_limit" in data:
-        module_prefs["fetch_follow_limit"] = data["fetch_follow_limit"]
+        module_prefs["fetch_follow_limit"] = max(1, int(data["fetch_follow_limit"] or 1))
+    if "creator_push_enabled" in data:
+        module_prefs["creator_push_enabled"] = bool(data["creator_push_enabled"])
+    if "disabled_creator_ids" in data:
+        module_prefs["disabled_creator_ids"] = list(data["disabled_creator_ids"] or [])
+    if "creator_groups" in data:
+        module_prefs["creator_groups"] = list(data["creator_groups"] or [])
+    if "creator_profiles" in data:
+        module_prefs["creator_profiles"] = dict(data["creator_profiles"] or {})
+    if "creator_group_options" in data:
+        module_prefs["creator_group_options"] = list(data["creator_group_options"] or [])
     if "keyword_filter" in data:
         module_prefs["keyword_filter"] = data["keyword_filter"]
     if "sessdata" in data:

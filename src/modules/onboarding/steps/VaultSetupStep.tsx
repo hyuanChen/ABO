@@ -67,7 +67,7 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
 
   const selectFolder = async (type: PathType) => {
     try {
-      const title = type === "vault" ? "选择文件库文件夹" : "选择情报库文件夹";
+      const title = type === "vault" ? "选择情报库文件夹" : "选择文献库文件夹";
       const selected = await open({
         directory: true,
         multiple: false,
@@ -84,7 +84,7 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
           setPaths({ vault: selected, literature: selected });
           setValidation((prev) => ({
             ...prev,
-            literature: { status: "success", message: "已同步文件库路径" },
+            literature: { status: "success", message: "已同步情报库路径" },
           }));
         }
       }
@@ -293,7 +293,7 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
           lineHeight: 1.6,
         }}
       >
-        设置文件库和情报库的存储位置
+        设置情报库和文献库的存储位置
       </p>
 
       {/* Path Selectors */}
@@ -301,8 +301,8 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
         <PathSelector
           type="vault"
           icon={BookOpen}
-          title="文件库"
-          description="存储所有文档、笔记和生成的内容"
+          title="情报库"
+          description="存储小红书、Bilibili、知乎等工具抓取和整理的内容"
         />
 
         {/* Use same path toggle */}
@@ -341,15 +341,15 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
             />
           </button>
           <span style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>
-            情报库使用相同路径
+            文献库使用相同路径
           </span>
         </div>
 
         <PathSelector
           type="literature"
           icon={Database}
-          title="情报库"
-          description="存储论文、文献和爬取的内容"
+          title="文献库"
+          description="存储 arXiv、Semantic Scholar 等论文和文献内容"
           disabled={useSamePath}
         />
       </div>

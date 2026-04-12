@@ -45,7 +45,7 @@ export default function Profile() {
   const [showCheckin, setShowCheckin] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [modulesOpen, setModulesOpen] = useState(false);
-  const { setProfileEnergy, setProfileSan, setProfileMotto, setProfileStats } = useStore();
+  const { setProfileEnergy, setProfileSan, setProfileMotto, setProfileCodename, setProfileStats } = useStore();
 
   useEffect(() => {
     load();
@@ -63,6 +63,7 @@ export default function Profile() {
       const sanScore = d.stats?.san?.score ?? 0;
       setProfileSan(sanScore);
       setProfileMotto(d.daily_motto?.motto ?? "");
+      setProfileCodename(d.identity?.codename ?? "");
       setProfileStats(d.stats);
     } catch { /* silent */ }
   }

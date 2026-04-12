@@ -13,7 +13,6 @@ import {
   Download,
   Image as ImageIcon,
   Save,
-  FolderOpen,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState } from "../../components/Layout";
 import { api } from "../../core/api";
@@ -50,16 +49,42 @@ interface CategoriesResponse {
 
 interface SearchResponse {
   papers: ArxivPaper[];
-  total_results: number;
+  total?: number;
+  total_results?: number;
   search_time_ms: number;
 }
+
+const MAIN_CATEGORY_LABELS: Record<string, string> = {
+  cs: "Computer Science",
+  math: "Mathematics",
+  physics: "Physics",
+  stat: "Statistics",
+  eess: "Electrical Engineering",
+  econ: "Economics",
+  "q-bio": "Quantitative Biology",
+  "q-fin": "Quantitative Finance",
+};
 
 export function ArxivAPITool() {
   const toast = useToast();
 
+  const fieldShellStyle = {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    width: "100%",
+    height: "42px",
+    padding: "0 14px",
+    borderRadius: "14px",
+    border: "1px solid var(--border-light)",
+    background: "color-mix(in srgb, var(--bg-card) 78%, transparent)",
+    boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.35)",
+  } as const;
+
   // Search parameters
   const [keywords, setKeywords] = useState("");
   const [categories, setCategories] = useState<string[]>([]);
+  const [expandedMainCategories, setExpandedMainCategories] = useState<Set<string>>(new Set(["cs"]));
   const [availableCategories, setAvailableCategories] = useState<Category[]>([]);
   const [mode, setMode] = useState<"AND" | "OR">("AND");
   const [maxResults, setMaxResults] = useState(50);
@@ -107,10 +132,11 @@ export function ArxivAPITool() {
         days_back: daysBack,
         sort_by: sortBy,
       });
+      const total = result.total_results ?? result.total ?? result.papers.length;
       setPapers(result.papers);
-      setTotalResults(result.total_results);
+      setTotalResults(total);
       setSearchTimeMs(result.search_time_ms);
-      toast.success(`找到 ${result.total_results} 篇论文`);
+      toast.success(`找到 ${total} 篇论文`);
       // 自动加载图片
       result.papers.forEach(paper => {
         if (!paperFigures[paper.id]) {
@@ -131,6 +157,44 @@ export function ArxivAPITool() {
         ? prev.filter(c => c !== category)
         : [...prev, category]
     );
+  };
+
+  const categoriesByMain = availableCategories.reduce<Record<string, Category[]>>((acc, category) => {
+    const main = category.main || category.code.split(".")[0];
+    if (!acc[main]) acc[main] = [];
+    acc[main].push(category);
+    return acc;
+  }, {});
+
+  const mainCategoryCodes = Object.keys(categoriesByMain).sort((a, b) => {
+    if (a === "cs") return -1;
+    if (b === "cs") return 1;
+    return a.localeCompare(b);
+  });
+
+  const toggleMainCategory = (main: string) => {
+    const subcategoryCodes = categoriesByMain[main]?.map((category) => category.code) || [];
+    if (subcategoryCodes.length === 0) return;
+
+    setCategories((prev) => {
+      const selected = new Set(prev);
+      const allSelected = subcategoryCodes.every((code) => selected.has(code));
+      if (allSelected) {
+        subcategoryCodes.forEach((code) => selected.delete(code));
+      } else {
+        subcategoryCodes.forEach((code) => selected.add(code));
+      }
+      return Array.from(selected);
+    });
+  };
+
+  const toggleMainCategoryExpanded = (main: string) => {
+    setExpandedMainCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(main)) next.delete(main);
+      else next.add(main);
+      return next;
+    });
   };
 
   const togglePaperExpand = async (paperId: string) => {
@@ -179,7 +243,7 @@ export function ArxivAPITool() {
         const result = await api.post<{ figures: ArxivPaper["figures"] }>("/api/tools/arxiv/figures", {
           arxiv_id: paper.id,
         });
-        figures = result.figures;
+        figures = result.figures || [];
         setPaperFigures(prev => ({ ...prev, [paper.id]: figures }));
       }
 
@@ -426,26 +490,44 @@ export function ArxivAPITool() {
             >
               排序方式
             </label>
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
-              style={{
-                padding: "10px 14px",
-                borderRadius: "var(--radius-md)",
-                border: "1px solid var(--border-light)",
-                background: "var(--bg-card)",
-                color: "var(--text-main)",
-                fontSize: "0.875rem",
-                cursor: "pointer",
-                width: "140px",
-                height: "42px",
-                boxSizing: "border-box",
-              }}
-            >
-              <option value="submittedDate">提交日期</option>
-              <option value="relevance">相关度</option>
-              <option value="lastUpdatedDate">最后更新</option>
-            </select>
+            <div style={{ ...fieldShellStyle, width: "140px" }}>
+              <select
+                className="arxiv-api-select"
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  height: "100%",
+                  border: "none",
+                  background: "transparent",
+                  color: "var(--text-main)",
+                  fontSize: "0.875rem",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  appearance: "none",
+                  WebkitAppearance: "none",
+                  MozAppearance: "none",
+                  outline: "none",
+                  boxShadow: "none",
+                  paddingRight: "4px",
+                }}
+              >
+                <option value="submittedDate">提交日期</option>
+                <option value="relevance">相关度</option>
+                <option value="lastUpdatedDate">最后更新</option>
+              </select>
+              <ChevronDown
+                aria-hidden="true"
+                style={{
+                  width: "14px",
+                  height: "14px",
+                  color: "var(--text-muted)",
+                  flexShrink: 0,
+                  pointerEvents: "none",
+                }}
+              />
+            </div>
           </div>
         </div>
 
@@ -481,34 +563,120 @@ export function ArxivAPITool() {
           <div
             style={{
               display: "flex",
-              flexWrap: "wrap",
-              gap: "8px",
-              maxHeight: "120px",
+              flexDirection: "column",
+              gap: "10px",
+              maxHeight: "260px",
               overflowY: "auto",
               padding: "4px",
             }}
           >
-            {availableCategories.map((category) => (
-              <button
-                key={category.code}
-                onClick={() => toggleCategory(category.code)}
-                title={category.name}
-                style={{
-                  padding: "6px 12px",
-                  borderRadius: "var(--radius-full)",
-                  border: "1px solid var(--border-light)",
-                  background: categories.includes(category.code)
-                    ? "var(--color-primary)"
-                    : "var(--bg-hover)",
-                  color: categories.includes(category.code) ? "white" : "var(--text-secondary)",
-                  fontSize: "0.8125rem",
-                  cursor: "pointer",
-                  transition: "all 0.2s ease",
-                }}
-              >
-                {category.code}
-              </button>
-            ))}
+            {mainCategoryCodes.map((main) => {
+              const subcategories = categoriesByMain[main] || [];
+              const selectedCount = subcategories.filter((category) => categories.includes(category.code)).length;
+              const allSelected = subcategories.length > 0 && selectedCount === subcategories.length;
+              const isExpanded = expandedMainCategories.has(main);
+
+              return (
+                <div
+                  key={main}
+                  style={{
+                    border: "1px solid var(--border-light)",
+                    borderRadius: "var(--radius-md)",
+                    background: "var(--bg-hover)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px" }}>
+                    <button
+                      type="button"
+                      onClick={() => toggleMainCategoryExpanded(main)}
+                      aria-label={isExpanded ? `收起 ${main}` : `展开 ${main}`}
+                      style={{
+                        width: "28px",
+                        height: "28px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        borderRadius: "var(--radius-sm)",
+                        border: "1px solid var(--border-light)",
+                        background: "var(--bg-card)",
+                        color: "var(--text-secondary)",
+                        cursor: "pointer",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {isExpanded ? (
+                        <ChevronUp style={{ width: "14px", height: "14px" }} />
+                      ) : (
+                        <ChevronDown style={{ width: "14px", height: "14px" }} />
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => toggleMainCategory(main)}
+                      title={allSelected ? "取消选择该大类" : "选择该大类下全部小类"}
+                      style={{
+                        flex: 1,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "12px",
+                        padding: "8px 12px",
+                        borderRadius: "var(--radius-md)",
+                        border: "1px solid var(--border-light)",
+                        background: selectedCount > 0 ? "var(--color-primary)" : "var(--bg-card)",
+                        color: selectedCount > 0 ? "white" : "var(--text-main)",
+                        fontSize: "0.875rem",
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        transition: "all 0.2s ease",
+                      }}
+                    >
+                      <span>{main} · {MAIN_CATEGORY_LABELS[main] || main}</span>
+                      <span style={{ fontSize: "0.75rem", opacity: 0.85 }}>
+                        {selectedCount > 0 ? `${selectedCount}/${subcategories.length}` : `${subcategories.length} 小类`}
+                      </span>
+                    </button>
+                  </div>
+
+                  {isExpanded && (
+                    <div
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: "8px",
+                        padding: "0 12px 12px 44px",
+                      }}
+                    >
+                      {subcategories.map((category) => {
+                        const selected = categories.includes(category.code);
+                        return (
+                          <button
+                            key={category.code}
+                            type="button"
+                            onClick={() => toggleCategory(category.code)}
+                            title={category.name}
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: "var(--radius-md)",
+                              border: "1px solid var(--border-light)",
+                              background: selected ? "var(--color-primary)" : "var(--bg-card)",
+                              color: selected ? "white" : "var(--text-secondary)",
+                              fontSize: "0.8125rem",
+                              cursor: "pointer",
+                              transition: "all 0.2s ease",
+                            }}
+                          >
+                            {category.code}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
