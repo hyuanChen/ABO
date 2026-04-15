@@ -88,6 +88,32 @@ class TestBilibiliFetch:
 
         assert allowed == {"42", "1001"}
 
+    @pytest.mark.asyncio
+    async def test_resolve_followed_uid_filters_respects_manual_empty_smart_groups(self):
+        """Test manual smart-group overrides can intentionally remove a creator from smart groups."""
+        tracker = BilibiliTracker()
+
+        async def fake_fetch_followed_ups(sessdata: str, max_count: int = 500):
+            return [
+                {"mid": "1001", "uname": "AI研究社", "sign": "人工智能与大模型", "official_desc": ""},
+            ]
+
+        tracker._fetch_followed_ups = fake_fetch_followed_ups  # type: ignore[method-assign]
+
+        allowed = await tracker._resolve_followed_uid_filters(
+            sessdata="dummy",
+            explicit_uids=[],
+            followed_up_groups=["ai-tech"],
+            creator_profiles={
+                "1001": {
+                    "manual_override": True,
+                    "smart_groups": [],
+                }
+            },
+        )
+
+        assert allowed is None
+
     def test_classify_followed_up_matches_tool_groups(self):
         """Test followed UP grouping stays aligned with the Bilibili tool."""
         tracker = BilibiliTracker()

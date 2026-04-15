@@ -4,9 +4,11 @@
 import { useEffect, useState } from "react";
 import { Clock, RefreshCw, Hash, Settings, AlertCircle } from "lucide-react";
 import { api } from "../core/api";
+import { filterModulesForManagement } from "../core/moduleVisibility";
 import { useStore } from "../core/store";
 import ToggleSwitch from "./ToggleSwitch";
 import { ModuleDetailModal } from "../modules/modules/ModuleDetailModal";
+import { EMPTY_MODULE_USAGE_METRICS } from "../modules/modules/moduleManagementShared";
 import type { ModuleConfig, ModuleDashboard } from "../types/module";
 
 const MODULE_ICONS: Record<string, string> = {
@@ -104,7 +106,8 @@ export default function ModuleConfigPanel() {
     );
   }
 
-  const activeCount = modules.filter(m => m.status === "active").length;
+  const visibleModules = filterModulesForManagement(modules);
+  const activeCount = visibleModules.filter(m => m.status === "active").length;
 
   return (
     <>
@@ -115,7 +118,7 @@ export default function ModuleConfigPanel() {
           marginBottom: "6px",
         }}>
           <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-            {activeCount}/{modules.length} 个模块运行中
+            {activeCount}/{visibleModules.length} 个模块运行中
           </span>
           <button
             onClick={loadModules}
@@ -130,7 +133,7 @@ export default function ModuleConfigPanel() {
         </div>
 
         {/* Module list */}
-        {modules.map((mod) => {
+        {visibleModules.map((mod) => {
           const isActive = mod.status === "active";
           const hasError = mod.status === "error";
           const unconfigured = mod.status === "unconfigured";
@@ -224,9 +227,13 @@ export default function ModuleConfigPanel() {
       {selectedModule && (
         <ModuleDetailModal
           module={selectedModule}
-          initialTab="config"
+          usage={EMPTY_MODULE_USAGE_METRICS}
+          initialTab="overview"
           onClose={() => setSelectedModule(null)}
           onUpdate={handleUpdateModule}
+          onOpenTool={() => setSelectedModule(null)}
+          onRun={() => { void api.post(`/api/modules/${selectedModule.id}/run`, {}).catch(() => {}); }}
+          onToggle={() => { void toggleModule(selectedModule.id); }}
         />
       )}
     </>

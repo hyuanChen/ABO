@@ -84,7 +84,7 @@ export function ArxivAPITool() {
   // Search parameters
   const [keywords, setKeywords] = useState("");
   const [categories, setCategories] = useState<string[]>([]);
-  const [expandedMainCategories, setExpandedMainCategories] = useState<Set<string>>(new Set(["cs"]));
+  const [expandedMainCategories, setExpandedMainCategories] = useState<Set<string>>(new Set());
   const [availableCategories, setAvailableCategories] = useState<Category[]>([]);
   const [mode, setMode] = useState<"AND" | "OR">("AND");
   const [maxResults, setMaxResults] = useState(50);

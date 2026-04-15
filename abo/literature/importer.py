@@ -98,12 +98,12 @@ async def import_pdf(
 
     notes = ""
     if run_claude:
-        from abo.claude_bridge.runner import batch_call
+        from abo.sdk.tools import agent
         prompt = (
             "请为以下学术论文生成简短的结构化笔记（核心贡献、方法论、局限性各一段）：\n\n"
             + text[:5000]
         )
-        notes = await batch_call(prompt)
+        notes = await agent(prompt)
 
     _write_paper_note(vault_path, paper_id, {
         "abo-type": "literature", "title": title, "authors": "Unknown",
@@ -126,12 +126,12 @@ async def import_doi(doi: str, vault_path: str, *, run_claude: bool = False) -> 
     paper_id = _build_paper_id(meta["title"], meta.get("year"), meta.get("authors", ""))
     notes = ""
     if run_claude:
-        from abo.claude_bridge.runner import batch_call
+        from abo.sdk.tools import agent
         prompt = (
             f"请为论文《{meta['title']}》（{meta.get('authors', '')}，{meta.get('year', '')}）"
             "生成简短的结构化笔记（核心贡献、方法论、局限性各一段）。"
         )
-        notes = await batch_call(prompt)
+        notes = await agent(prompt)
 
     _write_paper_note(vault_path, paper_id, {
         "abo-type": "literature",

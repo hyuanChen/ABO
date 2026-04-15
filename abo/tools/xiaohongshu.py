@@ -3,8 +3,8 @@
 
 核心策略：
 1. 复用用户 Cookie，不做自动登录
-2. 优先请求页面 HTML，解析 window.__INITIAL_STATE__
-3. 对搜索/关注流只做“链接发现”，再回抓笔记详情页
+2. 优先通过本地 bridge + 浏览器扩展读取真实页面 MAIN world 状态
+3. bridge 不可用时再回退 HTML / 旧路径
 """
 
 import asyncio
@@ -17,6 +17,69 @@ from typing import Any, Optional
 from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
+
+from abo.tools.xhs_extension_bridge import XHSExtensionBridge
+
+COMMENTS_CONTAINER_SELECTOR = ".comments-container"
+COMMENT_PARENT_SELECTOR = ".parent-comment"
+COMMENT_ITEM_SELECTOR = ".parent-comment, .comment-item, .comment"
+NO_COMMENTS_SELECTOR = ".no-comments-text"
+END_CONTAINER_SELECTOR = ".end-container"
+SHOW_MORE_SELECTOR = ".show-more"
+TOTAL_COMMENT_SELECTOR = ".comments-container .total"
+
+
+def _classify_xhs_page_text(text: str) -> tuple[str, str] | None:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return None
+
+    rules = [
+        ("risk_limited", "访问频繁", "命中小红书访问频繁限制，任务已停止"),
+        ("risk_limited", "安全限制", "命中小红书安全限制，任务已停止"),
+        ("risk_limited", "安全访问", "命中小红书安全访问限制，任务已停止"),
+        ("risk_limited", "请稍后再试", "小红书要求稍后重试，任务已停止"),
+        ("manual_required", "扫码", "页面要求扫码验证，任务已停止"),
+        ("auth_invalid", "请先登录", "当前浏览器未登录小红书，任务已停止"),
+        ("auth_invalid", "登录后查看更多内容", "当前页面要求登录后查看，任务已停止"),
+        ("not_found", "300031", "当前页面暂时无法浏览，任务已停止"),
+        ("not_found", "页面不见了", "页面已不可访问，任务已停止"),
+        ("not_found", "内容无法展示", "页面内容不可展示，任务已停止"),
+        ("not_found", "笔记不存在", "笔记不存在或已删除，任务已停止"),
+        ("not_found", "内容已无法查看", "内容已无法查看，任务已停止"),
+    ]
+    for code, marker, message in rules:
+        if marker in normalized:
+            return code, message
+    return None
+
+
+def _raise_for_xhs_snapshot(snapshot: Any) -> None:
+    if not isinstance(snapshot, dict):
+        return
+    risk = snapshot.get("risk")
+    if isinstance(risk, dict) and risk.get("code"):
+        code = str(risk.get("code") or "").strip()
+        message = str(risk.get("message") or "").strip() or "页面状态异常"
+        raise RuntimeError(f"[{code}] {message}")
+
+
+def _should_stop_extension_error(error: Any) -> bool:
+    text = str(error or "")
+    stop_markers = [
+        "[risk_limited]",
+        "[manual_required]",
+        "[auth_invalid]",
+        "[not_found]",
+        "访问频繁",
+        "安全限制",
+        "扫码",
+        "请先登录",
+        "300031",
+        "任务已停止",
+    ]
+    lowered = text.lower()
+    return any(marker.lower() in lowered for marker in stop_markers)
 
 
 @dataclass
@@ -81,14 +144,22 @@ class XiaohongshuAPI:
         cookie: str,
         keywords: list[str],
         max_notes: int = 50,
+        use_extension: bool = True,
+        extension_port: int = 9334,
+        dedicated_window_mode: bool = False,
     ) -> list[XHSNote]:
         """从关注流直接抓取卡片内容。"""
         if not cookie:
             raise ValueError("未配置小红书 Cookie，请先配置 web_session")
-        notes = await self._extract_cards_via_playwright(
-            url=f"{self.BASE_URL}/explore?tab=following",
-            cookie=cookie,
+        feed_url = f"{self.BASE_URL}/explore?tab=following"
+        notes = await self._extract_cards_with_plugin_priority(
+            url=feed_url,
+            page_kind="feed",
             max_results=max_notes * 2,
+            cookie=cookie,
+            use_extension=use_extension,
+            extension_port=extension_port,
+            dedicated_window_mode=dedicated_window_mode,
         )
         matched_notes: list[XHSNote] = []
         for note in notes:
@@ -108,6 +179,9 @@ class XiaohongshuAPI:
         max_results: int = 20,
         min_likes: int = 100,
         cookie: str | None = None,
+        use_extension: bool = True,
+        extension_port: int = 9334,
+        dedicated_window_mode: bool = False,
     ) -> list[XHSNote]:
         """
         根据关键词搜索小红书笔记。
@@ -116,10 +190,15 @@ class XiaohongshuAPI:
         if not cookie:
             raise ValueError("未配置小红书 Cookie，请先配置 web_session")
 
-        notes = await self._extract_cards_via_playwright(
-            url=f"{self.BASE_URL}/search_result?keyword={quote(keyword)}",
-            cookie=cookie,
+        search_url = f"{self.BASE_URL}/search_result?keyword={quote(keyword)}"
+        notes = await self._extract_cards_with_plugin_priority(
+            url=search_url,
+            page_kind="search",
             max_results=max_results * 2,
+            cookie=cookie,
+            use_extension=use_extension,
+            extension_port=extension_port,
+            dedicated_window_mode=dedicated_window_mode,
         )
         notes = [note for note in notes if not min_likes or note.likes >= min_likes]
 
@@ -156,6 +235,44 @@ class XiaohongshuAPI:
         if sort_by == "likes":
             result.sort(key=lambda x: x.likes, reverse=True)
         return result[:max_comments]
+
+    async def _extract_cards_with_plugin_priority(
+        self,
+        *,
+        url: str,
+        page_kind: str,
+        max_results: int,
+        cookie: str,
+        use_extension: bool = True,
+        extension_port: int = 9334,
+        dedicated_window_mode: bool = False,
+    ) -> list[XHSNote]:
+        """统一列表页抓取入口。
+
+        对齐专辑抓取主链路：优先 bridge + 扩展读取真实页面 state，
+        失败时再回退到 Playwright。
+        """
+        if use_extension:
+            try:
+                notes = await self._extract_cards_via_extension(
+                    url=url,
+                    max_results=max_results,
+                    extension_port=extension_port,
+                    dedicated_window_mode=dedicated_window_mode,
+                    page_kind=page_kind,
+                )
+                if notes:
+                    return notes
+            except Exception as exc:
+                if _should_stop_extension_error(exc):
+                    raise
+
+        return await self._extract_cards_via_playwright(
+            url=url,
+            cookie=cookie,
+            max_results=max_results,
+            page_kind=page_kind,
+        )
 
     async def fetch_note_detail(self, note_url: str, cookie: str) -> Optional[XHSNote]:
         """抓取单条笔记详情。"""
@@ -360,11 +477,12 @@ class XiaohongshuAPI:
         if isinstance(note_section, dict):
             detail_map = note_section.get("noteDetailMap")
             if isinstance(detail_map, dict) and detail_map:
-                first = next(iter(detail_map.values()))
-                if isinstance(first, dict):
-                    if isinstance(first.get("note"), dict):
-                        return first["note"]
-                    return first
+                for item in detail_map.values():
+                    if not isinstance(item, dict):
+                        continue
+                    if isinstance(item.get("note"), dict):
+                        return item["note"]
+                    return item
 
         for node in self._walk(state):
             if (
@@ -414,6 +532,423 @@ class XiaohongshuAPI:
             )
         comments.sort(key=lambda x: (x.is_top, x.likes), reverse=True)
         return comments
+
+    def _extract_comments_from_dom_records(self, records: list[dict[str, Any]]) -> list[XHSComment]:
+        comments: list[XHSComment] = []
+        seen: set[str] = set()
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            author = self._safe_str(item.get("author"))
+            content = self._safe_str(item.get("content"))
+            if not author or not content:
+                continue
+            comment_id = (
+                self._safe_str(item.get("comment_id"))
+                or self._safe_str(item.get("id"))
+                or f"comment-{hash((author, content))}"
+            )
+            if comment_id in seen:
+                continue
+            seen.add(comment_id)
+            comments.append(
+                XHSComment(
+                    id=comment_id,
+                    author=author,
+                    content=content,
+                    likes=self._parse_count(item.get("likes")),
+                    is_top=bool(item.get("is_top")),
+                    reply_to=self._safe_str(item.get("reply_to")),
+                )
+            )
+        comments.sort(key=lambda x: (x.is_top, x.likes), reverse=True)
+        return comments
+
+    def _dedupe_comments(self, comments: list[XHSComment]) -> list[XHSComment]:
+        ordered: list[XHSComment] = []
+        seen_ids: set[str] = set()
+        seen_signatures: set[str] = set()
+
+        def normalize_text(value: str) -> str:
+            return re.sub(r"\s+", " ", self._safe_str(value)).strip()
+
+        for item in comments:
+            item_id = self._safe_str(item.id)
+            signature = "|".join(
+                [
+                    normalize_text(item.author),
+                    normalize_text(item.reply_to),
+                    normalize_text(item.content),
+                ]
+            )
+            if item_id and item_id in seen_ids:
+                continue
+            if signature and signature in seen_signatures:
+                continue
+            if item_id:
+                seen_ids.add(item_id)
+            if signature:
+                seen_signatures.add(signature)
+            ordered.append(item)
+        ordered.sort(key=lambda x: (x.is_top, x.likes), reverse=True)
+        return ordered
+
+    def _build_extension_comment_status_expression(self) -> str:
+        return (
+            "(() => {"
+            "const textOf = (selector) => {"
+            "  const el = document.querySelector(selector);"
+            "  return (el?.innerText || el?.textContent || '').trim();"
+            "};"
+            "const parseCount = (value) => {"
+            "  const text = String(value || '').replace(/[,，\\s]/g, '').trim();"
+            "  if (!text) return 0;"
+            "  const m = text.match(/([0-9]+(?:\\.[0-9]+)?)(万)?/);"
+            "  if (!m) return 0;"
+            "  const num = Number(m[1]);"
+            "  return Number.isFinite(num) ? Math.round(m[2] ? num * 10000 : num) : 0;"
+            "};"
+            f"const commentsContainer = document.querySelector({json.dumps(COMMENTS_CONTAINER_SELECTOR)});"
+            f"const commentNodes = Array.from(document.querySelectorAll({json.dumps(COMMENT_ITEM_SELECTOR)}));"
+            f"const totalText = textOf({json.dumps(TOTAL_COMMENT_SELECTOR)});"
+            f"const noCommentsText = textOf({json.dumps(NO_COMMENTS_SELECTOR)});"
+            f"const endText = textOf({json.dumps(END_CONTAINER_SELECTOR)});"
+            "const showMoreButtons = Array.from(document.querySelectorAll("
+            + json.dumps(SHOW_MORE_SELECTOR)
+            + ")).slice(0, 30).map((el, index) => ({"
+            "  index,"
+            "  text: ((el.innerText || el.textContent || '').trim()),"
+            "  hidden: !!(el.offsetParent === null),"
+            "}));"
+            "const scroller = document.scrollingElement || document.documentElement;"
+            "const scrollTop = scroller ? scroller.scrollTop : 0;"
+            "const scrollHeight = scroller ? scroller.scrollHeight : 0;"
+            "const viewportHeight = window.innerHeight || 0;"
+            "return {"
+            "  has_comments_container: !!commentsContainer,"
+            "  comment_count: commentNodes.length,"
+            "  total_count: parseCount(totalText),"
+            "  no_comments: /荒地|暂无评论|还没有评论/.test(noCommentsText),"
+            "  no_comments_text: noCommentsText,"
+            "  end_reached: /THE\\s*END/i.test(endText),"
+            "  end_text: endText,"
+            "  show_more_buttons: showMoreButtons,"
+            "  visible_show_more_count: showMoreButtons.filter((item) => !item.hidden).length,"
+            "  scroll_top: scrollTop,"
+            "  scroll_height: scrollHeight,"
+            "  viewport_height: viewportHeight,"
+            "  at_bottom: scrollHeight > 0 && viewportHeight > 0 && scrollTop + viewportHeight >= scrollHeight - 220,"
+            "};"
+            "})()"
+        )
+
+    def _build_extension_comment_click_more_expression(self, max_replies_threshold: int, max_click: int = 8) -> str:
+        return (
+            "(() => {"
+            f"const threshold = {int(max_replies_threshold)};"
+            f"const maxClick = {int(max_click)};"
+            f"const buttons = Array.from(document.querySelectorAll({json.dumps(SHOW_MORE_SELECTOR)}));"
+            "let clicked = 0;"
+            "let skipped = 0;"
+            "for (const button of buttons) {"
+            "  if (clicked >= maxClick) break;"
+            "  if (!button || button.offsetParent === null) continue;"
+            "  const text = ((button.innerText || button.textContent || '').trim());"
+            "  if (!text) continue;"
+            "  const match = text.match(/展开\\s*(\\d+)\\s*条回复/);"
+            "  if (threshold > 0 && match) {"
+            "    const replyCount = Number(match[1] || 0);"
+            "    if (replyCount > threshold) { skipped += 1; continue; }"
+            "  }"
+            "  button.scrollIntoView({ block: 'center', inline: 'center' });"
+            "  button.click();"
+            "  clicked += 1;"
+            "}"
+            "return { clicked, skipped };"
+            "})()"
+        )
+
+    def _build_extension_scroll_last_comment_expression(self) -> str:
+        return (
+            "(() => {"
+            f"const nodes = Array.from(document.querySelectorAll({json.dumps(COMMENT_ITEM_SELECTOR)}));"
+            "const last = nodes[nodes.length - 1];"
+            "if (!last) return false;"
+            "last.scrollIntoView({ block: 'center', inline: 'nearest' });"
+            "return true;"
+            "})()"
+        )
+
+    def _build_extension_comment_state_expression(self, note_id: str) -> str:
+        note_id_js = json.dumps(note_id)
+        return (
+            "(() => {"
+            f"const noteId = {note_id_js};"
+            "const unwrap = (value) => {"
+            "  let current = value;"
+            "  const seen = new Set();"
+            "  while (current && typeof current === 'object' && !seen.has(current)) {"
+            "    seen.add(current);"
+            "    if (Array.isArray(current)) return current;"
+            "    if ('_value' in current) { current = current._value; continue; }"
+            "    if ('value' in current) { current = current.value; continue; }"
+            "    if ('_rawValue' in current) { current = current._rawValue; continue; }"
+            "    break;"
+            "  }"
+            "  return current;"
+            "};"
+            "const state = window.__INITIAL_STATE__ || {};"
+            "const noteState = unwrap(state.note) || {};"
+            "const noteDetailMap = unwrap(noteState.noteDetailMap) || {};"
+            "const values = noteDetailMap && typeof noteDetailMap === 'object' ? Object.values(noteDetailMap) : [];"
+            "const detail = noteDetailMap[noteId] || values.find((item) => {"
+            "  if (!item || typeof item !== 'object') return false;"
+            "  const note = item.note && typeof item.note === 'object' ? item.note : item;"
+            "  const candidateId = note.noteId || note.note_id || note.id || '';"
+            "  return String(candidateId) === String(noteId);"
+            "}) || null;"
+            "if (!detail) return {};"
+            "return { note: { noteDetailMap: { [noteId || 'note']: detail } } };"
+            "})()"
+        )
+
+    def _build_extension_comment_dom_extract_expression(self, limit: int) -> str:
+        return (
+            "(() => {"
+            f"const limit = {int(limit)};"
+            "const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();"
+            "const parseCount = (value) => {"
+            "  const text = String(value || '').replace(/[,，\\s]/g, '').trim();"
+            "  if (!text) return 0;"
+            "  const m = text.match(/([0-9]+(?:\\.[0-9]+)?)(万)?/);"
+            "  if (!m) return 0;"
+            "  const num = Number(m[1]);"
+            "  return Number.isFinite(num) ? Math.round(m[2] ? num * 10000 : num) : 0;"
+            "};"
+            "const pickText = (root, selectors) => {"
+            "  for (const selector of selectors) {"
+            "    const el = root.querySelector(selector);"
+            "    const text = normalize(el?.innerText || el?.textContent || '');"
+            "    if (text) return text;"
+            "  }"
+            "  return '';"
+            "};"
+            f"const nodes = Array.from(document.querySelectorAll({json.dumps(COMMENT_ITEM_SELECTOR + ', .sub-comment, .reply-item')}));"
+            "return nodes.slice(0, limit).map((node, index) => {"
+            "  const authorLink = node.querySelector('a[href*=\"/user/profile/\"]');"
+            "  const author = normalize("
+            "    authorLink?.innerText || authorLink?.textContent ||"
+            "    pickText(node, ['.author', '.name', '.user-name', '.nickname', '.username'])"
+            "  );"
+            "  let content = normalize(pickText(node, ['.content', '.comment-content', '.comment-text', '.desc', '.note-text', 'p.content', 'p', 'span.content']));"
+            "  if (!content) {"
+            "    const textPool = Array.from(node.querySelectorAll('div,span,p')).map((el) => normalize(el.innerText || el.textContent || '')).filter(Boolean);"
+            "    content = textPool.filter((text) => !/回复|赞|展开\\s*\\d+\\s*条回复|查看更多|THE\\s*END/i.test(text)).sort((a, b) => b.length - a.length)[0] || '';"
+            "  }"
+            "  const likeText = pickText(node, ['.like-wrapper', '.like', '.interactions', '.right']);"
+            "  const replyTo = normalize(pickText(node, ['.reply-user', '.target-user', '.reply-to']));"
+            "  const commentId = normalize("
+            "    node.id || node.getAttribute('data-comment-id') || node.getAttribute('comment-id') || `comment-dom-${index}`"
+            "  ).replace(/^comment-/, '');"
+            "  const wholeText = normalize(node.innerText || node.textContent || '');"
+            "  return {"
+            "    comment_id: commentId,"
+            "    author,"
+            "    content,"
+            "    likes: parseCount(likeText),"
+            "    is_top: /置顶/.test(wholeText),"
+            "    reply_to: replyTo,"
+            "  };"
+            "}).filter((item) => item.author && item.content);"
+            "})()"
+        )
+
+    async def _fetch_comment_status_via_extension(
+        self,
+        bridge: XHSExtensionBridge,
+        note_id: str,
+    ) -> dict[str, Any]:
+        snapshot = await bridge.call(
+            "get_xhs_page_snapshot",
+            {"kind": "note", "noteId": note_id, "textLimit": 1200},
+            timeout=12.0,
+        )
+        _raise_for_xhs_snapshot(snapshot)
+        status = await bridge.call(
+            "evaluate",
+            {"expression": self._build_extension_comment_status_expression()},
+            timeout=20.0,
+        )
+        if not isinstance(status, dict):
+            return {}
+        return status
+
+    async def _scroll_to_comments_area_via_extension(self, bridge: XHSExtensionBridge) -> None:
+        await bridge.call(
+            "scroll_element_into_view",
+            {"selector": COMMENTS_CONTAINER_SELECTOR},
+            timeout=10.0,
+        )
+        await asyncio.sleep(0.6)
+        await bridge.call("dispatch_wheel_event", {"deltaY": 120}, timeout=10.0)
+        await asyncio.sleep(0.8)
+
+    async def _scroll_to_last_comment_via_extension(self, bridge: XHSExtensionBridge) -> None:
+        await bridge.call(
+            "evaluate",
+            {"expression": self._build_extension_scroll_last_comment_expression()},
+            timeout=12.0,
+        )
+
+    async def _click_show_more_buttons_via_extension(
+        self,
+        bridge: XHSExtensionBridge,
+        max_replies_threshold: int,
+    ) -> tuple[int, int]:
+        result = await bridge.call(
+            "evaluate",
+            {
+                "expression": self._build_extension_comment_click_more_expression(
+                    max_replies_threshold=max_replies_threshold,
+                    max_click=8,
+                )
+            },
+            timeout=20.0,
+        )
+        if not isinstance(result, dict):
+            return 0, 0
+        return int(result.get("clicked") or 0), int(result.get("skipped") or 0)
+
+    async def _human_scroll_comments_via_extension(
+        self,
+        bridge: XHSExtensionBridge,
+        status: dict[str, Any],
+        *,
+        large_mode: bool = False,
+    ) -> None:
+        at_bottom = bool(status.get("at_bottom"))
+        if large_mode:
+            await bridge.call("dispatch_wheel_event", {"deltaY": 1600}, timeout=10.0)
+            await asyncio.sleep(0.7)
+            await bridge.call("scroll_by", {"x": 0, "y": 1200}, timeout=10.0)
+        else:
+            await bridge.call("dispatch_wheel_event", {"deltaY": 900}, timeout=10.0)
+            await asyncio.sleep(0.5)
+            await bridge.call("scroll_by", {"x": 0, "y": 560}, timeout=10.0)
+        if at_bottom:
+            await asyncio.sleep(0.5)
+            await bridge.call("scroll_to_bottom", {}, timeout=10.0)
+
+    async def _fetch_comments_via_extension(
+        self,
+        *,
+        note_id: str,
+        note_url: Optional[str],
+        max_comments: int,
+        extension_port: int,
+        dedicated_window_mode: bool,
+        load_all_comments: bool = True,
+        click_more_replies: bool = True,
+        max_replies_threshold: int = 10,
+    ) -> list[XHSComment]:
+        target_url = note_url or self._normalize_note_url(note_id)
+        async with XHSExtensionBridge(port=extension_port) as bridge:
+            await bridge.wait_until_ready(timeout=20.0)
+            background = bool(dedicated_window_mode)
+            if dedicated_window_mode:
+                await bridge.call("ensure_dedicated_xhs_tab", {"url": target_url}, timeout=60.0)
+            else:
+                await bridge.call("navigate", {"url": target_url, "background": background}, timeout=45.0)
+            await bridge.call("wait_for_load", {"timeout": 45000, "background": background}, timeout=45.0)
+            await bridge.call("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+            snapshot = await bridge.call(
+                "wait_for_xhs_state",
+                {"kind": "note", "noteId": note_id, "timeout": 15000, "interval": 500},
+                timeout=20.0,
+            )
+            _raise_for_xhs_snapshot(snapshot)
+            await self._scroll_to_comments_area_via_extension(bridge)
+
+            status = await self._fetch_comment_status_via_extension(bridge, note_id)
+            if status.get("no_comments"):
+                return []
+
+            if load_all_comments:
+                max_attempts = max(max_comments * 3, 18) if max_comments > 0 else 48
+                no_growth_rounds = 0
+                stagnant_checks = 0
+                for attempt in range(max_attempts):
+                    status = await self._fetch_comment_status_via_extension(bridge, note_id)
+                    current_count = int(status.get("comment_count") or 0)
+                    if status.get("no_comments"):
+                        break
+                    if status.get("end_reached"):
+                        break
+                    if max_comments > 0 and current_count >= max_comments:
+                        break
+
+                    if click_more_replies and attempt % 2 == 0:
+                        clicked, skipped = await self._click_show_more_buttons_via_extension(
+                            bridge,
+                            max_replies_threshold=max_replies_threshold,
+                        )
+                        if clicked > 0 or skipped > 0:
+                            await asyncio.sleep(1.0)
+                            status = await self._fetch_comment_status_via_extension(bridge, note_id)
+                            current_count = int(status.get("comment_count") or 0)
+                            if status.get("end_reached") or (max_comments > 0 and current_count >= max_comments):
+                                break
+
+                    if current_count > 0:
+                        await self._scroll_to_last_comment_via_extension(bridge)
+                        await asyncio.sleep(0.5)
+
+                    before_scroll_top = int(status.get("scroll_top") or 0)
+                    await self._human_scroll_comments_via_extension(
+                        bridge,
+                        status,
+                        large_mode=stagnant_checks >= 3,
+                    )
+                    await asyncio.sleep(1.0)
+
+                    after_status = await self._fetch_comment_status_via_extension(bridge, note_id)
+                    after_count = int(after_status.get("comment_count") or 0)
+                    after_scroll_top = int(after_status.get("scroll_top") or 0)
+
+                    if after_count > current_count:
+                        no_growth_rounds = 0
+                        stagnant_checks = 0
+                    else:
+                        no_growth_rounds += 1
+                        if after_status.get("at_bottom") or after_scroll_top <= before_scroll_top + 8:
+                            stagnant_checks += 1
+                        else:
+                            stagnant_checks = max(stagnant_checks - 1, 0)
+
+                    if after_status.get("end_reached"):
+                        break
+                    if max_comments > 0 and after_count >= max_comments:
+                        break
+                    if no_growth_rounds >= 3:
+                        break
+
+            state_payload = await bridge.call(
+                "evaluate",
+                {"expression": self._build_extension_comment_state_expression(note_id)},
+                timeout=20.0,
+            )
+            dom_records = await bridge.call(
+                "evaluate",
+                {"expression": self._build_extension_comment_dom_extract_expression(max(max_comments * 3, 160) if max_comments > 0 else 240)},
+                timeout=20.0,
+            )
+
+        comments = self._extract_comments_from_state(state_payload if isinstance(state_payload, dict) else {})
+        comments.extend(
+            self._extract_comments_from_dom_records(dom_records if isinstance(dom_records, list) else [])
+        )
+        comments = self._dedupe_comments(comments)
+        return comments[:max_comments] if max_comments > 0 else comments
 
     def _extract_image_urls(self, note_root: dict[str, Any]) -> list[str]:
         urls: list[str] = []
@@ -490,53 +1025,77 @@ class XiaohongshuAPI:
             return urls[:max_results]
         return await self._discover_search_note_urls_with_playwright(search_url, cookie, max_results)
 
-    async def _extract_cards_via_playwright(
-        self,
-        url: str,
-        cookie: str,
-        max_results: int,
-    ) -> list[XHSNote]:
-        from playwright.async_api import async_playwright
+    def _default_xsec_source(self, page_kind: str) -> str:
+        return "pc_feed" if page_kind == "feed" else "pc_search"
 
-        notes: list[XHSNote] = []
-        js = """
-        () => {
-          const byId = {};
-          const addToken = (value) => {
+    def _build_card_extract_expression(self, page_kind: str) -> str:
+        normalized_kind = "feed" if page_kind == "feed" else "search"
+        default_xsec_source = self._default_xsec_source(normalized_kind)
+        if normalized_kind == "feed":
+            roots = [
+                "unwrap(state.feed?.feeds)",
+                "unwrap(state.feed?.items)",
+                "unwrap(state.search?.feeds)",
+                "unwrap(state.search?.notes)",
+                "unwrap(state.search?.noteList)",
+                "unwrap(state.note?.noteDetailMap)",
+            ]
+        else:
+            roots = [
+                "unwrap(state.search?.feeds)",
+                "unwrap(state.search?.notes)",
+                "unwrap(state.search?.noteList)",
+                "unwrap(state.feed?.feeds)",
+                "unwrap(state.feed?.items)",
+                "unwrap(state.note?.noteDetailMap)",
+            ]
+        roots_js = ",\n            ".join(roots)
+        return f"""
+        (() => {{
+          const unwrap = (value) => {{
+            let current = value;
+            const seen = new Set();
+            while (current && typeof current === 'object' && !seen.has(current)) {{
+              seen.add(current);
+              if (Array.isArray(current)) return current;
+              if ('_value' in current) {{ current = current._value; continue; }}
+              if ('value' in current) {{ current = current.value; continue; }}
+              if ('_rawValue' in current) {{ current = current._rawValue; continue; }}
+              break;
+            }}
+            return current;
+          }};
+          const byId = {{}};
+          const addToken = (value) => {{
             if (!value || typeof value !== 'object') return;
             const noteId = value.noteId || value.note_id || value.id;
             const token = value.xsecToken || value.xsec_token;
             if (noteId && token && !byId[noteId]) byId[noteId] = String(token);
-          };
-          const state = window.__INITIAL_STATE__ || {};
+          }};
+          const state = window.__INITIAL_STATE__ || {{}};
           const roots = [
-            state.note?.noteDetailMap,
-            state.search?.feeds,
-            state.search?.notes,
-            state.search?.noteList,
-            state.feed?.feeds,
-            state.feed?.items
+            {roots_js}
           ].filter(Boolean);
-          const queue = roots.map(value => ({ value, depth: 0 }));
+          const queue = roots.map(value => ({{ value, depth: 0 }}));
           const seenObjects = new WeakSet();
           let visited = 0;
-          while (queue.length && visited < 2500) {
-            const { value, depth } = queue.shift();
+          while (queue.length && visited < 2500) {{
+            const {{ value, depth }} = queue.shift();
             if (!value || typeof value !== 'object' || seenObjects.has(value) || depth > 5) continue;
             seenObjects.add(value);
             visited += 1;
             addToken(value);
             const children = Array.isArray(value)
-              ? value.slice(0, 100)
-              : Object.keys(value).slice(0, 100).map(key => {
-                  try { return value[key]; } catch (_) { return null; }
-                });
-            for (const child of children) {
-              if (child && typeof child === 'object') queue.push({ value: child, depth: depth + 1 });
-            }
-          }
+              ? value.slice(0, 120)
+              : Object.keys(value).slice(0, 120).map(key => {{
+                  try {{ return value[key]; }} catch (_) {{ return null; }}
+                }});
+            for (const child of children) {{
+              if (child && typeof child === 'object') queue.push({{ value: child, depth: depth + 1 }});
+            }}
+          }}
           const anchors = Array.from(document.querySelectorAll('a[href*="/explore/"]'));
-          return anchors.map((a) => {
+          return anchors.map((a) => {{
             const rawHref = a.href || a.getAttribute('href') || '';
             const absoluteHref = rawHref.startsWith('http') ? rawHref : new URL(rawHref, location.origin).href;
             const url = new URL(absoluteHref);
@@ -551,10 +1110,10 @@ class XiaohongshuAPI:
             const text = (card?.innerText || a.innerText || '').trim();
             const lines = text.split('\\n').map(s => s.trim()).filter(Boolean);
             const imgs = Array.from((card || a).querySelectorAll('img'))
-              .map(img => img.src)
+              .map(img => img.src || img.getAttribute('data-src') || '')
               .filter(Boolean)
               .filter(src => !src.includes('avatar'));
-            return {
+            return {{
               href: rawHref,
               xsec_token:
                 url.searchParams.get('xsec_token') ||
@@ -563,15 +1122,85 @@ class XiaohongshuAPI:
                 tokenNode?.dataset?.xsecToken ||
                 tokenNode?.getAttribute?.('xsec-token') ||
                 '',
-              xsec_source: url.searchParams.get('xsec_source') || 'pc_search',
+              xsec_source: url.searchParams.get('xsec_source') || {json.dumps(default_xsec_source)},
               title: lines[0] || '',
               text,
               lines,
               images: imgs.slice(0, 9)
-            };
-          });
-        }
+            }};
+          }});
+        }})()
         """
+
+    def _cards_to_notes(
+        self,
+        cards: list[dict[str, Any]],
+        *,
+        max_results: int,
+        page_kind: str,
+    ) -> list[XHSNote]:
+        default_xsec_source = self._default_xsec_source(page_kind)
+        notes: list[XHSNote] = []
+        seen: set[str] = set()
+        for card in cards:
+            href = self._safe_str(card.get("href"))
+            if not href:
+                continue
+            full_url = href if href.startswith("http") else f"{self.BASE_URL}{href}"
+            xsec_token = self._safe_str(card.get("xsec_token"))
+            xsec_source = self._safe_str(card.get("xsec_source")) or default_xsec_source
+            full_url = self._with_xsec_params(full_url, token=xsec_token, source=xsec_source)
+            if full_url in seen:
+                continue
+            seen.add(full_url)
+
+            title = self._safe_str(card.get("title"))
+            lines = card.get("lines") or []
+            body_lines = [line for line in lines[1:] if line and line != title]
+            text = self._safe_str(card.get("text"))
+            author = body_lines[0] if body_lines else "未知"
+            likes = 0
+            published_label = ""
+            if body_lines:
+                last = body_lines[-1]
+                likes = self._parse_count(last)
+                published_label = body_lines[-2] if len(body_lines) >= 2 else ""
+
+            images = [img for img in (card.get("images") or []) if isinstance(img, str)]
+            notes.append(
+                XHSNote(
+                    id=self._extract_note_id(full_url),
+                    title=title or "无标题",
+                    content=text[:800],
+                    author=author,
+                    author_id="",
+                    likes=likes,
+                    collects=0,
+                    comments_count=0,
+                    url=full_url,
+                    published_at=self._extract_datetime(published_label),
+                    cover_image=images[0] if images else None,
+                    images=images,
+                    comments_preview=[],
+                    xsec_token=xsec_token,
+                    xsec_source=xsec_source,
+                )
+            )
+            if len(notes) >= max_results:
+                break
+        return notes
+
+    async def _extract_cards_via_playwright(
+        self,
+        url: str,
+        cookie: str,
+        max_results: int,
+        page_kind: str = "search",
+    ) -> list[XHSNote]:
+        from playwright.async_api import async_playwright
+
+        js = self._build_card_extract_expression(page_kind)
+        cards: list[dict[str, Any]] = []
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -602,7 +1231,6 @@ class XiaohongshuAPI:
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 await asyncio.sleep(4)
-                cards = []
                 seen_hrefs: set[str] = set()
                 stale_rounds = 0
                 scroll_rounds = max(3, min(30, (max_results // 8) + 4))
@@ -629,53 +1257,74 @@ class XiaohongshuAPI:
             finally:
                 await browser.close()
 
-        seen: set[str] = set()
-        for card in cards:
-            href = self._safe_str(card.get("href"))
-            if not href:
-                continue
-            full_url = href if href.startswith("http") else f"{self.BASE_URL}{href}"
-            xsec_token = self._safe_str(card.get("xsec_token"))
-            xsec_source = self._safe_str(card.get("xsec_source")) or "pc_search"
-            full_url = self._with_xsec_params(full_url, token=xsec_token, source=xsec_source)
-            if full_url in seen:
-                continue
-            seen.add(full_url)
+        return self._cards_to_notes(cards, max_results=max_results, page_kind="feed" if page_kind == "feed" else "search")
 
-            title = self._safe_str(card.get("title"))
-            lines = card.get("lines") or []
-            body_lines = [line for line in lines[1:] if line and line != title]
-            text = self._safe_str(card.get("text"))
-            author = body_lines[0] if body_lines else "未知"
-            likes = 0
-            published_label = ""
-            if body_lines:
-                last = body_lines[-1]
-                likes = self._parse_count(last)
-                published_label = body_lines[-2] if len(body_lines) >= 2 else ""
+    async def _extract_cards_via_extension(
+        self,
+        url: str,
+        max_results: int,
+        extension_port: int = 9334,
+        dedicated_window_mode: bool = False,
+        page_kind: str = "search",
+    ) -> list[XHSNote]:
+        """通过真实浏览器扩展读取搜索/Feed 卡片。
 
-            images = [img for img in (card.get("images") or []) if isinstance(img, str)]
-            note = XHSNote(
-                id=self._extract_note_id(full_url),
-                title=title or "无标题",
-                content=text[:800],
-                author=author,
-                author_id="",
-                likes=likes,
-                collects=0,
-                comments_count=0,
-                url=full_url,
-                published_at=self._extract_datetime(published_label),
-                cover_image=images[0] if images else None,
-                images=images,
-                comments_preview=[],
-                xsec_token=xsec_token,
-                xsec_source=xsec_source,
+        这条链路对齐 xiaohongshu-skills 的实践：
+        Python -> bridge server -> 扩展 -> 真实浏览器 tab -> MAIN world。
+        优先读取 `window.__INITIAL_STATE__.search.feeds` / `feed.feeds`，再结合 DOM 卡片补齐标题、封面和 token。
+        """
+        normalized_kind = "feed" if page_kind == "feed" else "search"
+        js = self._build_card_extract_expression(normalized_kind)
+
+        async with XHSExtensionBridge(port=extension_port) as bridge:
+            await bridge.wait_until_ready(timeout=20.0)
+            background = bool(dedicated_window_mode)
+            if dedicated_window_mode:
+                await bridge.call("ensure_dedicated_xhs_tab", {"url": url}, timeout=60.0)
+            else:
+                await bridge.call("navigate", {"url": url, "background": background}, timeout=45.0)
+            await bridge.call("wait_for_load", {"timeout": 45000, "background": background}, timeout=45.0)
+            await bridge.call("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+            snapshot = await bridge.call(
+                "wait_for_xhs_state",
+                {"kind": normalized_kind, "timeout": 15000, "interval": 500},
+                timeout=20.0,
             )
-            notes.append(note)
-            if len(notes) >= max_results:
-                break
-        return notes
+            risk = snapshot.get("risk") if isinstance(snapshot, dict) else None
+            if isinstance(risk, dict) and risk.get("code"):
+                raise RuntimeError(f"[{risk.get('code')}] {risk.get('message') or '页面状态异常'}")
+
+            cards: list[dict[str, Any]] = []
+            seen_hrefs: set[str] = set()
+            stale_rounds = 0
+            scroll_rounds = max(4, min(36, (max_results // 8) + 6))
+            for round_index in range(scroll_rounds):
+                page_cards = await bridge.call("evaluate", {"expression": js}, timeout=20.0)
+                before = len(seen_hrefs)
+                if isinstance(page_cards, list):
+                    for card in page_cards:
+                        href = self._safe_str(card.get("href") if isinstance(card, dict) else "")
+                        if not href or href in seen_hrefs:
+                            continue
+                        seen_hrefs.add(href)
+                        cards.append(card)
+                if len(seen_hrefs) >= max_results:
+                    break
+                stale_rounds = stale_rounds + 1 if len(seen_hrefs) == before else 0
+                if stale_rounds >= 6:
+                    break
+                if round_index % 3 == 0:
+                    await bridge.call("scroll_by", {"x": 0, "y": 850}, timeout=10.0)
+                    await bridge.call("dispatch_wheel_event", {"deltaY": 900}, timeout=10.0)
+                elif round_index % 3 == 1:
+                    await bridge.call("scroll_by", {"x": 0, "y": 1200}, timeout=10.0)
+                else:
+                    await bridge.call("scroll_to_bottom", {}, timeout=10.0)
+                    await bridge.call("scroll_by", {"x": 0, "y": -420}, timeout=10.0)
+                    await bridge.call("dispatch_wheel_event", {"deltaY": 1100}, timeout=10.0)
+                await asyncio.sleep(1.2)
+
+        return self._cards_to_notes(cards, max_results=max_results, page_kind=normalized_kind)
 
     async def _discover_search_note_urls_with_playwright(
         self,
@@ -881,6 +1530,9 @@ async def xiaohongshu_search(
     min_likes: int = 100,
     sort_by: str = "likes",
     cookie: str | None = None,
+    use_extension: bool = True,
+    extension_port: int = 9334,
+    dedicated_window_mode: bool = False,
 ) -> dict:
     """搜索小红书高赞内容，并返回详情、媒体与评论预览。"""
     api = XiaohongshuAPI()
@@ -891,6 +1543,9 @@ async def xiaohongshu_search(
             max_results=max_results,
             min_likes=min_likes,
             cookie=cookie,
+            use_extension=use_extension,
+            extension_port=extension_port,
+            dedicated_window_mode=dedicated_window_mode,
         )
         return {
             "keyword": keyword,
@@ -936,21 +1591,52 @@ async def xiaohongshu_fetch_comments(
     max_comments: int = 50,
     sort_by: str = "likes",
     cookie: Optional[str] = None,
+    use_extension: bool = True,
+    extension_port: int = 9334,
+    dedicated_window_mode: bool = False,
+    load_all_comments: bool = True,
+    click_more_replies: bool = True,
+    max_replies_threshold: int = 10,
 ) -> dict:
     """获取小红书笔记评论。"""
     api = XiaohongshuAPI()
     try:
-        comments = await api.fetch_comments(
-            note_id=note_id,
-            note_url=note_url,
-            max_comments=max_comments,
-            sort_by=sort_by,
-            cookie=cookie,
-        )
+        comments: list[XHSComment] = []
+        strategy = "html_initial_state"
+        if use_extension:
+            try:
+                comments = await api._fetch_comments_via_extension(
+                    note_id=note_id,
+                    note_url=note_url,
+                    max_comments=max_comments,
+                    extension_port=extension_port,
+                    dedicated_window_mode=dedicated_window_mode,
+                    load_all_comments=load_all_comments,
+                    click_more_replies=click_more_replies,
+                    max_replies_threshold=max_replies_threshold,
+                )
+                strategy = "extension_state_machine"
+            except Exception as exc:
+                if _should_stop_extension_error(exc):
+                    raise
+                comments = []
+
+        if not comments:
+            comments = await api.fetch_comments(
+                note_id=note_id,
+                note_url=note_url,
+                max_comments=max_comments,
+                sort_by=sort_by,
+                cookie=cookie,
+            )
+        if sort_by == "likes":
+            comments.sort(key=lambda x: x.likes, reverse=True)
+        comments = comments[:max_comments]
         return {
             "note_id": note_id,
             "total_comments": len(comments),
             "sort_by": sort_by,
+            "strategy": strategy,
             "comments": [
                 {
                     "id": c.id,
@@ -999,12 +1685,12 @@ async def xiaohongshu_analyze_trends(
 }}
 """
 
-    from abo.sdk.tools import claude_json
+    from abo.sdk.tools import agent_json
 
     try:
-        result = await claude_json(prompt, prefs=prefs)
+        result = await agent_json(prompt, prefs=prefs)
     except Exception as e:
-        print(f"Claude 分析失败: {e}")
+        print(f"Agent 分析失败: {e}")
         result = {
             "hot_topics": [],
             "trending_tags": [],

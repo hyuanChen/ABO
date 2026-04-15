@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import asyncio
+import hashlib
 import math
 import re
 import subprocess
 import time
 import urllib.request
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +21,11 @@ import websockets
 
 from abo.config import get_vault_path, load as load_config
 from abo.tools.bilibili_favorite_renamer import rename_favorite_markdown_files
+from abo.tools.bilibili_video_meta import (
+    extract_bvid,
+    fetch_bilibili_video_metadata,
+    merge_tags,
+)
 
 
 USER_AGENT = (
@@ -34,6 +41,22 @@ WATCH_LATER_API = "https://api.bilibili.com/x/v2/history/toview/web"
 FAV_RESOURCE_PAGE_SIZE_MAX = 20
 FAV_RESOURCE_REQUEST_DELAY = 1.2
 FAV_RESOURCE_RATE_LIMIT_DELAYS = (20, 45, 75)
+SMART_GROUP_GENERIC_SIGNALS = {
+    "",
+    "无",
+    "其他",
+    "视频",
+    "bilibili",
+    "收藏",
+    "稍后再看",
+    "默认收藏夹",
+    "未命名",
+    "up主",
+}
+SMART_GROUP_GENERIC_SIGNAL_KEYS = {
+    re.sub(r"[()（）\[\]【】]+", "", re.sub(r"[\s\-_·•・]+", "", str(item).strip().lower()))
+    for item in SMART_GROUP_GENERIC_SIGNALS
+}
 
 
 @dataclass
@@ -48,8 +71,27 @@ class BilibiliNote:
     bvid: str = ""
     item_type: str = ""
     images: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     folder_name: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class BilibiliFavoriteAuthorAggregate:
+    author: str
+    note_count: int = 0
+    latest_date: str = ""
+    latest_title: str = ""
+    sample_titles: list[str] = field(default_factory=list)
+    sample_tags: list[str] = field(default_factory=list)
+    sample_folders: list[str] = field(default_factory=list)
+    sample_urls: list[str] = field(default_factory=list)
+    signal_weights: Counter = field(default_factory=Counter)
+    matched_mid: str = ""
+    matched_uname: str = ""
+    source_summary: str = ""
+    smart_group_value: str = "other"
+    smart_group_label: str = "其他"
 
 
 def _safe_filename(text: str, fallback: str = "untitled", limit: int = 80) -> str:
@@ -123,6 +165,10 @@ def _favorite_state_path(vault_path: str | Path | None = None) -> Path:
     return _vault_root(vault_path) / "bilibili" / ".crawl_state" / "favorites.json"
 
 
+def _vault_bilibili_dir(vault_path: str | Path | None = None) -> Path:
+    return _vault_root(vault_path) / "bilibili"
+
+
 def _load_favorite_state(vault_path: str | Path | None = None) -> dict:
     path = _favorite_state_path(vault_path)
     if not path.exists():
@@ -183,9 +229,13 @@ def normalize_cookie_header(cookie: str | list[dict] | None) -> str:
     return f"SESSDATA={raw}"
 
 
-async def export_bilibili_cookies_from_cdp(port: int = 9222) -> list[dict]:
+async def export_bilibili_cookies_from_cdp(
+    port: int = 9222,
+    *,
+    auto_launch_browser: bool = False,
+) -> list[dict]:
     """Read full Bilibili cookies from an Edge/Chrome CDP debugging port."""
-    version = _read_cdp_version(port)
+    version = _read_cdp_version(port, auto_launch_browser=auto_launch_browser)
     browser_ws = version.get("webSocketDebuggerUrl")
     if not browser_ws:
         raise RuntimeError("CDP 调试端口未返回 webSocketDebuggerUrl")
@@ -264,11 +314,18 @@ def export_bilibili_cookies_from_browser_store() -> list[dict]:
     return cookie_list
 
 
-async def export_bilibili_cookies_auto(port: int = 9222) -> list[dict]:
+async def export_bilibili_cookies_auto(
+    port: int = 9222,
+    *,
+    auto_launch_browser: bool = False,
+) -> list[dict]:
     """Try CDP first, then fall back to local browser cookie stores."""
     errors: list[str] = []
     try:
-        cookies = await export_bilibili_cookies_from_cdp(port)
+        cookies = await export_bilibili_cookies_from_cdp(
+            port,
+            auto_launch_browser=auto_launch_browser,
+        )
         if cookies:
             return cookies
         errors.append("CDP: no bilibili cookies")
@@ -283,7 +340,7 @@ async def export_bilibili_cookies_auto(port: int = 9222) -> list[dict]:
     raise RuntimeError("；".join(errors))
 
 
-def _read_cdp_version(port: int) -> dict:
+def _read_cdp_version(port: int, *, auto_launch_browser: bool = False) -> dict:
     last_error: Exception | None = None
     for attempt in range(2):
         try:
@@ -297,7 +354,7 @@ def _read_cdp_version(port: int) -> dict:
             )
         except Exception as exc:
             last_error = exc
-            if attempt == 0:
+            if attempt == 0 and auto_launch_browser:
                 _open_edge_with_cdp(port)
                 time.sleep(3)
     raise RuntimeError(f"CDP 调试端口不可用: {last_error}")
@@ -335,32 +392,100 @@ async def resolve_cookie_header(
     use_cdp: bool = True,
     cdp_port: int = 9222,
 ) -> str:
-    """Resolve the best Cookie header. CDP is preferred because Bilibili may need full cookies."""
+    """Resolve the best Cookie header from explicit input, saved config, or browser state."""
     if cookie:
         return normalize_cookie_header(cookie)
 
+    config_cookie = load_config().get("bilibili_cookie", "")
+    normalized_config_cookie = normalize_cookie_header(config_cookie)
+    if "SESSDATA=" in normalized_config_cookie:
+        return normalized_config_cookie
+
     if use_cdp:
         try:
-            cookies = await export_bilibili_cookies_auto(cdp_port)
+            cookies = await export_bilibili_cookies_auto(
+                cdp_port,
+                auto_launch_browser=False,
+            )
             header = normalize_cookie_header(cookies)
             if "SESSDATA=" in header:
                 return header
         except Exception as exc:
             print(f"[bilibili-crawler] CDP cookie export failed: {exc}")
 
-    config_cookie = load_config().get("bilibili_cookie", "")
-    return normalize_cookie_header(config_cookie)
+    return normalized_config_cookie
 
 
 def _headers(cookie_header: str, referer: str) -> dict[str, str]:
-    return {
+    headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "User-Agent": USER_AGENT,
-        "Cookie": cookie_header,
         "Referer": referer,
         "Origin": "https://www.bilibili.com",
     }
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    return headers
+
+
+def _apply_video_metadata_to_note(note: BilibiliNote, metadata: dict[str, Any]) -> None:
+    note.bvid = metadata.get("bvid") or note.bvid or extract_bvid(note.url)
+    note.title = metadata.get("title") or note.title
+    detail_desc = str(metadata.get("description") or "").strip()
+    if detail_desc and len(detail_desc) >= len(note.content or ""):
+        note.content = detail_desc
+    note.author = metadata.get("author") or note.author
+    note.url = metadata.get("url") or note.url
+
+    cover = _normalize_image_url(metadata.get("cover"))
+    existing_images = [_normalize_image_url(url) for url in note.images if _normalize_image_url(url)]
+    if cover and cover not in existing_images:
+        existing_images = [cover, *existing_images]
+    note.images = existing_images
+    note.tags = merge_tags(note.tags, metadata.get("tags") or [])
+
+    published_at_ts = metadata.get("published_at_ts")
+    if published_at_ts and not note.published_at:
+        note.published_at = _format_ts(published_at_ts)
+    if metadata.get("category"):
+        note.metadata["category"] = metadata["category"]
+
+
+async def _enrich_video_notes(
+    notes: list[BilibiliNote],
+    *,
+    client: httpx.AsyncClient,
+    cookie_header: str = "",
+) -> None:
+    video_notes = [note for note in notes if note.item_type == "video"]
+    if not video_notes:
+        return
+
+    cache: dict[str, dict[str, Any]] = {}
+    semaphore = asyncio.Semaphore(4)
+
+    async def enrich(note: BilibiliNote) -> None:
+        bvid = note.bvid or extract_bvid(note.url)
+        if not bvid:
+            return
+        if bvid not in cache:
+            async with semaphore:
+                try:
+                    cache[bvid] = await fetch_bilibili_video_metadata(
+                        client,
+                        bvid=bvid,
+                        headers=_headers(cookie_header, note.url or f"https://www.bilibili.com/video/{bvid}"),
+                        referer=note.url or f"https://www.bilibili.com/video/{bvid}",
+                    )
+                except Exception as exc:
+                    print(f"[bilibili-crawler] failed to enrich video {bvid}: {exc}")
+                    cache[bvid] = {}
+        metadata = cache.get(bvid) or {}
+        if metadata:
+            _apply_video_metadata_to_note(note, metadata)
+
+    await asyncio.gather(*(enrich(note) for note in video_notes))
 
 
 async def verify_cookie_header(cookie_header: str) -> dict:
@@ -490,6 +615,8 @@ async def fetch_dynamics(
                     break
             if len(notes) >= limit:
                 break
+
+        await _enrich_video_notes(notes, client=client, cookie_header=cookie_header)
 
     notes.sort(key=lambda n: n.published_at, reverse=True)
     return notes[:limit]
@@ -746,6 +873,8 @@ async def fetch_favorite_items(
                     break
                 page += 1
 
+        await _enrich_video_notes(notes, client=client, cookie_header=cookie_header)
+
     return notes, folders
 
 
@@ -783,9 +912,17 @@ async def crawl_selected_favorites_to_vault(
     existing_by_folder: dict[str, set[str]] = {}
     for folder_id in favorite_selected_ids:
         folder_state = state_folders.setdefault(folder_id, {"items": {}})
-        existing_by_folder[folder_id] = set((folder_state.get("items") or {}).keys())
+        existing_by_folder[folder_id] = (
+            set((folder_state.get("items") or {}).keys())
+            if mode == "incremental"
+            else set()
+        )
     watch_later_state = state.setdefault("watch_later", {"items": {}})
-    watch_later_existing = set((watch_later_state.get("items") or {}).keys()) if include_watch_later else set()
+    watch_later_existing = (
+        set((watch_later_state.get("items") or {}).keys())
+        if include_watch_later and mode == "incremental"
+        else set()
+    )
 
     notes: list[BilibiliNote] = []
     folders: list[dict] = []
@@ -823,6 +960,7 @@ async def crawl_selected_favorites_to_vault(
                 page = 1
                 stop_folder = False
                 folder_existing = existing_by_folder.setdefault(folder_id, set())
+                folder_seen_in_run: set[str] = set()
                 folder_state = state_folders.setdefault(folder_id, {"items": {}})
                 state_cutoff_ts = _parse_int(folder_state.get("latest_fav_time"))
                 if mode == "incremental" and not state_cutoff_ts:
@@ -881,10 +1019,13 @@ async def crawl_selected_favorites_to_vault(
                         fetched_count += 1
                         note = _favorite_media_to_note(media, folder)
                         note_key = _favorite_note_key(note)
+                        if note_key in folder_seen_in_run:
+                            continue
                         if note_key in folder_existing:
                             skipped_count += 1
                             continue
                         notes.append(note)
+                        folder_seen_in_run.add(note_key)
                         folder_existing.add(note_key)
                         folder_note_count = len([
                             note for note in notes
@@ -906,6 +1047,8 @@ async def crawl_selected_favorites_to_vault(
                     folder_state["latest_fav_time"] = latest_seen_fav_time
                     folder_state["latest_fav_at"] = _format_ts(latest_seen_fav_time)
                     folder_state["last_checked_at"] = datetime.now().isoformat(timespec="seconds")
+
+            await _enrich_video_notes(notes, client=client, cookie_header=cookie_header)
 
     if include_watch_later:
         if mode == "incremental" and not _parse_int(watch_later_state.get("latest_fav_time")):
@@ -1025,34 +1168,41 @@ async def fetch_watch_later_items(
             params={"jsonp": "jsonp"},
             headers=_headers(cookie_header, "https://www.bilibili.com/watchlater/"),
         )
-    data = resp.json()
-    if resp.status_code != 200 or data.get("code") != 0:
-        raise RuntimeError(f"稍后再看失败: http={resp.status_code} code={data.get('code')} {data.get('message')}")
+        data = resp.json()
+        if resp.status_code != 200 or data.get("code") != 0:
+            raise RuntimeError(f"稍后再看失败: http={resp.status_code} code={data.get('code')} {data.get('message')}")
 
-    items = (data.get("data") or {}).get("list") or []
-    notes: list[BilibiliNote] = []
-    for item in items[:limit]:
-        bvid = item.get("bvid") or ""
-        owner = item.get("owner") or {}
-        notes.append(
-            BilibiliNote(
-                source_type="watch_later",
-                title=item.get("title") or "B站稍后再看视频",
-                content=item.get("desc") or "",
-                url=f"https://www.bilibili.com/video/{bvid}" if bvid else "",
-                author=owner.get("name") or "",
-                published_at=_format_ts(item.get("pubdate")),
-                bvid=bvid,
-                item_type="video",
-                images=[item.get("pic")] if item.get("pic") else [],
-                metadata={
-                    "add_at": _format_ts(item.get("add_at")),
-                    "add_at_ts": int(item.get("add_at") or 0),
-                    "progress": item.get("progress", 0),
-                },
+        items = (data.get("data") or {}).get("list") or []
+        notes: list[BilibiliNote] = []
+        for item in items[:limit]:
+            bvid = item.get("bvid") or ""
+            owner = item.get("owner") or {}
+            notes.append(
+                BilibiliNote(
+                    source_type="watch_later",
+                    title=item.get("title") or "B站稍后再看视频",
+                    content=item.get("desc") or "",
+                    url=f"https://www.bilibili.com/video/{bvid}" if bvid else "",
+                    author=owner.get("name") or "",
+                    published_at=_format_ts(item.get("pubdate")),
+                    bvid=bvid,
+                    item_type="video",
+                    images=[item.get("pic")] if item.get("pic") else [],
+                    metadata={
+                        "add_at": _format_ts(item.get("add_at")),
+                        "add_at_ts": int(item.get("add_at") or 0),
+                        "progress": item.get("progress", 0),
+                    },
+                )
             )
-        )
-    return notes, len(items)
+        await _enrich_video_notes(notes, client=client, cookie_header=cookie_header)
+        return notes, len(items)
+
+
+def _render_tags(note: BilibiliNote) -> str:
+    if not note.tags:
+        return "无"
+    return " / ".join(note.tags)
 
 
 def _render_dynamic(note: BilibiliNote) -> str:
@@ -1074,6 +1224,8 @@ def _render_dynamic(note: BilibiliNote) -> str:
 > - **链接**: {note.url}
 > - **日期**: {note.published_at}
 > - **类型**: {note.item_type}
+> - **BV号**: {note.bvid}
+> - **标签**: {_render_tags(note)}
 """
 
 
@@ -1097,6 +1249,7 @@ def _render_favorite(note: BilibiliNote) -> str:
 > - **BV号**: {note.bvid}
 > - **链接**: {note.url}
 > - **收藏时间**: {note.metadata.get("fav_time", "")}
+> - **标签**: {_render_tags(note)}
 > - **互动**: {cnt.get("collect", 0)}收藏 / {cnt.get("play", 0)}播放 / {cnt.get("danmaku", 0)}弹幕
 """
 
@@ -1121,8 +1274,369 @@ def _render_watch_later(note: BilibiliNote) -> str:
 > - **链接**: {note.url}
 > - **发布时间**: {note.published_at}
 > - **加入时间**: {note.metadata.get("add_at", "")}
+> - **标签**: {_render_tags(note)}
 > - **播放进度**: {note.metadata.get("progress", 0)} 秒
 """
+
+
+def _normalize_match_name(text: str) -> str:
+    value = str(text or "").strip().lower()
+    value = re.sub(r"[\s\-_·•・]+", "", value)
+    value = re.sub(r"[()（）\[\]【】]+", "", value)
+    return value
+
+
+def _clean_group_signal(text: str) -> str:
+    value = str(text or "").strip()
+    value = re.sub(r"[\\/:*?\"<>|#`~!@$%^&*()_=+{}\[\],.，。！？、；：\n\r\t]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" /")
+    return value[:24]
+
+
+def _is_generic_group_signal(text: str) -> bool:
+    normalized = _normalize_match_name(text)
+    if not normalized:
+        return True
+    if normalized in SMART_GROUP_GENERIC_SIGNAL_KEYS:
+        return True
+    if normalized.startswith("folder"):
+        return True
+    return False
+
+
+def _split_saved_bilibili_tags(raw: str) -> list[str]:
+    value = str(raw or "").strip()
+    if not value or value == "无":
+        return []
+    parts = re.split(r"\s*/\s*|[、，,|]", value)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        signal = _clean_group_signal(part)
+        if not signal or signal in seen:
+            continue
+        seen.add(signal)
+        cleaned.append(signal)
+    return cleaned
+
+
+def _parse_saved_bilibili_favorite(path: Path) -> dict[str, Any] | None:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+    if "Bilibili 收藏夹" not in text:
+        return None
+
+    title_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+    author_match = re.search(r"\*\*UP主\*\*\s*:\s*(.+)", text)
+    if not author_match:
+        return None
+
+    folder_match = re.search(r"\*\*来源\*\*\s*:\s*Bilibili 收藏夹\s*·\s*(.+)", text)
+    link_match = re.search(r"\*\*链接\*\*\s*:\s*(https?://\S+)", text)
+    favorite_time_match = re.search(r"\*\*收藏时间\*\*\s*:\s*([0-9:\-\s]+)", text)
+    tag_match = re.search(r"\*\*标签\*\*\s*:\s*(.+)", text)
+
+    folder_name = _clean_group_signal(folder_match.group(1) if folder_match else path.parent.name)
+    author = author_match.group(1).strip()
+    title = (title_match.group(1).strip() if title_match else path.stem) or path.stem
+    favorite_time = favorite_time_match.group(1).strip() if favorite_time_match else ""
+    favorite_date = favorite_time[:10] if favorite_time else ""
+    return {
+        "title": title,
+        "author": author,
+        "url": link_match.group(1).strip() if link_match else "",
+        "favorite_time": favorite_time,
+        "favorite_date": favorite_date,
+        "folder_name": folder_name or path.parent.name,
+        "tags": _split_saved_bilibili_tags(tag_match.group(1) if tag_match else ""),
+        "path": str(path),
+    }
+
+
+def _build_author_source_summary(candidate: BilibiliFavoriteAuthorAggregate) -> str:
+    if candidate.sample_folders:
+        return "来自收藏夹：" + "、".join(candidate.sample_folders[:3])
+    if candidate.sample_tags:
+        return "来自标签：" + "、".join(candidate.sample_tags[:4])
+    if candidate.sample_titles:
+        return "来自收藏视频：" + "、".join(candidate.sample_titles[:2])
+    return f"来自本地收藏 {candidate.note_count} 条视频"
+
+
+def _pick_followed_match(
+    candidate: BilibiliFavoriteAuthorAggregate,
+    followed_ups: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    exact_name = candidate.author.strip()
+    normalized = _normalize_match_name(exact_name)
+    if not normalized:
+        return None
+
+    for item in followed_ups:
+        uname = str(item.get("uname") or "").strip()
+        if uname == exact_name:
+            return item
+
+    for item in followed_ups:
+        uname = str(item.get("uname") or "").strip()
+        if _normalize_match_name(uname) == normalized:
+            return item
+
+    for item in followed_ups:
+        uname = str(item.get("uname") or "").strip()
+        normalized_uname = _normalize_match_name(uname)
+        if normalized and normalized_uname and (normalized in normalized_uname or normalized_uname in normalized):
+            return item
+
+    return None
+
+
+def _primary_group_signal(candidate: BilibiliFavoriteAuthorAggregate) -> str:
+    for signal, _weight in candidate.signal_weights.most_common(6):
+        if not _is_generic_group_signal(signal):
+            return signal
+    return "other"
+
+
+def _build_smart_group_value(label: str) -> str:
+    if label == "其他":
+        return "other"
+    return "smart-" + hashlib.md5(label.encode("utf-8")).hexdigest()[:8]
+
+
+def _build_smart_group_label(primary: str, members: list[BilibiliFavoriteAuthorAggregate]) -> str:
+    if primary == "other":
+        return "其他"
+    secondary = Counter()
+    for candidate in members:
+        for signal, weight in candidate.signal_weights.most_common(6):
+            if signal == primary or _is_generic_group_signal(signal):
+                continue
+            secondary[signal] += weight
+    second = secondary.most_common(1)
+    if second and len(members) > 1 and second[0][0] != primary:
+        return f"{primary} / {second[0][0]}"
+    return primary
+
+
+def _build_smart_group_options(
+    candidates: list[BilibiliFavoriteAuthorAggregate],
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+
+    global_scores = Counter()
+    signal_support = Counter()
+    for candidate in candidates:
+        seen_signals: set[str] = set()
+        for signal, weight in candidate.signal_weights.most_common(4):
+            if _is_generic_group_signal(signal):
+                continue
+            global_scores[signal] += weight
+            if signal not in seen_signals:
+                signal_support[signal] += 1
+                seen_signals.add(signal)
+
+    canonical = [
+        signal
+        for signal, _score in global_scores.most_common(12)
+        if signal_support[signal] >= 2
+    ]
+
+    grouped: dict[str, list[BilibiliFavoriteAuthorAggregate]] = defaultdict(list)
+    for candidate in candidates:
+        best_signal = ""
+        best_weight = 0.0
+        for signal, weight in candidate.signal_weights.most_common(6):
+            if signal in canonical and weight > best_weight:
+                best_signal = signal
+                best_weight = weight
+        if not best_signal:
+            best_signal = _primary_group_signal(candidate)
+            if best_signal != "other" and best_signal not in canonical and len(candidates) > 6:
+                best_signal = "other"
+        grouped[best_signal or "other"].append(candidate)
+
+    options: list[dict[str, Any]] = []
+    for primary_signal, members in grouped.items():
+        label = _build_smart_group_label(primary_signal, members)
+        value = _build_smart_group_value(label)
+        signal_counter = Counter()
+        for member in members:
+            member.smart_group_value = value
+            member.smart_group_label = label
+            for signal, weight in member.signal_weights.most_common(5):
+                if _is_generic_group_signal(signal):
+                    continue
+                signal_counter[signal] += weight
+        options.append(
+            {
+                "value": value,
+                "label": label,
+                "count": len(members),
+                "sample_authors": [member.matched_uname or member.author for member in members[:4]],
+                "sample_tags": [signal for signal, _score in signal_counter.most_common(4)],
+            }
+        )
+
+    options.sort(key=lambda item: (-int(item.get("count") or 0), str(item.get("label") or "")))
+    return options
+
+
+async def analyze_saved_bilibili_favorites(
+    *,
+    vault_path: str | Path | None = None,
+    followed_ups: list[dict[str, Any]] | None = None,
+    progress_callback=None,
+) -> dict[str, Any]:
+    bilibili_dir = _vault_bilibili_dir(vault_path)
+    favorites_dir = bilibili_dir / "favorites"
+    if not favorites_dir.exists():
+        return {
+            "success": True,
+            "bilibili_dir": str(bilibili_dir),
+            "favorites_dir": str(favorites_dir),
+            "total_files": 0,
+            "total_notes": 0,
+            "total_authors": 0,
+            "matched_followed_count": 0,
+            "unmatched_author_count": 0,
+            "group_options": [],
+            "profiles": {},
+            "message": "还没有本地 B 站收藏结果，请先执行收藏入库。",
+        }
+
+    paths = sorted(favorites_dir.rglob("*.md"))
+    total_files = len(paths)
+    aggregates: dict[str, BilibiliFavoriteAuthorAggregate] = {}
+    total_notes = 0
+
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "正在扫描本地收藏",
+                "progress": 5,
+                "total_files": total_files,
+                "processed_files": 0,
+                "matched_followed_count": 0,
+                "total_groups": 0,
+            }
+        )
+
+    for index, path in enumerate(paths, start=1):
+        note = _parse_saved_bilibili_favorite(path)
+        if note:
+            total_notes += 1
+            author = note["author"]
+            candidate = aggregates.setdefault(author, BilibiliFavoriteAuthorAggregate(author=author))
+            candidate.note_count += 1
+            if note["favorite_date"] and note["favorite_date"] >= candidate.latest_date:
+                candidate.latest_date = note["favorite_date"]
+                candidate.latest_title = note["title"]
+            if note["title"] and note["title"] not in candidate.sample_titles and len(candidate.sample_titles) < 3:
+                candidate.sample_titles.append(note["title"])
+            if note["url"] and note["url"] not in candidate.sample_urls and len(candidate.sample_urls) < 3:
+                candidate.sample_urls.append(note["url"])
+            folder_name = note["folder_name"]
+            if folder_name and folder_name not in candidate.sample_folders and len(candidate.sample_folders) < 4:
+                candidate.sample_folders.append(folder_name)
+            if folder_name and not _is_generic_group_signal(folder_name):
+                candidate.signal_weights[folder_name] += 2.5
+            for tag in note["tags"]:
+                if tag and tag not in candidate.sample_tags and len(candidate.sample_tags) < 6:
+                    candidate.sample_tags.append(tag)
+                if tag and not _is_generic_group_signal(tag):
+                    candidate.signal_weights[tag] += 1.0
+
+        if progress_callback and (index == total_files or index == 1 or index % 5 == 0):
+            progress_callback(
+                {
+                    "stage": f"正在扫描收藏 {index}/{total_files}",
+                    "progress": min(58, 5 + int(index / max(total_files, 1) * 53)),
+                    "total_files": total_files,
+                    "processed_files": index,
+                    "matched_followed_count": 0,
+                    "total_groups": 0,
+                }
+            )
+        if index % 20 == 0:
+            await asyncio.sleep(0)
+
+    ordered = sorted(
+        aggregates.values(),
+        key=lambda item: (item.note_count, item.latest_date, item.author),
+        reverse=True,
+    )
+
+    matched_candidates: list[BilibiliFavoriteAuthorAggregate] = []
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "正在匹配关注列表",
+                "progress": 68,
+                "total_files": total_files,
+                "processed_files": total_files,
+                "matched_followed_count": 0,
+                "total_groups": 0,
+            }
+        )
+    for candidate in ordered:
+        candidate.source_summary = _build_author_source_summary(candidate)
+        match = _pick_followed_match(candidate, followed_ups or [])
+        if not match:
+            continue
+        candidate.matched_mid = str(match.get("mid") or "")
+        candidate.matched_uname = str(match.get("uname") or candidate.author)
+        if candidate.matched_mid:
+            matched_candidates.append(candidate)
+
+    group_options = _build_smart_group_options(matched_candidates)
+    profiles = {
+        candidate.matched_mid: {
+            "author": candidate.matched_uname or candidate.author,
+            "author_id": candidate.matched_mid,
+            "matched_author": candidate.author,
+            "favorite_note_count": candidate.note_count,
+            "smart_groups": [candidate.smart_group_value],
+            "smart_group_labels": [candidate.smart_group_label],
+            "latest_title": candidate.latest_title,
+            "sample_titles": candidate.sample_titles,
+            "sample_tags": candidate.sample_tags,
+            "sample_folders": candidate.sample_folders,
+            "source_summary": candidate.source_summary,
+        }
+        for candidate in matched_candidates
+        if candidate.matched_mid
+    }
+
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "智能分组完成",
+                "progress": 100,
+                "total_files": total_files,
+                "processed_files": total_files,
+                "matched_followed_count": len(profiles),
+                "total_groups": len(group_options),
+            }
+        )
+
+    return {
+        "success": True,
+        "bilibili_dir": str(bilibili_dir),
+        "favorites_dir": str(favorites_dir),
+        "total_files": total_files,
+        "total_notes": total_notes,
+        "total_authors": len(ordered),
+        "matched_followed_count": len(profiles),
+        "unmatched_author_count": max(0, len(ordered) - len(profiles)),
+        "group_options": group_options,
+        "profiles": profiles,
+        "message": f"从 {total_notes} 条本地收藏中匹配到 {len(profiles)} 个已关注 UP，整理出 {len(group_options)} 个智能分组。",
+    }
 
 
 def _note_path(base: Path, note: BilibiliNote) -> Path:
@@ -1224,7 +1738,7 @@ def write_notes_to_vault(
     }
 
 
-def save_selected_dynamics_to_vault(
+async def save_selected_dynamics_to_vault(
     dynamics: list[dict[str, Any]],
     *,
     vault_path: str | Path | None = None,
@@ -1240,6 +1754,7 @@ def save_selected_dynamics_to_vault(
         )
         dynamic_type = str(item.get("dynamic_type") or "text").strip() or "text"
         pic = _normalize_image_url(item.get("pic"))
+        bvid = extract_bvid(item.get("bvid") or item.get("url"))
         images = [
             _normalize_image_url(url)
             for url in (item.get("images") or [])
@@ -1257,13 +1772,18 @@ def save_selected_dynamics_to_vault(
                 author=author,
                 published_at=str(item.get("published_at") or ""),
                 dynamic_id=dynamic_id,
+                bvid=bvid,
                 item_type=dynamic_type,
                 images=images,
+                tags=merge_tags(item.get("tags") or []),
                 metadata={
                     "author_id": str(item.get("author_id") or ""),
                 },
             )
         )
+
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+        await _enrich_video_notes(notes, client=client)
 
     result = write_notes_to_vault(
         notes,

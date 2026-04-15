@@ -1,32 +1,55 @@
-import { useState, useEffect } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import {
-  LayoutGrid, List, Search, AlertCircle, CheckCircle,
-  PauseCircle, Settings, RefreshCw, Filter,
+  AlertCircle,
+  CheckCircle,
+  Filter,
+  LayoutGrid,
+  List,
+  PauseCircle,
+  RefreshCw,
+  Search,
+  Settings,
 } from "lucide-react";
+
 import { api } from "../../core/api";
-import { useStore } from "../../core/store";
+import {
+  filterModulesForManagement,
+  isModuleHiddenFromManagement,
+} from "../../core/moduleVisibility";
+import { useStore, FeedCard } from "../../core/store";
 import { ModuleCard } from "./ModuleCard";
 import { ModuleDetailModal } from "./ModuleDetailModal";
 import type { ModuleConfig, ModuleDashboard, ModuleStatus } from "../../types/module";
+import {
+  EMPTY_MODULE_USAGE_METRICS,
+  type ModuleUsageMetrics,
+} from "./moduleManagementShared";
 
 type ViewMode = "grid" | "list";
 type FilterType = "all" | "active" | "paused" | "error" | "unconfigured";
+type ModalTab = "overview" | "history";
+type TimelineActivity = {
+  type: string;
+  module_id?: string | null;
+};
 
-const FILTER_OPTIONS: { key: FilterType; label: string; icon: React.ReactNode }[] = [
+const FILTER_OPTIONS: { key: FilterType; label: string; icon: ReactNode }[] = [
   { key: "all", label: "全部", icon: <Filter style={{ width: "14px", height: "14px" }} /> },
   { key: "active", label: "运行中", icon: <CheckCircle style={{ width: "14px", height: "14px" }} /> },
   { key: "paused", label: "已暂停", icon: <PauseCircle style={{ width: "14px", height: "14px" }} /> },
-  { key: "error", label: "错误", icon: <AlertCircle style={{ width: "14px", height: "14px" }} /> },
-  { key: "unconfigured", label: "未配置", icon: <Settings style={{ width: "14px", height: "14px" }} /> },
+  { key: "error", label: "异常", icon: <AlertCircle style={{ width: "14px", height: "14px" }} /> },
+  { key: "unconfigured", label: "待设置", icon: <Settings style={{ width: "14px", height: "14px" }} /> },
 ];
 
-const STAT_ITEMS = [
-  { key: "total", label: "总模块", color: "var(--color-primary)", bg: "rgba(188,164,227,0.1)" },
-  { key: "active", label: "运行中", color: "#22c55e", bg: "rgba(34,197,94,0.1)" },
-  { key: "paused", label: "已暂停", color: "#eab308", bg: "rgba(234,179,8,0.1)" },
-  { key: "error", label: "错误", color: "#ef4444", bg: "rgba(239,68,68,0.1)" },
-  { key: "totalCardsThisWeek", label: "本周卡片", color: "#8b5cf6", bg: "rgba(139,92,246,0.1)" },
-] as const;
+type RecentTimelineResponse = {
+  timelines?: Array<{
+    date: string;
+    activities: TimelineActivity[];
+  }>;
+};
+
+type UnreadCountsResponse = Record<string, number>;
+type CardsResponse = { cards: FeedCard[] };
 
 export function ModuleManagementPanel() {
   const [dashboard, setDashboard] = useState<ModuleDashboard | null>(null);
@@ -35,217 +58,460 @@ export function ModuleManagementPanel() {
   const [filter, setFilter] = useState<FilterType>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedModule, setSelectedModule] = useState<ModuleConfig | null>(null);
-  const [initialTab, setInitialTab] = useState<"overview" | "config" | "history">("overview");
-  const [, setRunningModules] = useState<Set<string>>(new Set());
-  const { addToast, moduleHistoryId, setModuleHistoryId } = useStore();
+  const [initialTab, setInitialTab] = useState<ModalTab>("overview");
+  const [runningModules, setRunningModules] = useState<Set<string>>(new Set());
+  const [usageByModule, setUsageByModule] = useState<Record<string, ModuleUsageMetrics>>({});
+  const {
+    addToast,
+    moduleHistoryId,
+    setModuleHistoryId,
+    moduleToConfigure,
+    setModuleToConfigure,
+    setActiveTab,
+    setArxivTrackerActiveTab,
+  } = useStore();
 
   useEffect(() => {
-    loadDashboard();
-    const interval = setInterval(loadDashboard, 30000);
+    void loadDashboard();
+    const interval = setInterval(() => {
+      void loadDashboard();
+    }, 30000);
     return () => clearInterval(interval);
   }, []);
 
-  // Watch for sidebar sub-module click → open history
+  useEffect(() => {
+    if (dashboard) {
+      void loadUsageMetrics(filterModulesForManagement(dashboard.modules));
+    }
+  }, [dashboard]);
+
   useEffect(() => {
     if (moduleHistoryId && dashboard) {
-      const mod = dashboard.modules.find((m) => m.id === moduleHistoryId);
-      if (mod) {
+      const module = dashboard.modules.find((item) => item.id === moduleHistoryId);
+      if (module) {
         setInitialTab("history");
-        setSelectedModule(mod);
+        setSelectedModule(module);
       }
       setModuleHistoryId(null);
     }
-  }, [moduleHistoryId, dashboard]);
+  }, [dashboard, moduleHistoryId, setModuleHistoryId]);
 
-  const loadDashboard = async () => {
+  useEffect(() => {
+    if (moduleToConfigure) {
+      openModuleTool(moduleToConfigure);
+      setModuleToConfigure(null);
+    }
+  }, [moduleToConfigure, setModuleToConfigure]);
+
+  useEffect(() => {
+    if (!dashboard || !selectedModule) return;
+    const latest = dashboard.modules.find((module) => module.id === selectedModule.id);
+    if (latest) {
+      setSelectedModule(latest);
+    }
+  }, [dashboard, selectedModule?.id]);
+
+  async function loadDashboard() {
     try {
       const data = await api.get<ModuleDashboard>("/api/modules/dashboard");
       setDashboard(data);
-    } catch (err) {
-      addToast({ kind: "error", title: "加载失败", message: err instanceof Error ? err.message : "无法加载模块数据" });
+    } catch (error) {
+      addToast({
+        kind: "error",
+        title: "加载失败",
+        message: error instanceof Error ? error.message : "无法加载模块数据",
+      });
     } finally {
       setLoading(false);
     }
-  };
+  }
 
-  const handleToggleModule = async (moduleId: string) => {
-    const module = dashboard?.modules.find((m) => m.id === moduleId);
+  async function loadUsageMetrics(modules: ModuleConfig[]) {
+    const moduleIds = modules.map((module) => module.id);
+    if (moduleIds.length === 0) {
+      setUsageByModule({});
+      return;
+    }
+
+    try {
+      const totalCardsByModule = Object.fromEntries(
+        modules.map((module) => [module.id, module.stats.totalCards || 0])
+      );
+
+      const latestRequests = moduleIds.map((moduleId) =>
+        api.get<CardsResponse>(`/api/cards?module_id=${moduleId}&limit=1&offset=0`)
+          .catch(() => ({ cards: [] }))
+      );
+
+      const [unreadCounts, recentTimelines, latestResponses] = await Promise.all([
+        api.get<UnreadCountsResponse>("/api/cards/unread-counts").catch(() => ({} as UnreadCountsResponse)),
+        api.get<RecentTimelineResponse>("/api/timeline/recent/7").catch(() => ({ timelines: [] })),
+        Promise.all(latestRequests),
+      ]);
+
+      const nextMetrics: Record<string, ModuleUsageMetrics> = Object.fromEntries(
+        moduleIds.map((moduleId) => {
+          const unreadCount = unreadCounts[moduleId] || 0;
+          const totalCards = totalCardsByModule[moduleId] || 0;
+          return [
+            moduleId,
+            {
+              ...EMPTY_MODULE_USAGE_METRICS,
+              unreadCount,
+              readCount: Math.max(0, totalCards - unreadCount),
+            },
+          ];
+        })
+      );
+
+      for (const timeline of recentTimelines.timelines || []) {
+        for (const activity of timeline.activities || []) {
+          const moduleId = activity.module_id || "";
+          if (!nextMetrics[moduleId]) continue;
+          if (activity.type === "card_view") nextMetrics[moduleId].viewCount7d += 1;
+          if (activity.type === "card_save") nextMetrics[moduleId].saveCount7d += 1;
+          if (activity.type === "card_like") nextMetrics[moduleId].likeCount7d += 1;
+        }
+      }
+
+      latestResponses.forEach((response, index) => {
+        const latestCard = response.cards?.[0];
+        if (latestCard) {
+          nextMetrics[moduleIds[index]].lastCardAt = latestCard.created_at;
+        }
+      });
+
+      setUsageByModule(nextMetrics);
+    } catch {
+      setUsageByModule((previous) => previous);
+    }
+  }
+
+  function openModuleTool(moduleId: string) {
+    if (selectedModule?.id === moduleId) {
+      setSelectedModule(null);
+    }
+
+    if (moduleId === "arxiv-tracker" || moduleId === "semantic-scholar-tracker") {
+      setArxivTrackerActiveTab("monitors");
+      setActiveTab("arxiv");
+      return;
+    }
+
+    if (moduleId === "xiaohongshu-tracker") {
+      localStorage.setItem("xiaohongshu_tool_tab", "following");
+      setActiveTab("xiaohongshu");
+      return;
+    }
+
+    if (moduleId === "bilibili-tracker") {
+      localStorage.setItem("bilibili_tool_panel", "following");
+      setActiveTab("bilibili");
+      return;
+    }
+
+    setActiveTab("settings");
+  }
+
+  async function handleToggleModule(moduleId: string) {
+    const module = dashboard?.modules.find((item) => item.id === moduleId);
     if (!module) return;
+
     try {
       const newStatus = module.status === "active" ? "paused" : "active";
       await api.post(`/api/modules/${moduleId}/toggle`, { status: newStatus });
-      setDashboard((prev) =>
-        prev ? {
-          ...prev,
-          modules: prev.modules.map((m) => m.id === moduleId ? { ...m, status: newStatus as ModuleStatus } : m),
-          summary: {
-            ...prev.summary,
-            active: newStatus === "active" ? prev.summary.active + 1 : prev.summary.active - 1,
-            paused: newStatus === "paused" ? prev.summary.paused + 1 : prev.summary.paused - 1,
-          },
-        } : null
-      );
-      addToast({ kind: "success", title: "状态已更新", message: `模块已${newStatus === "active" ? "启动" : "暂停"}` });
-    } catch (err) {
-      addToast({ kind: "error", title: "操作失败", message: err instanceof Error ? err.message : "无法切换模块状态" });
-    }
-  };
 
-  const handleRunModule = async (moduleId: string) => {
+      setDashboard((previous) => (
+        previous
+          ? {
+              ...previous,
+              modules: previous.modules.map((item) =>
+                item.id === moduleId ? { ...item, status: newStatus as ModuleStatus } : item
+              ),
+            }
+          : null
+      ));
+
+      setSelectedModule((previous) => (
+        previous?.id === moduleId
+          ? { ...previous, status: newStatus as ModuleStatus }
+          : previous
+      ));
+
+      addToast({
+        kind: "success",
+        title: "状态已更新",
+        message: `模块已${newStatus === "active" ? "启动" : "暂停"}`,
+      });
+    } catch (error) {
+      addToast({
+        kind: "error",
+        title: "操作失败",
+        message: error instanceof Error ? error.message : "无法切换模块状态",
+      });
+    }
+  }
+
+  async function handleRunModule(moduleId: string) {
     try {
-      setRunningModules((prev) => new Set(prev).add(moduleId));
+      setRunningModules((previous) => new Set(previous).add(moduleId));
       await api.post(`/api/modules/${moduleId}/run`, {});
-      addToast({ kind: "success", title: "运行成功", message: "模块已开始运行" });
-      setTimeout(loadDashboard, 2000);
-    } catch (err) {
-      addToast({ kind: "error", title: "运行失败", message: err instanceof Error ? err.message : "无法运行模块" });
+      addToast({ kind: "success", title: "开始运行", message: "模块已经加入执行队列" });
+      setTimeout(() => {
+        void loadDashboard();
+      }, 2000);
+    } catch (error) {
+      addToast({
+        kind: "error",
+        title: "运行失败",
+        message: error instanceof Error ? error.message : "无法运行模块",
+      });
     } finally {
-      setRunningModules((prev) => { const next = new Set(prev); next.delete(moduleId); return next; });
+      setRunningModules((previous) => {
+        const next = new Set(previous);
+        next.delete(moduleId);
+        return next;
+      });
     }
-  };
+  }
 
-  const handleUpdateModule = (updatedModule: ModuleConfig) => {
-    setDashboard((prev) =>
-      prev ? { ...prev, modules: prev.modules.map((m) => m.id === updatedModule.id ? updatedModule : m) } : null
-    );
-    setSelectedModule(null);
-    loadDashboard();
-  };
+  function handleUpdateModule(updatedModule: ModuleConfig) {
+    setDashboard((previous) => (
+      previous
+        ? {
+            ...previous,
+            modules: previous.modules.map((module) =>
+              module.id === updatedModule.id ? updatedModule : module
+            ),
+          }
+        : null
+    ));
+    setSelectedModule(updatedModule);
+    void loadDashboard();
+  }
 
-  const filteredModules = dashboard?.modules.filter((module) => {
+  function openModuleModal(module: ModuleConfig, tab: ModalTab) {
+    setInitialTab(tab);
+    setSelectedModule(module);
+  }
+
+  const visibleModules = dashboard ? filterModulesForManagement(dashboard.modules) : [];
+  const visibleSummary = visibleModules.reduce(
+    (summary, module) => {
+      summary.total += 1;
+      summary[module.status] += 1;
+      summary.totalCardsThisWeek += module.stats.thisWeek;
+      return summary;
+    },
+    {
+      total: 0,
+      active: 0,
+      paused: 0,
+      error: 0,
+      unconfigured: 0,
+      totalCardsThisWeek: 0,
+    }
+  );
+
+  const visibleUsageSummary = visibleModules.reduce(
+    (summary, module) => {
+      const usage = usageByModule[module.id] || EMPTY_MODULE_USAGE_METRICS;
+      summary.unreadCount += usage.unreadCount;
+      summary.viewCount7d += usage.viewCount7d;
+      summary.saveCount7d += usage.saveCount7d;
+      return summary;
+    },
+    {
+      unreadCount: 0,
+      viewCount7d: 0,
+      saveCount7d: 0,
+    }
+  );
+
+  const visibleAlerts = dashboard?.alerts.filter(
+    (alert) => !alert.acknowledged && !isModuleHiddenFromManagement(alert.moduleId)
+  ) || [];
+
+  const filteredModules = visibleModules.filter((module) => {
     if (filter !== "all" && module.status !== filter) return false;
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      return module.name.toLowerCase().includes(q) || module.description.toLowerCase().includes(q) || module.id.toLowerCase().includes(q) || module.config.keywords?.some((k) => k.toLowerCase().includes(q));
-    }
-    return true;
-  }) || [];
+    if (!searchQuery.trim()) return true;
+
+    const q = searchQuery.toLowerCase();
+    return module.name.toLowerCase().includes(q)
+      || module.description.toLowerCase().includes(q)
+      || module.id.toLowerCase().includes(q)
+      || (module.config.keywords || []).some((keyword) => keyword.toLowerCase().includes(q))
+      || (module.subscriptions || []).some((subscription) =>
+        subscription.label.toLowerCase().includes(q) || subscription.value.toLowerCase().includes(q)
+      );
+  });
 
   if (loading) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", flexDirection: "column", gap: "16px" }}>
-        <RefreshCw style={{ width: "32px", height: "32px", color: "var(--color-primary)", animation: "spin 1s linear infinite" }} />
-        <p style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>加载模块数据...</p>
-        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-      </div>
+      <CenteredState
+        icon={<RefreshCw style={{ width: "32px", height: "32px", color: "var(--color-primary)", animation: "spin 1s linear infinite" }} />}
+        title="加载模块数据..."
+      />
     );
   }
 
   if (!dashboard) {
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", flexDirection: "column", gap: "16px" }}>
-        <AlertCircle style={{ width: "48px", height: "48px", color: "#ef4444" }} />
-        <h3 style={{ fontSize: "1.125rem", fontWeight: 700, color: "var(--text-main)" }}>加载失败</h3>
-        <button onClick={loadDashboard} style={{
-          padding: "10px 24px", borderRadius: "var(--radius-full)", border: "none",
-          background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
-          color: "white", fontWeight: 600, cursor: "pointer",
-        }}>
-          重试
-        </button>
-      </div>
+      <CenteredState
+        icon={<AlertCircle style={{ width: "46px", height: "46px", color: "#ef4444" }} />}
+        title="模块数据加载失败"
+        action={
+          <button onClick={() => void loadDashboard()} style={primaryButtonStyle}>
+            重试
+          </button>
+        }
+      />
     );
   }
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      {/* Header */}
       <div style={{ padding: "24px 28px 0", flexShrink: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "20px" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "18px", marginBottom: "18px" }}>
           <div>
-            <h1 style={{ fontSize: "1.5rem", fontWeight: 700, color: "var(--text-main)", fontFamily: "'M PLUS Rounded 1c', sans-serif" }}>
-              模块管理
+            <h1
+              style={{
+                fontSize: "1.5rem",
+                fontWeight: 800,
+                color: "var(--text-main)",
+                fontFamily: "'M PLUS Rounded 1c', sans-serif",
+                margin: 0,
+              }}
+            >
+              模块运行
             </h1>
-            <p style={{ fontSize: "0.8125rem", color: "var(--text-muted)", marginTop: "4px" }}>
-              管理所有自动化模块的配置和运行状态
+            <p style={{ fontSize: "0.8125rem", color: "var(--text-muted)", marginTop: "6px", lineHeight: 1.6 }}>
+              这里只看启动、暂停和历史效果。关键词、关注源和 Cookie 全部去对应工具页调整。
             </p>
           </div>
-          <button onClick={loadDashboard} style={{
-            display: "flex", alignItems: "center", gap: "8px",
-            padding: "8px 16px", borderRadius: "var(--radius-full)",
-            background: "var(--bg-hover)", border: "1px solid var(--border-light)",
-            color: "var(--text-secondary)", fontSize: "0.8125rem", fontWeight: 600, cursor: "pointer",
-            transition: "all 0.2s",
-          }}>
-            <RefreshCw style={{ width: "14px", height: "14px" }} /> 刷新
+
+          <button onClick={() => void loadDashboard()} style={ghostButtonStyle}>
+            <RefreshCw style={{ width: "14px", height: "14px" }} />
+            刷新
           </button>
         </div>
 
-        {/* Stats */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "10px", marginBottom: "20px" }}>
-          {STAT_ITEMS.map((s) => (
-            <div key={s.key} style={{ padding: "14px 16px", borderRadius: "var(--radius-lg)", background: s.bg }}>
-              <div style={{ fontSize: "1.375rem", fontWeight: 700, color: s.color }}>
-                {dashboard.summary[s.key]}
-              </div>
-              <div style={{ fontSize: "0.6875rem", color: s.color, opacity: 0.7 }}>{s.label}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "10px", marginBottom: "18px" }}>
+          {[
+            { label: "运行中模块", value: visibleSummary.active, accent: "#16a34a", bg: "rgba(34,197,94,0.12)" },
+            { label: "待看内容", value: visibleUsageSummary.unreadCount, accent: "#b45309", bg: "rgba(245,158,11,0.12)" },
+            { label: "近7天浏览", value: visibleUsageSummary.viewCount7d, accent: "#2563eb", bg: "rgba(37,99,235,0.10)" },
+            { label: "本周新增", value: visibleSummary.totalCardsThisWeek, accent: "#7c3aed", bg: "rgba(124,58,237,0.10)" },
+          ].map((item) => (
+            <div key={item.label} style={{ padding: "14px 16px", borderRadius: "16px", background: item.bg }}>
+              <div style={{ fontSize: "1.35rem", fontWeight: 800, color: item.accent, marginBottom: "4px" }}>{item.value}</div>
+              <div style={{ fontSize: "0.75rem", color: item.accent, opacity: 0.82 }}>{item.label}</div>
             </div>
           ))}
         </div>
 
-        {/* Alerts */}
-        {dashboard.alerts.filter((a) => !a.acknowledged).length > 0 && (
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "20px" }}>
-            {dashboard.alerts.filter((a) => !a.acknowledged).slice(0, 3).map((alert) => (
-              <div key={alert.id} style={{
-                display: "flex", alignItems: "center", gap: "10px", padding: "10px 14px",
-                borderRadius: "var(--radius-md)",
-                background: alert.severity === "error" ? "rgba(239,68,68,0.08)" : "rgba(234,179,8,0.08)",
-                border: `1px solid ${alert.severity === "error" ? "rgba(239,68,68,0.2)" : "rgba(234,179,8,0.2)"}`,
-              }}>
-                <AlertCircle style={{ width: "16px", height: "16px", color: alert.severity === "error" ? "#ef4444" : "#eab308", flexShrink: 0 }} />
-                <span style={{ fontSize: "0.8125rem", color: alert.severity === "error" ? "#ef4444" : "#eab308" }}>
-                  {alert.message}
-                </span>
+        {visibleAlerts.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "18px" }}>
+            {visibleAlerts.slice(0, 3).map((alert) => (
+              <div
+                key={alert.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "10px",
+                  padding: "10px 14px",
+                  borderRadius: "12px",
+                  background: alert.severity === "error" ? "rgba(239,68,68,0.08)" : "rgba(245,158,11,0.08)",
+                  border: `1px solid ${alert.severity === "error" ? "rgba(239,68,68,0.18)" : "rgba(245,158,11,0.18)"}`,
+                }}
+              >
+                <AlertCircle style={{ width: "16px", height: "16px", color: alert.severity === "error" ? "#dc2626" : "#b45309", flexShrink: 0 }} />
+                <span style={{ fontSize: "0.8125rem", color: alert.severity === "error" ? "#dc2626" : "#b45309" }}>{alert.message}</span>
               </div>
             ))}
           </div>
         )}
 
-        {/* Controls */}
         <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "20px" }}>
-          {/* Search */}
           <div style={{ flex: 1, position: "relative" }}>
-            <Search style={{ position: "absolute", left: "12px", top: "50%", transform: "translateY(-50%)", width: "16px", height: "16px", color: "var(--text-muted)" }} />
-            <input
-              type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索模块..."
+            <Search
               style={{
-                width: "100%", padding: "8px 12px 8px 36px",
-                borderRadius: "var(--radius-full)", border: "1px solid var(--border-light)",
-                background: "var(--bg-hover)", color: "var(--text-main)", fontSize: "0.8125rem",
-                outline: "none", transition: "border-color 0.2s",
+                position: "absolute",
+                left: "12px",
+                top: "50%",
+                transform: "translateY(-50%)",
+                width: "15px",
+                height: "15px",
+                color: "var(--text-muted)",
               }}
-              onFocus={(e) => { e.currentTarget.style.borderColor = "var(--color-primary)"; }}
-              onBlur={(e) => { e.currentTarget.style.borderColor = "var(--border-light)"; }}
+            />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="搜索模块、关键词或订阅源"
+              style={{
+                width: "100%",
+                height: "40px",
+                padding: "0 12px 0 38px",
+                borderRadius: "999px",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-hover)",
+                color: "var(--text-main)",
+                fontSize: "0.8125rem",
+                outline: "none",
+                boxSizing: "border-box",
+              }}
             />
           </div>
 
-          {/* Filter Pills */}
           <div style={{ display: "flex", gap: "6px" }}>
-            {FILTER_OPTIONS.map((f) => (
-              <button key={f.key} onClick={() => setFilter(f.key)} style={{
-                display: "flex", alignItems: "center", gap: "6px",
-                padding: "6px 14px", borderRadius: "var(--radius-full)", border: "none",
-                fontSize: "0.75rem", fontWeight: 600, cursor: "pointer", transition: "all 0.2s",
-                background: filter === f.key ? "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))" : "var(--bg-hover)",
-                color: filter === f.key ? "white" : "var(--text-secondary)",
-              }}>
-                {f.icon}{f.label}
+            {FILTER_OPTIONS.map((item) => (
+              <button
+                key={item.key}
+                onClick={() => setFilter(item.key)}
+                style={{
+                  height: "36px",
+                  padding: "0 12px",
+                  borderRadius: "999px",
+                  border: "none",
+                  background: filter === item.key ? "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))" : "var(--bg-hover)",
+                  color: filter === item.key ? "white" : "var(--text-secondary)",
+                  fontSize: "0.75rem",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                }}
+              >
+                {item.icon}
+                {item.label}
               </button>
             ))}
           </div>
 
-          {/* View Toggle */}
-          <div style={{ display: "flex", background: "var(--bg-hover)", borderRadius: "var(--radius-md)", padding: "3px" }}>
-            {([["grid", LayoutGrid], ["list", List]] as const).map(([mode, Icon]) => (
-              <button key={mode} onClick={() => setViewMode(mode as ViewMode)} style={{
-                padding: "6px 8px", borderRadius: "var(--radius-sm)", border: "none", cursor: "pointer",
-                background: viewMode === mode ? "var(--bg-card)" : "transparent",
-                boxShadow: viewMode === mode ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
-                color: viewMode === mode ? "var(--text-main)" : "var(--text-muted)",
-                display: "flex", alignItems: "center", transition: "all 0.15s",
-              }}>
+          <div style={{ display: "flex", background: "var(--bg-hover)", borderRadius: "10px", padding: "3px" }}>
+            {([
+              ["grid", LayoutGrid],
+              ["list", List],
+            ] as const).map(([mode, Icon]) => (
+              <button
+                key={mode}
+                onClick={() => setViewMode(mode)}
+                style={{
+                  width: "34px",
+                  height: "30px",
+                  borderRadius: "8px",
+                  border: "none",
+                  background: viewMode === mode ? "var(--bg-card)" : "transparent",
+                  color: viewMode === mode ? "var(--text-main)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
                 <Icon style={{ width: "16px", height: "16px" }} />
               </button>
             ))}
@@ -253,44 +519,123 @@ export function ModuleManagementPanel() {
         </div>
       </div>
 
-      {/* Module Grid/List */}
       <div style={{ flex: 1, overflowY: "auto", padding: "0 28px 28px" }}>
         {filteredModules.length === 0 ? (
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", textAlign: "center" }}>
-            <Settings style={{ width: "48px", height: "48px", color: "var(--text-muted)", opacity: 0.3, marginBottom: "16px" }} />
-            <h3 style={{ fontSize: "1rem", fontWeight: 600, color: "var(--text-main)", marginBottom: "6px" }}>没有找到模块</h3>
-            <p style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-              {searchQuery ? "尝试其他搜索词" : "当前筛选条件下没有模块"}
-            </p>
-          </div>
+          <CenteredState
+            icon={<Settings style={{ width: "42px", height: "42px", color: "var(--text-muted)", opacity: 0.35 }} />}
+            title={searchQuery ? "没有匹配的模块" : "当前筛选下没有模块"}
+            description={searchQuery ? "换个关键词再试一次。" : "调整筛选，或者去工具页补齐监控设置。"}
+          />
         ) : (
-          <div style={viewMode === "grid"
-            ? { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "16px" }
-            : { display: "flex", flexDirection: "column", gap: "12px" }
-          }>
+          <div
+            style={
+              viewMode === "grid"
+                ? { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: "16px" }
+                : { display: "flex", flexDirection: "column", gap: "12px" }
+            }
+          >
             {filteredModules.map((module) => (
               <ModuleCard
                 key={module.id}
                 module={module}
-                onClick={() => { setInitialTab("overview"); setSelectedModule(module); }}
-                onRun={() => handleRunModule(module.id)}
-                onToggle={() => handleToggleModule(module.id)}
-                onDiagnose={() => { setInitialTab("overview"); setSelectedModule(module); }}
+                usage={usageByModule[module.id] || EMPTY_MODULE_USAGE_METRICS}
+                onOpenHistory={() => openModuleModal(module, "history")}
+                onOpenOverview={() => openModuleModal(module, "overview")}
+                onOpenTool={() => openModuleTool(module.id)}
+                onRun={() => {
+                  if (!runningModules.has(module.id)) {
+                    void handleRunModule(module.id);
+                  }
+                }}
+                onToggle={() => void handleToggleModule(module.id)}
               />
             ))}
           </div>
         )}
       </div>
 
-      {/* Modal */}
       {selectedModule && (
         <ModuleDetailModal
           module={selectedModule}
+          usage={usageByModule[selectedModule.id] || EMPTY_MODULE_USAGE_METRICS}
           initialTab={initialTab}
           onClose={() => setSelectedModule(null)}
           onUpdate={handleUpdateModule}
+          onOpenTool={() => openModuleTool(selectedModule.id)}
+          onRun={() => {
+            if (!runningModules.has(selectedModule.id)) {
+              void handleRunModule(selectedModule.id);
+            }
+          }}
+          onToggle={() => void handleToggleModule(selectedModule.id)}
         />
       )}
+
+      <style>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }
+
+function CenteredState({
+  icon,
+  title,
+  description,
+  action,
+}: {
+  icon: ReactNode;
+  title: string;
+  description?: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        textAlign: "center",
+        gap: "12px",
+        color: "var(--text-muted)",
+      }}
+    >
+      {icon}
+      <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-main)" }}>{title}</div>
+      {description && <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>{description}</div>}
+      {action}
+    </div>
+  );
+}
+
+const primaryButtonStyle: CSSProperties = {
+  height: "38px",
+  padding: "0 16px",
+  borderRadius: "8px",
+  border: "none",
+  background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+  color: "white",
+  fontSize: "0.8125rem",
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const ghostButtonStyle: CSSProperties = {
+  height: "36px",
+  padding: "0 14px",
+  borderRadius: "8px",
+  border: "1px solid var(--border-light)",
+  background: "transparent",
+  color: "var(--text-secondary)",
+  fontSize: "0.8125rem",
+  fontWeight: 700,
+  cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "6px",
+};

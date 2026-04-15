@@ -19,12 +19,12 @@ class Module(ABC):
 
     @abstractmethod
     async def fetch(self) -> list[Item]:
-        """拉取原始数据，返回 Item 列表（不做 Claude 处理）"""
+        """拉取原始数据，返回 Item 列表（不做 Agent 处理）"""
         ...
 
     @abstractmethod
     async def process(self, items: list[Item], prefs: dict) -> list[Card]:
-        """用 Claude 处理数据，prefs 包含用户偏好，应注入 Claude prompt"""
+        """用 Agent 处理数据，prefs 包含用户偏好，应注入对应 prompt"""
         ...
 
     async def on_feedback(self, card_id: str, action: FeedbackAction) -> None:

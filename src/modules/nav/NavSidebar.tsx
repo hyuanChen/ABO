@@ -1,4 +1,5 @@
 import { useStore, ActiveTab } from "../../core/store";
+import { filterModulesForManagement } from "../../core/moduleVisibility";
 import AvatarDisplay from "../profile/AvatarDisplay";
 import {
   Inbox, BookOpen, FileText,
@@ -63,6 +64,7 @@ export default function NavSidebar() {
   } = useStore();
   const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0);
   const vaultOk = Boolean(config?.vault_path);
+  const managementModules = filterModulesForManagement(feedModules);
 
   const getEnergyColor = (energy: number) => {
     if (energy >= 70) return "linear-gradient(135deg, #A8E6CF, #7DD3C0)";
@@ -498,7 +500,7 @@ export default function NavSidebar() {
             paddingLeft: "4px",
           }}
         >
-          {feedModules.map((mod) => (
+          {managementModules.map((mod) => (
             <ModuleItem key={mod.id} mod={mod} isMobile={isMobile} setIsOpen={setIsOpen} />
           ))}
         </div>
@@ -668,7 +670,7 @@ export default function NavSidebar() {
             <Rss className="w-[18px] h-[18px] shrink-0" style={{ color: "var(--color-primary-dark)" }} aria-hidden />
           </div>
           <span style={{ fontWeight: 600, fontSize: "clamp(0.875rem, 1.2vw, 0.9375rem)", flex: 1, textAlign: "left" }}>
-            论文搜索
+            论文追踪
           </span>
         </button>
 

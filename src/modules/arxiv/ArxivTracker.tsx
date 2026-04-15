@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   BookOpen,
   RefreshCw,
@@ -9,17 +9,31 @@ import {
   Calendar,
   User,
   FileText,
+  Download,
   ChevronDown,
   ChevronUp,
   Check,
   Cpu,
   GitBranch,
   Square,
+  Image as ImageIcon,
 } from "lucide-react";
-import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
+import { PageContainer, PageHeader, PageContent, Card, EmptyState } from "../../components/Layout";
 import { api } from "../../core/api";
 import { useToast } from "../../components/Toast";
 import { useStore } from "../../core/store";
+import PaperMonitorPanel from "./PaperMonitorPanel";
+
+type PaperFigureAsset = {
+  url?: string;
+  caption: string;
+  is_method?: boolean;
+  local_path?: string;
+  original_url?: string;
+  filename?: string;
+};
+
+const API_BASE = "http://127.0.0.1:8765";
 
 interface ArxivPaper {
   id: string;
@@ -35,20 +49,9 @@ interface ArxivPaper {
     contribution?: string;
     abstract?: string;
     keywords?: string[];
-    figures?: Array<{
-      url: string;
-      caption: string;
-      is_method: boolean;
-      local_path?: string;
-      original_url?: string;
-    }>;
+    figures?: PaperFigureAsset[];
     figures_dir?: string;
-    local_figures?: Array<{
-      filename: string;
-      caption: string;
-      local_path: string;
-      original_url?: string;
-    }>;
+    local_figures?: PaperFigureAsset[];
   };
 }
 
@@ -70,23 +73,16 @@ interface SemanticScholarPaper {
     s2_url?: string;
     arxiv_id?: string;
     arxiv_url?: string;
+    "pdf-url"?: string;
+    "html-url"?: string;
     relationship?: string;
     relationship_label?: string;
     source_arxiv_id?: string;
     source_paper_title?: string;
     published?: string;
     venue?: string;
-    figures?: Array<{
-      url: string;
-      caption: string;
-      is_method: boolean;
-    }>;
-    local_figures?: Array<{
-      filename: string;
-      caption: string;
-      local_path: string;
-      original_url?: string;
-    }>;
+    figures?: PaperFigureAsset[];
+    local_figures?: PaperFigureAsset[];
   };
 }
 
@@ -98,6 +94,190 @@ interface CrawlProgress {
   currentPaperTitle?: string;
 }
 
+function normalizePaperFigures(figures: PaperFigureAsset[] | undefined): PaperFigureAsset[] {
+  if (!figures?.length) return [];
+
+  const seen = new Set<string>();
+  return figures.flatMap((figure, index) => {
+    const key = figure.local_path || figure.url || figure.original_url || figure.filename || `figure-${index}`;
+    if (!key || seen.has(key)) return [];
+    seen.add(key);
+    return [
+      {
+        ...figure,
+        caption: figure.caption || `Figure ${index + 1}`,
+      },
+    ];
+  });
+}
+
+function normalizeArxivFigureUrl(url: string): string {
+  if (!url.startsWith("http")) return url;
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "arxiv.org") return url;
+
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts[0] !== "html" || parts.length < 3) return url;
+
+    const docId = parts[1];
+    const nested = parts[2];
+    if (nested === docId || nested.startsWith(`${docId}v`)) {
+      parsed.pathname = `/html/${parts.slice(2).join("/")}`;
+      return parsed.toString();
+    }
+  } catch {
+    return url;
+  }
+
+  return url;
+}
+
+function getPaperFigureRemoteUrl(figure: PaperFigureAsset): string {
+  const remoteUrl = figure.original_url || figure.url || "";
+  return normalizeArxivFigureUrl(remoteUrl);
+}
+
+function getPaperFigureImageUrl(figure: PaperFigureAsset): string {
+  if (figure.local_path) {
+    return `${API_BASE}/api/literature/file?path=${encodeURIComponent(figure.local_path)}`;
+  }
+
+  const remoteUrl = getPaperFigureRemoteUrl(figure);
+  if (!remoteUrl) return "";
+  if (remoteUrl.startsWith("data:image/")) return remoteUrl;
+  if (remoteUrl.startsWith(`${API_BASE}/api/proxy/image?url=`)) return remoteUrl;
+  return `${API_BASE}/api/proxy/image?url=${encodeURIComponent(remoteUrl)}`;
+}
+
+function getPaperFigureTargetUrl(figure: PaperFigureAsset, fallbackUrl: string): string {
+  const remoteUrl = getPaperFigureRemoteUrl(figure);
+  if (remoteUrl.startsWith("data:image/")) return fallbackUrl;
+  return remoteUrl || getPaperFigureImageUrl(figure) || fallbackUrl;
+}
+
+function PaperFigureStrip({
+  figures,
+  fallbackUrl,
+}: {
+  figures: PaperFigureAsset[];
+  fallbackUrl: string;
+}) {
+  if (!figures.length) return null;
+
+  return (
+    <div style={{ marginBottom: "16px" }}>
+      <div
+        style={{
+          display: "flex",
+          gap: "16px",
+          overflowX: "auto",
+          paddingBottom: "12px",
+          scrollbarWidth: "thin",
+        }}
+      >
+        {figures.map((figure, index) => {
+          const imageUrl = getPaperFigureImageUrl(figure);
+          const targetUrl = getPaperFigureTargetUrl(figure, fallbackUrl);
+          return (
+            <div
+              key={`${targetUrl}-${index}`}
+              style={{
+                flexShrink: 0,
+                width: "480px",
+                borderRadius: "var(--radius-md)",
+                overflow: "hidden",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-card)",
+              }}
+            >
+              {imageUrl ? (
+                <img
+                  src={imageUrl}
+                  alt={figure.caption}
+                  style={{
+                    width: "100%",
+                    height: "280px",
+                    objectFit: "contain",
+                    background: "var(--bg-hover)",
+                    cursor: "pointer",
+                  }}
+                  onClick={() => window.open(targetUrl, "_blank")}
+                  loading="lazy"
+                />
+              ) : (
+                <a
+                  href={fallbackUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: "100%",
+                    height: "280px",
+                    background: "var(--bg-hover)",
+                    color: "var(--text-muted)",
+                    textDecoration: "none",
+                    fontSize: "0.875rem",
+                    fontWeight: 600,
+                  }}
+                >
+                  查看论文图片
+                </a>
+              )}
+              <div
+                style={{
+                  padding: "10px 12px",
+                  fontSize: "0.8125rem",
+                  color: "var(--text-muted)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  background: "var(--bg-card)",
+                }}
+              >
+                {figure.caption}
+                {figure.is_method && (
+                  <span
+                    style={{
+                      marginLeft: "8px",
+                      padding: "3px 8px",
+                      borderRadius: "4px",
+                      background: "var(--color-primary)",
+                      color: "white",
+                      fontSize: "0.6875rem",
+                      fontWeight: 600,
+                    }}
+                  >
+                    架构图
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function getSemanticScholarTimestamp(paper: SemanticScholarPaper): number {
+  const published = paper.metadata?.published;
+  if (published) {
+    const timestamp = new Date(published).getTime();
+    if (Number.isFinite(timestamp)) return timestamp;
+  }
+
+  const year = paper.metadata?.year;
+  if (typeof year === "number" && year > 0) {
+    return new Date(year, 0, 1).getTime();
+  }
+
+  return 0;
+}
+
 export default function ArxivTracker() {
   const {
     config,
@@ -105,25 +285,33 @@ export default function ArxivTracker() {
     arxivAndCrawling,
     arxivAndProgress,
     arxivAndKeywords,
+    arxivTrackerActiveTab,
+    semanticScholarPapers: storedSemanticScholarPapers,
+    semanticScholarCrawling,
+    semanticScholarProgress,
+    semanticScholarQuery,
+    semanticScholarMaxResultsInput,
+    semanticScholarDaysBackInput,
+    semanticScholarSortBy,
     setArxivAndPapers,
     setArxivAndCrawling,
     setArxivAndProgress,
     setArxivAndKeywords,
+    setArxivTrackerActiveTab,
+    setSemanticScholarPapers,
+    setSemanticScholarCrawling,
+    setSemanticScholarProgress,
+    setSemanticScholarQuery,
+    setSemanticScholarMaxResultsInput,
+    setSemanticScholarDaysBackInput,
+    setSemanticScholarSortBy,
   } = useStore();
-
-  // Semantic Scholar 状态
-  const [arxivIdInput, _setArxivIdInput] = useState("");
-  const [s2Papers, setS2Papers] = useState<SemanticScholarPaper[]>([]);
-  const [s2Crawling, setS2Crawling] = useState(false);
-  const [s2Progress, setS2Progress] = useState<CrawlProgress | null>(null);
-  const [_fetchCitations, _setFetchCitations] = useState(true);
-  const [_fetchReferences, _setFetchReferences] = useState(false);
+  const s2Papers = storedSemanticScholarPapers as SemanticScholarPaper[];
 
   // 通用状态
-  const [activeTab, setActiveTab] = useState<"search" | "followups">("search");
-  const [loading, setLoading] = useState(false);
   const [savedPapers, setSavedPapers] = useState<Set<string>>(new Set());
   const [_savedS2Papers, _setSavedS2Papers] = useState<Set<string>>(new Set());
+  const [savingS2PaperId, setSavingS2PaperId] = useState<string | null>(null);
   const [autoSave, setAutoSave] = useState(false);
   const [csOnly, setCsOnly] = useState(true);
   const [searchMaxResults, setSearchMaxResults] = useState(50);
@@ -135,21 +323,11 @@ export default function ArxivTracker() {
   const saveSinglePaperRef = useRef<((paper: ArxivPaper) => Promise<void>) | null>(null);
 
   // WebSocket 连接 - 使用 ref 来避免依赖问题，确保事件处理始终可用
-  const activeTabRef = useRef(activeTab);
   const autoSaveRef = useRef(autoSave);
-  const searchCrawlingRef = useRef(arxivAndCrawling);
-
-  useEffect(() => {
-    activeTabRef.current = activeTab;
-  }, [activeTab]);
 
   useEffect(() => {
     autoSaveRef.current = autoSave;
   }, [autoSave]);
-
-  useEffect(() => {
-    searchCrawlingRef.current = arxivAndCrawling;
-  }, [arxivAndCrawling]);
 
   // Track which mode is currently crawling using a crawling ID
   const crawlingIdRef = useRef<string | null>(null);
@@ -214,16 +392,17 @@ export default function ArxivTracker() {
         try {
           const data = JSON.parse(event.data);
           const shouldAutoSave = autoSaveRef.current;
+          const isSemanticScholarEvent = data.module === "semantic-scholar-tracker";
 
           console.log("[arXiv] WS message:", data.type, data);
 
-          if (data.type === "crawl_started") {
+          if (data.type === "crawl_started" && !isSemanticScholarEvent) {
             // Store session ID for cancellation
             if (data.session_id) {
               setCrawlSessionId(data.session_id);
               crawlSessionIdRef.current = data.session_id;
             }
-          } else if (data.type === "crawl_cancelled") {
+          } else if (data.type === "crawl_cancelled" && !isSemanticScholarEvent) {
             toast.info("已取消", data.message || "爬取任务已取消");
             setArxivAndCrawling(false);
             setArxivAndProgress(null);
@@ -231,7 +410,7 @@ export default function ArxivTracker() {
             setCrawlingMode(null);
             setCrawlSessionId(null);
             crawlSessionIdRef.current = null;
-          } else if (data.type === "crawl_progress") {
+          } else if (data.type === "crawl_progress" && !isSemanticScholarEvent) {
             const progress: CrawlProgress = {
               current: data.current || 0,
               total: data.total || 20,
@@ -240,7 +419,7 @@ export default function ArxivTracker() {
               currentPaperTitle: data.currentPaperTitle,
             };
             setArxivAndProgress(progress);
-          } else if (data.type === "crawl_paper") {
+          } else if (data.type === "crawl_paper" && !isSemanticScholarEvent) {
             const store = useStore.getState();
             console.log("[arXiv] Received paper:", data.paper?.id, "mode:", crawlingModeRef.current || crawlingIdRef.current);
             const exists = store.arxivAndPapers.find(p => p.id === data.paper.id);
@@ -251,14 +430,14 @@ export default function ArxivTracker() {
                 saveSinglePaperRef.current(data.paper);
               }
             }
-          } else if (data.type === "crawl_complete") {
+          } else if (data.type === "crawl_complete" && !isSemanticScholarEvent) {
             console.log("[arXiv] Crawl complete:", data.count);
             toast.success("爬取完成", `共找到 ${data.count} 篇论文`);
             setArxivAndCrawling(false);
             setArxivAndProgress(null);
             crawlingIdRef.current = null;
             setCrawlingMode(null);
-          } else if (data.type === "crawl_error") {
+          } else if (data.type === "crawl_error" && !isSemanticScholarEvent) {
             console.error("[arXiv] Crawl error:", data.error);
             toast.error("爬取失败", data.error);
             setArxivAndCrawling(false);
@@ -266,7 +445,7 @@ export default function ArxivTracker() {
             crawlingIdRef.current = null;
             setCrawlingMode(null);
           } else if (data.type === "s2_progress") {
-            setS2Progress({
+            setSemanticScholarProgress({
               current: data.current || 0,
               total: data.total || 20,
               phase: data.phase,
@@ -274,43 +453,51 @@ export default function ArxivTracker() {
               currentPaperTitle: data.currentPaperTitle,
             });
           } else if (data.type === "s2_paper") {
-            setS2Papers((prev) => {
-              if (prev.find((p) => p.id === data.paper.id)) return prev;
-              return [...prev, data.paper];
-            });
+            const store = useStore.getState();
+            if (!store.semanticScholarPapers.find((p) => p.id === data.paper.id)) {
+              store.appendSemanticScholarPaper(data.paper);
+            }
           } else if (data.type === "s2_complete") {
-            setS2Crawling(false);
-            setS2Progress(null);
+            setSemanticScholarCrawling(false);
+            setSemanticScholarProgress(null);
             toast.success("Semantic Scholar 爬取完成", `共获取 ${data.count} 篇相关论文`);
           } else if (data.type === "s2_error") {
-            setS2Crawling(false);
-            setS2Progress(null);
+            setSemanticScholarCrawling(false);
+            setSemanticScholarProgress(null);
             toast.error("Semantic Scholar 爬取失败", data.error);
           }
 
           // Handle new semantic-scholar-tracker module messages
-          if (data.module === "semantic-scholar-tracker") {
-            if (data.type === "crawl_paper") {
-              setS2Papers((prev) => {
-                if (prev.find((p) => p.id === data.paper.id)) return prev;
-                return [...prev, data.paper];
-              });
+          if (isSemanticScholarEvent) {
+            if (data.type === "crawl_started") {
+              setSemanticScholarCrawling(true);
+              if (data.session_id) {
+                s2SessionIdRef.current = data.session_id;
+              }
+            } else if (data.type === "crawl_paper") {
+              const store = useStore.getState();
+              if (!store.semanticScholarPapers.find((p) => p.id === data.paper.id)) {
+                store.appendSemanticScholarPaper(data.paper);
+              }
             } else if (data.type === "crawl_complete") {
-              setS2Crawling(false);
-              setS2Progress(null);
+              setSemanticScholarCrawling(false);
+              setSemanticScholarProgress(null);
+              s2SessionIdRef.current = null;
               toast.success("后续论文爬取完成", `共获取 ${data.count} 篇论文`);
             } else if (data.type === "crawl_error") {
-              setS2Crawling(false);
-              setS2Progress(null);
+              setSemanticScholarCrawling(false);
+              setSemanticScholarProgress(null);
+              s2SessionIdRef.current = null;
               toast.error("后续论文爬取失败", data.error);
             } else if (data.type === "crawl_cancelled") {
-              setS2Crawling(false);
-              setS2Progress(null);
+              setSemanticScholarCrawling(false);
+              setSemanticScholarProgress(null);
+              s2SessionIdRef.current = null;
               toast.info("已取消爬取");
             } else if (data.type === "crawl_progress") {
-              setS2Progress({
+              setSemanticScholarProgress({
                 current: data.current || 0,
-                total: data.total || 20,
+                total: data.total || 0,
                 phase: data.phase,
                 message: data.message,
               });
@@ -332,30 +519,6 @@ export default function ArxivTracker() {
       }
     };
   }, [])
-
-  // Load existing papers on mount
-  useEffect(() => {
-    loadPapers();
-  }, []);
-
-  async function loadPapers() {
-    setLoading(true);
-    try {
-      const data = await api.get<{ cards: ArxivPaper[] }>(
-        "/api/cards?module_id=arxiv-tracker&limit=50"
-      );
-      const sorted = (data.cards || []).sort((a, b) => {
-        const dateA = a.metadata?.published || "";
-        const dateB = b.metadata?.published || "";
-        return dateB.localeCompare(dateA);
-      });
-      setArxivAndPapers(sorted);
-    } catch (err) {
-      console.error("Failed to load papers:", err);
-    } finally {
-      setLoading(false);
-    }
-  }
 
   async function saveSinglePaper(paper: ArxivPaper) {
     try {
@@ -485,20 +648,81 @@ export default function ArxivTracker() {
     }
   }
 
-  const currentPapers = activeTab === "search" ? arxivAndPapers : s2Papers;
-  const isCrawling = activeTab === "search" ? arxivAndCrawling : s2Crawling;
-  const currentProgress = activeTab === "search" ? arxivAndProgress : s2Progress;
+  const displayedS2Papers = useMemo(() => {
+    const papers = [...s2Papers];
+    papers.sort((a, b) => {
+      if (semanticScholarSortBy === "citation_count") {
+        const citationDiff = (b.metadata?.citation_count || 0) - (a.metadata?.citation_count || 0);
+        if (citationDiff !== 0) return citationDiff;
+      }
+
+      const timeDiff = getSemanticScholarTimestamp(b) - getSemanticScholarTimestamp(a);
+      if (timeDiff !== 0) return timeDiff;
+
+      if (semanticScholarSortBy === "recency") {
+        return (b.metadata?.citation_count || 0) - (a.metadata?.citation_count || 0);
+      }
+
+      return a.title.localeCompare(b.title);
+    });
+    return papers;
+  }, [s2Papers, semanticScholarSortBy]);
+
+  const isMonitorTab = arxivTrackerActiveTab === "monitors";
+  const currentPapers = arxivTrackerActiveTab === "search"
+    ? arxivAndPapers
+    : arxivTrackerActiveTab === "followups"
+      ? displayedS2Papers
+      : [];
+  const isCrawling = arxivTrackerActiveTab === "search"
+    ? arxivAndCrawling
+    : arxivTrackerActiveTab === "followups"
+      ? semanticScholarCrawling
+      : false;
+  const currentProgress = arxivTrackerActiveTab === "search"
+    ? arxivAndProgress
+    : arxivTrackerActiveTab === "followups"
+      ? semanticScholarProgress
+      : null;
+
+  function clearCurrentResults() {
+    if (isCrawling) return;
+    if (isMonitorTab) return;
+    if (arxivTrackerActiveTab === "search") {
+      setArxivAndPapers([]);
+      setArxivAndProgress(null);
+      return;
+    }
+    setSemanticScholarPapers([]);
+    setSemanticScholarProgress(null);
+  }
 
   // Fetch follow-up papers from Semantic Scholar
   async function fetchS2FollowUps() {
-    if (!arxivIdInput.trim()) {
+    if (!semanticScholarQuery.trim()) {
       toast.error("请输入 arXiv ID 或论文标题", "例如：2501.12345 或 VGGT");
       return;
     }
 
-    setS2Crawling(true);
-    setS2Papers([]);
-    setS2Progress({ current: 0, total: 20, phase: "fetching", message: "正在查询 Semantic Scholar..." });
+    const parsedMaxResults = Number(semanticScholarMaxResultsInput.trim());
+    const resolvedMaxResults = Number.isFinite(parsedMaxResults) && parsedMaxResults > 0
+      ? Math.min(5000, Math.max(1, Math.floor(parsedMaxResults)))
+      : null;
+    const parsedDaysBack = Number(semanticScholarDaysBackInput.trim());
+    const resolvedDaysBack = Number.isFinite(parsedDaysBack) && parsedDaysBack > 0
+      ? Math.min(3650, Math.max(1, Math.floor(parsedDaysBack)))
+      : null;
+
+    setSemanticScholarCrawling(true);
+    setSemanticScholarPapers([]);
+    setSemanticScholarProgress({
+      current: 0,
+      total: resolvedMaxResults ?? 0,
+      phase: "fetching",
+      message: resolvedMaxResults
+        ? `正在查询 Semantic Scholar（最多 ${resolvedMaxResults} 篇）...`
+        : "正在查询 Semantic Scholar（全量）...",
+    });
 
     try {
       // Generate session ID for cancellation
@@ -506,14 +730,17 @@ export default function ArxivTracker() {
       s2SessionIdRef.current = sessionId;
 
       await api.post("/api/modules/semantic-scholar-tracker/crawl", {
-        query: arxivIdInput.trim(),
-        max_results: 20,
-        days_back: 7,
+        query: semanticScholarQuery.trim(),
+        max_results: resolvedMaxResults,
+        days_back: resolvedDaysBack,
+        sort_by: semanticScholarSortBy,
         session_id: sessionId,
       });
     } catch (err) {
       toast.error("获取失败", err instanceof Error ? err.message : "请稍后重试");
-      setS2Crawling(false);
+      setSemanticScholarCrawling(false);
+      setSemanticScholarProgress(null);
+      s2SessionIdRef.current = null;
     }
   }
 
@@ -532,6 +759,7 @@ export default function ArxivTracker() {
   }
 
   async function saveS2ToLiterature(paper: SemanticScholarPaper) {
+    setSavingS2PaperId(paper.id);
     try {
       const result = await api.post<{
         ok: boolean;
@@ -556,7 +784,7 @@ export default function ArxivTracker() {
             local_figures: result.figures,
           },
         };
-        setS2Papers(prev => prev.map(p => p.id === paper.id ? updatedPaper : p));
+        setSemanticScholarPapers(s2Papers.map(p => p.id === paper.id ? updatedPaper : p));
       }
 
       const figureMsg = result.figures?.length ? ` (${result.figures.length}张图)` : "";
@@ -564,20 +792,22 @@ export default function ArxivTracker() {
       toast.success("保存成功", `已保存到 ${result.folder}${figureMsg}${pdfMsg}`);
     } catch (err) {
       toast.error("保存失败", err instanceof Error ? err.message : "请检查文献库路径");
+    } finally {
+      setSavingS2PaperId(null);
     }
   }
 
   return (
     <PageContainer>
       <PageHeader
-        title="论文搜索"
+        title="论文追踪"
         subtitle="AND/OR 双模式 · CS领域 · 实时进度 · 自动去重"
         icon={BookOpen}
         actions={
           <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
             <button
-              onClick={loadPapers}
-              disabled={loading}
+              onClick={clearCurrentResults}
+              disabled={isCrawling || currentPapers.length === 0}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -589,13 +819,13 @@ export default function ArxivTracker() {
                 color: "var(--text-secondary)",
                 fontSize: "0.875rem",
                 fontWeight: 600,
-                cursor: loading ? "not-allowed" : "pointer",
-                opacity: loading ? 0.6 : 1,
+                cursor: isCrawling || currentPapers.length === 0 ? "not-allowed" : "pointer",
+                opacity: isCrawling || currentPapers.length === 0 ? 0.6 : 1,
                 transition: "all 0.3s ease",
               }}
             >
-              <RefreshCw style={{ width: "14px", height: "14px", animation: loading ? "spin 1s linear infinite" : "none" }} />
-              刷新
+              <RefreshCw style={{ width: "14px", height: "14px" }} />
+              清空本次结果
             </button>
           </div>
         }
@@ -603,9 +833,16 @@ export default function ArxivTracker() {
 
       <PageContent maxWidth="1200px">
         {/* Search Tabs */}
-        <div style={{ display: "flex", gap: "8px", marginBottom: "20px" }}>
+        <div
+          style={{
+            display: "flex",
+            gap: "8px",
+            alignItems: "stretch",
+            marginBottom: "20px",
+          }}
+        >
           <button
-            onClick={() => setActiveTab("search")}
+            onClick={() => setArxivTrackerActiveTab("followups")}
             style={{
               flex: 1,
               display: "flex",
@@ -614,32 +851,9 @@ export default function ArxivTracker() {
               gap: "8px",
               padding: "16px 24px",
               borderRadius: "var(--radius-lg)",
-              background: activeTab === "search" ? "var(--color-primary)" : "var(--bg-card)",
-              border: `1px solid ${activeTab === "search" ? "transparent" : "var(--border-light)"}`,
-              color: activeTab === "search" ? "white" : "var(--text-secondary)",
-              fontSize: "0.9375rem",
-              fontWeight: 600,
-              cursor: "pointer",
-              transition: "all 0.3s ease",
-            }}
-          >
-            <Search style={{ width: "18px", height: "18px" }} />
-            关键词搜索
-            <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>(AND / AND-OR)</span>
-          </button>
-          <button
-            onClick={() => setActiveTab("followups")}
-            style={{
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "8px",
-              padding: "16px 24px",
-              borderRadius: "var(--radius-lg)",
-              background: activeTab === "followups" ? "var(--color-primary)" : "var(--bg-card)",
-              border: `1px solid ${activeTab === "followups" ? "transparent" : "var(--border-light)"}`,
-              color: activeTab === "followups" ? "white" : "var(--text-secondary)",
+              background: arxivTrackerActiveTab === "followups" ? "var(--color-primary)" : "var(--bg-card)",
+              border: `1px solid ${arxivTrackerActiveTab === "followups" ? "transparent" : "var(--border-light)"}`,
+              color: arxivTrackerActiveTab === "followups" ? "white" : "var(--text-secondary)",
               fontSize: "0.9375rem",
               fontWeight: 600,
               cursor: "pointer",
@@ -650,12 +864,61 @@ export default function ArxivTracker() {
             后续论文
             <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>(Semantic Scholar)</span>
           </button>
+          <button
+            onClick={() => setArxivTrackerActiveTab("search")}
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "8px",
+              padding: "16px 24px",
+              borderRadius: "var(--radius-lg)",
+              background: arxivTrackerActiveTab === "search" ? "var(--color-primary)" : "var(--bg-card)",
+              border: `1px solid ${arxivTrackerActiveTab === "search" ? "transparent" : "var(--border-light)"}`,
+              color: arxivTrackerActiveTab === "search" ? "white" : "var(--text-secondary)",
+              fontSize: "0.9375rem",
+              fontWeight: 600,
+              cursor: "pointer",
+              transition: "all 0.3s ease",
+            }}
+          >
+            <Search style={{ width: "18px", height: "18px" }} />
+            AI领域论文
+            <span style={{ fontSize: "0.75rem", opacity: 0.8 }}>(AND / AND-OR)</span>
+          </button>
+          <button
+            onClick={() => setArxivTrackerActiveTab("monitors")}
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "8px",
+              padding: "16px 24px",
+              borderRadius: "var(--radius-lg)",
+              background: arxivTrackerActiveTab === "monitors" ? "var(--color-primary)" : "var(--bg-card)",
+              border: `1px solid ${arxivTrackerActiveTab === "monitors" ? "transparent" : "var(--border-light)"}`,
+              color: arxivTrackerActiveTab === "monitors" ? "white" : "var(--text-secondary)",
+              fontSize: "0.9375rem",
+              fontWeight: 600,
+              cursor: "pointer",
+              transition: "all 0.3s ease",
+            }}
+          >
+            <GitBranch style={{ width: "18px", height: "18px" }} />
+            关注监控
+          </button>
         </div>
 
-        {/* Search Card */}
-        <Card style={{ marginBottom: "24px" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-            {activeTab === "followups" ? (
+        {isMonitorTab ? (
+          <PaperMonitorPanel />
+        ) : (
+          <>
+            {/* Search Card */}
+            <Card style={{ marginBottom: "24px" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+                {arxivTrackerActiveTab === "followups" ? (
               // Follow-ups Tab UI
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
@@ -671,11 +934,11 @@ export default function ArxivTracker() {
                 <div style={{ display: "flex", gap: "12px", alignItems: "stretch" }}>
                   <input
                     type="text"
-                    value={arxivIdInput}
-                    onChange={(e) => _setArxivIdInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && !s2Crawling && fetchS2FollowUps()}
+                    value={semanticScholarQuery}
+                    onChange={(e) => setSemanticScholarQuery(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && !semanticScholarCrawling && fetchS2FollowUps()}
                     placeholder="输入论文标题或 arXiv ID，如：VGGT 或 2501.12345"
-                    disabled={s2Crawling}
+                    disabled={semanticScholarCrawling}
                     style={{
                       flex: 1,
                       padding: "12px 16px",
@@ -688,7 +951,7 @@ export default function ArxivTracker() {
                       transition: "all 0.2s ease",
                     }}
                   />
-                  {s2Crawling ? (
+                  {semanticScholarCrawling ? (
                     <button
                       onClick={stopS2Crawl}
                       style={{
@@ -714,7 +977,7 @@ export default function ArxivTracker() {
                   ) : (
                     <button
                       onClick={fetchS2FollowUps}
-                      disabled={s2Crawling}
+                      disabled={semanticScholarCrawling}
                       style={{
                         display: "flex",
                         alignItems: "center",
@@ -738,37 +1001,104 @@ export default function ArxivTracker() {
                   )}
                 </div>
 
-                {/* Options */}
-                <div style={{ display: "flex", gap: "20px", flexWrap: "wrap" }}>
-                  <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-                    <input
-                      type="checkbox"
-                      checked={_fetchCitations}
-                      onChange={(e) => _setFetchCitations(e.target.checked)}
-                      disabled={s2Crawling}
-                      style={{ width: "16px", height: "16px", cursor: "pointer" }}
-                    />
-                    <span style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>
-                      查找引用该论文的文献
+                <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+                  <label style={{ display: "flex", flexDirection: "column", gap: "6px", width: "140px" }}>
+                    <span style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-secondary)" }}>
+                      最大结果数
                     </span>
-                  </label>
-                  <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
                     <input
-                      type="checkbox"
-                      checked={_fetchReferences}
-                      onChange={(e) => _setFetchReferences(e.target.checked)}
-                      disabled={s2Crawling}
-                      style={{ width: "16px", height: "16px", cursor: "pointer" }}
+                      type="number"
+                      min={1}
+                      max={5000}
+                      value={semanticScholarMaxResultsInput}
+                      onChange={(e) => setSemanticScholarMaxResultsInput(e.target.value)}
+                      placeholder="留空=全量"
+                      disabled={semanticScholarCrawling}
+                      style={{
+                        height: "38px",
+                        padding: "8px 12px",
+                        borderRadius: "var(--radius-md)",
+                        border: "1px solid var(--border-light)",
+                        background: "var(--bg-app)",
+                        color: "var(--text-main)",
+                        fontSize: "0.875rem",
+                        boxSizing: "border-box",
+                      }}
                     />
-                    <span style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>
-                      查找该论文引用的参考文献
-                    </span>
                   </label>
+
+                  <label style={{ display: "flex", flexDirection: "column", gap: "6px", width: "140px" }}>
+                    <span style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-secondary)" }}>
+                      最近 N 天
+                    </span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={3650}
+                      value={semanticScholarDaysBackInput}
+                      onChange={(e) => setSemanticScholarDaysBackInput(e.target.value)}
+                      placeholder="留空=不限"
+                      disabled={semanticScholarCrawling}
+                      style={{
+                        height: "38px",
+                        padding: "8px 12px",
+                        borderRadius: "var(--radius-md)",
+                        border: "1px solid var(--border-light)",
+                        background: "var(--bg-app)",
+                        color: "var(--text-main)",
+                        fontSize: "0.875rem",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  </label>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    <span style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-secondary)" }}>
+                      排序
+                    </span>
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        onClick={() => setSemanticScholarSortBy("recency")}
+                        disabled={semanticScholarCrawling}
+                        style={{
+                          height: "38px",
+                          padding: "0 14px",
+                          borderRadius: "var(--radius-md)",
+                          border: `1px solid ${semanticScholarSortBy === "recency" ? "var(--color-primary)" : "var(--border-light)"}`,
+                          background: semanticScholarSortBy === "recency" ? "rgba(188, 164, 227, 0.12)" : "var(--bg-app)",
+                          color: semanticScholarSortBy === "recency" ? "var(--color-primary)" : "var(--text-secondary)",
+                          fontSize: "0.875rem",
+                          fontWeight: 600,
+                          cursor: semanticScholarCrawling ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        最近优先
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSemanticScholarSortBy("citation_count")}
+                        disabled={semanticScholarCrawling}
+                        style={{
+                          height: "38px",
+                          padding: "0 14px",
+                          borderRadius: "var(--radius-md)",
+                          border: `1px solid ${semanticScholarSortBy === "citation_count" ? "var(--color-primary)" : "var(--border-light)"}`,
+                          background: semanticScholarSortBy === "citation_count" ? "rgba(188, 164, 227, 0.12)" : "var(--bg-app)",
+                          color: semanticScholarSortBy === "citation_count" ? "var(--color-primary)" : "var(--text-secondary)",
+                          fontSize: "0.875rem",
+                          fontWeight: 600,
+                          cursor: semanticScholarCrawling ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        被引优先
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
-                {/* Example */}
-                <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                  提示：输入论文标题或 arXiv ID，系统将查找引用该论文的后续研究
+                <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+                  提示：默认会把引用该论文的后续研究全量翻页抓完；如果填写最近 N 天，会在抓取结果里按时间过滤并按你选的排序展示。
                 </div>
               </>
             ) : (
@@ -777,7 +1107,7 @@ export default function ArxivTracker() {
                 <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
                   <Search style={{ width: "20px", height: "20px", color: "var(--color-primary)" }} />
                   <span style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>
-                    arXiv 关键词搜索
+                    AI领域论文
                   </span>
                   <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "12px" }}>
                     <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }}>
@@ -956,8 +1286,8 @@ export default function ArxivTracker() {
               </>
             )}
 
-            {/* Real-time Progress Bar */}
-            {isCrawling && currentProgress && (
+                {/* Real-time Progress Bar */}
+                {isCrawling && currentProgress && (
               <div style={{ marginTop: "12px", padding: "16px", background: "var(--bg-hover)", borderRadius: "var(--radius-lg)", border: "1px solid var(--border-light)" }}>
                 {/* Progress Header */}
                 <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
@@ -976,8 +1306,10 @@ export default function ArxivTracker() {
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>
                       {currentProgress.phase === "fetching"
-                        ? "正在获取论文列表..."
-                        : activeTab === "search"
+                        ? arxivTrackerActiveTab === "search"
+                          ? "正在获取论文列表..."
+                          : "正在查询 Semantic Scholar..."
+                        : arxivTrackerActiveTab === "search"
                           ? `正在推送第 ${currentProgress.current}/${currentProgress.total} 篇`
                           : `正在处理第 ${currentProgress.current}/${currentProgress.total} 篇`}
                     </div>
@@ -1070,130 +1402,60 @@ export default function ArxivTracker() {
               </div>
             )}
 
-            {/* S2 Progress Bar - Only show for followups tab */}
-            {activeTab === "followups" && s2Crawling && s2Progress && (
-              <div style={{ marginTop: "12px", padding: "16px", background: "var(--bg-hover)", borderRadius: "var(--radius-lg)", border: "1px solid var(--border-light)" }}>
-                {/* Progress Header */}
-                <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
-                  <div style={{
-                    width: "32px",
-                    height: "32px",
-                    borderRadius: "50%",
-                    background: "linear-gradient(135deg, var(--color-primary), var(--color-secondary))",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    animation: s2Progress.phase === "fetching" ? "spin 1s linear infinite" : "none"
-                  }}>
-                    <GitBranch style={{ width: "16px", height: "16px", color: "white" }} />
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>
-                      {s2Progress.phase === "fetching"
-                        ? "正在查询 Semantic Scholar..."
-                        : `正在处理第 ${s2Progress.current}/${s2Progress.total} 篇`}
-                    </div>
-                    <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", marginTop: "2px" }}>
-                      {s2Progress.message || "正在获取后续论文..."}
-                    </div>
-                  </div>
-                  <span style={{
-                    fontSize: "1.125rem",
-                    fontWeight: 700,
-                    color: "var(--color-primary)",
-                  }}>
-                    {s2Progress.phase === "fetching"
-                      ? "准备中"
-                      : `${Math.round((s2Progress.current / s2Progress.total) * 100)}%`}
-                  </span>
+                {/* Auto Save Toggle */}
+                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={autoSave}
+                      onChange={(e) => setAutoSave(e.target.checked)}
+                      disabled={isCrawling}
+                      style={{ width: "18px", height: "18px", cursor: "pointer" }}
+                    />
+                    <span style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>
+                      自动保存到文献库/{arxivTrackerActiveTab === "followups" ? "FollowUps" : "arxiv"} 文件夹
+                    </span>
+                  </label>
                 </div>
+              </div>
+            </Card>
 
-                {/* Progress Bar */}
-                <div
-                  style={{
-                    width: "100%",
-                    height: "8px",
-                    background: "var(--bg-app)",
-                    borderRadius: "var(--radius-full)",
-                    overflow: "hidden",
-                  }}
-                >
-                  <div
-                    style={{
-                      width: s2Progress.phase === "fetching"
-                        ? "30%"
-                        : `${(s2Progress.current / s2Progress.total) * 100}%`,
-                      height: "100%",
-                      background: "linear-gradient(90deg, var(--color-primary), var(--color-secondary))",
-                      borderRadius: "var(--radius-full)",
-                      transition: "width 0.3s ease",
-                      animation: s2Progress.phase === "fetching" ? "progress-pulse 1.5s ease-in-out infinite" : "none",
-                    }}
-                  />
-                </div>
-
-                {/* S2 Papers Count */}
-                {s2Papers.length > 0 && (
-                  <div style={{ marginTop: "12px", fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                    已获取 {s2Papers.length} 篇后续论文
-                  </div>
-                )}
+            {/* Papers List */}
+            {currentPapers.length === 0 ? (
+              <EmptyState
+                icon={FileText}
+                title="暂无论文"
+                description={
+                  arxivTrackerActiveTab === "followups"
+                    ? "输入 arXiv ID 点击「查找后续论文」开始搜索"
+                    : "输入关键词点击「立即爬取」开始搜索"
+                }
+              />
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+                {arxivTrackerActiveTab === "followups"
+                  ? displayedS2Papers.map((paper) => (
+                      <S2PaperCard
+                        key={paper.id}
+                        paper={paper}
+                        isSaved={_savedS2Papers.has(paper.id)}
+                        isSaving={savingS2PaperId === paper.id}
+                        onSave={() => saveS2ToLiterature(paper)}
+                        hasLiteraturePath={!!(config?.literature_path || config?.vault_path)}
+                      />
+                    ))
+                  : currentPapers.map((paper) => (
+                      <PaperCard
+                        key={paper.id}
+                        paper={paper}
+                        isSaved={savedPapers.has(paper.id)}
+                        onSave={() => saveToLiterature(paper)}
+                        hasLiteraturePath={!!(config?.literature_path || config?.vault_path)}
+                      />
+                    ))}
               </div>
             )}
-
-            {/* Auto Save Toggle */}
-            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-                <input
-                  type="checkbox"
-                  checked={autoSave}
-                  onChange={(e) => setAutoSave(e.target.checked)}
-                  disabled={isCrawling}
-                  style={{ width: "18px", height: "18px", cursor: "pointer" }}
-                />
-                <span style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>
-                  自动保存到文献库/{activeTab === "followups" ? "FollowUps" : "arxiv"} 文件夹
-                </span>
-              </label>
-            </div>
-          </div>
-        </Card>
-
-        {/* Papers List */}
-        {loading && currentPapers.length === 0 ? (
-          <LoadingState message="加载论文中..." />
-        ) : currentPapers.length === 0 ? (
-          <EmptyState
-            icon={FileText}
-            title="暂无论文"
-            description={
-              activeTab === "followups"
-                ? "输入 arXiv ID 点击「查找后续论文」开始搜索"
-                : "输入关键词点击「立即爬取」开始搜索"
-            }
-          />
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-            {activeTab === "followups"
-              ? s2Papers.map((paper) => (
-                  <S2PaperCard
-                    key={paper.id}
-                    paper={paper}
-                    isSaved={_savedS2Papers.has(paper.id)}
-                    onSave={() => saveS2ToLiterature(paper)}
-                    hasLiteraturePath={!!(config?.literature_path || config?.vault_path)}
-                  />
-                ))
-              : currentPapers.map((paper) => (
-                  <PaperCard
-                    key={paper.id}
-                    paper={paper}
-                    isSaved={savedPapers.has(paper.id)}
-                    onSave={() => saveToLiterature(paper)}
-                    hasLiteraturePath={!!(config?.literature_path || config?.vault_path)}
-                  />
-                ))}
-          </div>
+          </>
         )}
       </PageContent>
 
@@ -1414,20 +1676,7 @@ function PaperCard({
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
               {(meta.local_figures || meta.figures || []).map((fig, idx) => {
-                // Build image URL with proxy to avoid CORS
-                let imageUrl: string;
-                const localPath = (fig as { local_path?: string }).local_path;
-                const remoteUrl = (fig as { url: string }).url;
-
-                if (localPath) {
-                  // Use local file API
-                  imageUrl = `http://127.0.0.1:8765/api/literature/file?path=${encodeURIComponent(localPath)}`;
-                } else if (remoteUrl) {
-                  // Use proxy to avoid CORS issues with arxiv
-                  imageUrl = `http://127.0.0.1:8765/api/proxy/image?url=${encodeURIComponent(remoteUrl)}`;
-                } else {
-                  imageUrl = '';
-                }
+                const imageUrl = getPaperFigureImageUrl(fig);
 
                 return (
                   <div
@@ -1571,11 +1820,13 @@ function PaperCard({
 function S2PaperCard({
   paper,
   isSaved,
+  isSaving,
   onSave,
   hasLiteraturePath,
 }: {
   paper: SemanticScholarPaper;
   isSaved: boolean;
+  isSaving: boolean;
   onSave: () => void;
   hasLiteraturePath: boolean;
 }) {
@@ -1583,73 +1834,66 @@ function S2PaperCard({
   const score = Math.round(paper.score * 10);
   const meta = paper.metadata || {};
   const authors = meta.authors || [];
+  const initialFigures = useMemo(
+    () => normalizePaperFigures(meta.local_figures?.length ? meta.local_figures : meta.figures),
+    [meta.local_figures, meta.figures],
+  );
+  const [figures, setFigures] = useState<PaperFigureAsset[]>(initialFigures);
+  const [loadingFigures, setLoadingFigures] = useState(false);
+  const [figureAttempted, setFigureAttempted] = useState(initialFigures.length > 0);
 
   const scoreColor = score >= 8 ? "#10B981" : score >= 6 ? "#F59E0B" : "#94A3B8";
   const scoreBg = score >= 8 ? "rgba(16, 185, 129, 0.1)" : score >= 6 ? "rgba(245, 158, 11, 0.1)" : "rgba(148, 163, 184, 0.1)";
 
   const relationshipColor = meta.relationship === "citation" ? "#10B981" : "#6366F1";
   const relationshipLabel = meta.relationship_label || (meta.relationship === "citation" ? "引用文献" : "参考文献");
+  const figureCount = figures.length;
+  const hasFigures = figureCount > 0;
+  const canLoadFigures = Boolean(meta.arxiv_id);
+  const paperLink = meta.arxiv_url || paper.source_url;
 
-  // Figures gallery component
-  const renderFiguresGallery = () => {
-    if (!meta.local_figures || meta.local_figures.length === 0) return null;
-    return (
-      <div style={{ marginTop: "16px" }}>
-        <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", marginBottom: "8px", display: "flex", alignItems: "center", gap: "6px" }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-          已保存图表 ({meta.local_figures.length}张)
-        </div>
-        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-          {meta.local_figures.map((fig, idx) => (
-            <div
-              key={idx}
-              style={{
-                width: "120px",
-                height: "90px",
-                borderRadius: "var(--radius-md)",
-                overflow: "hidden",
-                border: "1px solid var(--border-light)",
-                cursor: "pointer",
-                position: "relative",
-              }}
-              onClick={() => window.open(fig.local_path, '_blank')}
-            >
-              <img
-                src={fig.local_path}
-                alt={fig.caption}
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.display = 'none';
-                }}
-              />
-              <div style={{
-                position: "absolute",
-                bottom: 0,
-                left: 0,
-                right: 0,
-                padding: "4px 6px",
-                background: "rgba(0,0,0,0.6)",
-                fontSize: "0.625rem",
-                color: "white",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}>
-                {fig.caption}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
+  useEffect(() => {
+    setFigures(initialFigures);
+    setFigureAttempted(initialFigures.length > 0);
+  }, [paper.id, initialFigures]);
+
+  const loadFigures = async () => {
+    if (!meta.arxiv_id || loadingFigures) return;
+
+    setLoadingFigures(true);
+    setFigureAttempted(true);
+    try {
+      const result = await api.post<{ figures: PaperFigureAsset[] }>("/api/tools/arxiv/figures", {
+        arxiv_id: meta.arxiv_id,
+      });
+      setFigures(normalizePaperFigures(result.figures));
+    } catch (error) {
+      console.error("Failed to load follow-up paper figures:", error);
+    } finally {
+      setLoadingFigures(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!figureAttempted && canLoadFigures) {
+      void loadFigures();
+    }
+  }, [figureAttempted, canLoadFigures]);
+
+  const formatDate = (dateStr: string) => {
+    if (!dateStr) return "";
+    try {
+      const date = new Date(dateStr);
+      return date.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" });
+    } catch {
+      return dateStr;
+    }
   };
 
   return (
     <Card noPadding>
       <div style={{ padding: "20px 24px" }}>
-        {/* Header: Score + Title + Actions */}
         <div style={{ display: "flex", gap: "16px", marginBottom: "12px" }}>
-          {/* Score Badge */}
           <div
             style={{
               width: "48px",
@@ -1670,7 +1914,6 @@ function S2PaperCard({
             <span style={{ fontSize: "0.625rem", color: scoreColor, opacity: 0.8 }}>分</span>
           </div>
 
-          {/* Title & Meta */}
           <div style={{ flex: 1, minWidth: 0 }}>
             <a
               href={paper.source_url}
@@ -1700,7 +1943,12 @@ function S2PaperCard({
                   {authors.length > 3 && ` +${authors.length - 3}`}
                 </span>
               )}
-              {meta.year && (
+              {meta.published ? (
+                <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "4px" }}>
+                  <Calendar style={{ width: "12px", height: "12px" }} />
+                  {formatDate(meta.published)}
+                </span>
+              ) : meta.year && (
                 <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "4px" }}>
                   <Calendar style={{ width: "12px", height: "12px" }} />
                   {meta.year}
@@ -1727,45 +1975,8 @@ function S2PaperCard({
               </span>
             </div>
           </div>
-
-          {/* Actions */}
-          <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
-            {hasLiteraturePath && (
-              <button
-                onClick={onSave}
-                disabled={isSaved}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  padding: "8px 14px",
-                  borderRadius: "var(--radius-full)",
-                  background: isSaved ? "rgba(16, 185, 129, 0.1)" : "var(--color-primary)",
-                  border: isSaved ? "1px solid #10B981" : "none",
-                  color: isSaved ? "#10B981" : "white",
-                  fontSize: "0.8125rem",
-                  fontWeight: 600,
-                  cursor: isSaved ? "default" : "pointer",
-                  transition: "all 0.2s ease",
-                }}
-              >
-                {isSaved ? (
-                  <>
-                    <Check style={{ width: "14px", height: "14px" }} />
-                    已保存
-                  </>
-                ) : (
-                  <>
-                    <Save style={{ width: "14px", height: "14px" }} />
-                    保存
-                  </>
-                )}
-              </button>
-            )}
-          </div>
         </div>
 
-        {/* Tags */}
         {paper.tags?.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "12px" }}>
             {paper.tags.map((tag) => (
@@ -1786,7 +1997,6 @@ function S2PaperCard({
           </div>
         )}
 
-        {/* Contribution Highlight */}
         {meta.contribution && (
           <div
             style={{
@@ -1806,7 +2016,137 @@ function S2PaperCard({
           </div>
         )}
 
-        {/* Summary / Abstract */}
+        {hasFigures && <PaperFigureStrip figures={figures} fallbackUrl={paperLink} />}
+
+        {(meta["pdf-url"] || meta.arxiv_url || hasLiteraturePath || canLoadFigures) && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "12px",
+              flexWrap: "wrap",
+              marginBottom: "16px",
+            }}
+          >
+            {meta["pdf-url"] && (
+              <a
+                href={meta["pdf-url"]}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  padding: "8px 16px",
+                  borderRadius: "var(--radius-md)",
+                  background: "var(--color-primary)",
+                  color: "white",
+                  fontSize: "0.8125rem",
+                  fontWeight: 600,
+                  textDecoration: "none",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                <Download style={{ width: "14px", height: "14px" }} />
+                PDF
+              </a>
+            )}
+            {meta.arxiv_url && (
+              <a
+                href={meta.arxiv_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  padding: "8px 16px",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: "var(--text-main)",
+                  fontSize: "0.8125rem",
+                  fontWeight: 600,
+                  textDecoration: "none",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                <ExternalLink style={{ width: "14px", height: "14px" }} />
+                arXiv
+              </a>
+            )}
+            {canLoadFigures && (
+              <button
+                onClick={() => void loadFigures()}
+                disabled={loadingFigures}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  padding: "8px 16px",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--border-light)",
+                  background: hasFigures ? "var(--bg-hover)" : "var(--bg-card)",
+                  color: hasFigures ? "var(--text-muted)" : "var(--text-main)",
+                  fontSize: "0.8125rem",
+                  fontWeight: 600,
+                  cursor: loadingFigures ? "not-allowed" : "pointer",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                {loadingFigures ? (
+                  <>
+                    <span className="animate-spin">⟳</span>
+                    加载图片...
+                  </>
+                ) : (
+                  <>
+                    <ImageIcon style={{ width: "14px", height: "14px" }} />
+                    {hasFigures ? `已加载 ${figureCount} 张图` : "获取图片"}
+                  </>
+                )}
+              </button>
+            )}
+            {hasLiteraturePath && (
+              <button
+                onClick={onSave}
+                disabled={isSaved || isSaving}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  padding: "8px 16px",
+                  borderRadius: "var(--radius-md)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: isSaved ? "#10B981" : "var(--color-primary)",
+                  fontSize: "0.8125rem",
+                  fontWeight: 600,
+                  cursor: isSaved || isSaving ? "not-allowed" : "pointer",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                {isSaving ? (
+                  <>
+                    <span className="animate-spin">⟳</span>
+                    保存中...
+                  </>
+                ) : isSaved ? (
+                  <>
+                    <Check style={{ width: "14px", height: "14px" }} />
+                    已保存到文献库
+                  </>
+                ) : (
+                  <>
+                    <Save style={{ width: "14px", height: "14px" }} />
+                    保存到文献库
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        )}
+
         <div>
           <p
             style={{
@@ -1823,9 +2163,7 @@ function S2PaperCard({
             {expanded && meta.abstract ? meta.abstract : paper.summary}
           </p>
         </div>
-        {renderFiguresGallery()}
 
-        {/* Expand/Collapse */}
         {(meta.abstract || paper.summary.length > 100) && (
           <button
             onClick={() => setExpanded(!expanded)}

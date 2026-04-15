@@ -1,6 +1,6 @@
 from .types import Item, Card, FeedbackAction
 from .base import Module
-from .tools import claude, claude_json, fetch_rss, download_audio, transcribe
+from .tools import agent, agent_json, claude, claude_json, fetch_rss, download_audio, transcribe
 
 # 小红书主动工具
 from abo.tools.xiaohongshu import (
@@ -11,6 +11,7 @@ from abo.tools.xiaohongshu import (
 
 __all__ = [
     "Module", "Item", "Card", "FeedbackAction",
+    "agent", "agent_json",
     "claude", "claude_json",
     "fetch_rss", "download_audio", "transcribe",
     # 小红书工具

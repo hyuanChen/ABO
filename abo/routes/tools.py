@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
@@ -29,6 +29,7 @@ from abo.tools.bilibili import (
     bilibili_verify_sessdata,
 )
 from abo.tools.bilibili_crawler import (
+    analyze_saved_bilibili_favorites,
     crawl_selected_favorites_to_vault,
     crawl_bilibili_to_vault,
     export_bilibili_cookies_auto,
@@ -44,6 +45,7 @@ from abo.tools.zhihu import (
 )
 from abo.tools.arxiv_api import arxiv_api_search
 from abo.config import get_abo_dir
+from abo.store.papers import PaperStore
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
 _XHS_ALBUM_TASKS: dict[str, dict] = {}
@@ -51,6 +53,7 @@ _XHS_ALBUM_ASYNC_TASKS: dict[str, asyncio.Task] = {}
 _XHS_TASKS: dict[str, dict] = {}
 _BILIBILI_TASKS: dict[str, dict] = {}
 _XHS_TASKS_PATH = get_abo_dir() / "xhs_tasks.json"
+_paper_store = PaperStore()
 
 XHS_CREATOR_GROUP_OPTIONS = [
     {"value": "research", "label": "科研学习"},
@@ -89,13 +92,13 @@ def _mask_cookie_fields(payload: dict) -> dict:
 
 def _summarize_xhs_task_input(kind: str, payload: dict) -> str:
     if kind == "search":
-        return f"关键词: {payload.get('keyword', '')} | 排序: {payload.get('sort_by', 'likes')} | 最低点赞: {payload.get('min_likes', 0)}"
+        return f"关键词扫描: {payload.get('keyword', '')} | 排序: {payload.get('sort_by', 'likes')} | 最低点赞: {payload.get('min_likes', 0)}"
     if kind == "trends":
         return f"趋势关键词: {payload.get('keyword', '')}"
     if kind == "comments":
         return f"评论目标: {payload.get('note_id', '') or payload.get('note_url', '')} | 数量: {payload.get('max_comments', 50)}"
     if kind == "following-feed":
-        return f"关注流关键词: {', '.join(payload.get('keywords', []))} | 上限: {payload.get('max_notes', 50)}"
+        return f"关注流扫描: {', '.join(payload.get('keywords', []))} | 上限: {payload.get('max_notes', 50)}"
     if kind == "crawl-note":
         return f"单条入库: {payload.get('url', '')}"
     if kind == "crawl-batch":
@@ -168,6 +171,9 @@ class SearchRequest(BaseModel):
     min_likes: int = 100
     sort_by: str = "likes"  # likes, time
     cookie: Optional[str] = None  # 小红书登录 Cookie
+    use_extension: bool = True
+    extension_port: int = 9334
+    dedicated_window_mode: bool = False
 
 
 class CommentsRequest(BaseModel):
@@ -176,6 +182,12 @@ class CommentsRequest(BaseModel):
     max_comments: int = 50
     sort_by: str = "likes"
     cookie: Optional[str] = None
+    use_extension: bool = True
+    extension_port: int = 9334
+    dedicated_window_mode: bool = False
+    load_all_comments: bool = True
+    click_more_replies: bool = True
+    max_replies_threshold: int = 10
 
 
 class XHSCrawlNoteRequest(BaseModel):
@@ -187,6 +199,9 @@ class XHSCrawlNoteRequest(BaseModel):
     include_comments: bool = False
     include_sub_comments: bool = False
     comments_limit: int = 20
+    use_extension: bool = True
+    extension_port: int = 9334
+    dedicated_window_mode: bool = False
     use_cdp: bool = True
     cdp_port: int = 9222
     vault_path: Optional[str] = None
@@ -201,6 +216,9 @@ class XHSCrawlBatchRequest(BaseModel):
     include_comments: bool = False
     include_sub_comments: bool = False
     comments_limit: int = 20
+    use_extension: bool = True
+    extension_port: int = 9334
+    dedicated_window_mode: bool = False
     use_cdp: bool = True
     cdp_port: int = 9222
     vault_path: Optional[str] = None
@@ -234,6 +252,9 @@ class XHSAlbumListRequest(BaseModel):
     cdp_port: int = 9222
     background: bool = True
     allow_cdp_fallback: bool = False
+    use_extension: bool = True
+    extension_port: int = 9334
+    dedicated_window_mode: bool = False
     vault_path: Optional[str] = None
 
 
@@ -251,8 +272,17 @@ class XHSAlbumCrawlRequest(BaseModel):
     before_date: Optional[str] = None
     recent_days: Optional[int] = None
     crawl_mode: str = "incremental"
-    crawl_delay_seconds: float = 8.0
+    crawl_delay_seconds: float = 12.0
+    batch_size: Optional[int] = None
+    batch_pause_seconds: float = 0.0
+    use_extension: bool = True
+    extension_port: int = 9334
+    dedicated_window_mode: bool = False
     vault_path: Optional[str] = None
+
+
+class XHSBrowserCookieRequest(BaseModel):
+    browser: Optional[str] = None
 
 
 class XHSAuthorCandidatesRequest(BaseModel):
@@ -318,6 +348,9 @@ async def api_xiaohongshu_search(req: SearchRequest):
             min_likes=req.min_likes,
             sort_by=req.sort_by,
             cookie=req.cookie or load_config().get("xiaohongshu_cookie"),
+            use_extension=req.use_extension,
+            extension_port=req.extension_port,
+            dedicated_window_mode=req.dedicated_window_mode,
         )
         return result
     except ValueError as e:
@@ -343,6 +376,9 @@ class FollowingFeedRequest(BaseModel):
     cookie: Optional[str] = None
     keywords: list[str]
     max_notes: int = 50
+    use_extension: bool = True
+    extension_port: int = 9334
+    dedicated_window_mode: bool = False
 
 
 @router.post("/xiaohongshu/following-feed")
@@ -357,6 +393,9 @@ async def api_xiaohongshu_following_feed(req: FollowingFeedRequest):
             cookie=req.cookie or load_config().get("xiaohongshu_cookie"),
             keywords=req.keywords,
             max_notes=req.max_notes,
+            use_extension=req.use_extension,
+            extension_port=req.extension_port,
+            dedicated_window_mode=req.dedicated_window_mode,
         )
         return {
             "total_found": len(notes),
@@ -395,7 +434,7 @@ async def set_xiaohongshu_config(config: CookieConfig):
 
 
 @router.post("/xiaohongshu/config/from-browser")
-async def get_cookie_from_browser():
+async def get_cookie_from_browser(req: Optional[XHSBrowserCookieRequest] = Body(default=None)):
     """从本地浏览器自动获取小红书 Cookie。优先使用 CDP，失败再尝试系统浏览器 Cookie。"""
     async def get_cookies_from_cdp(port: int = 9222) -> list[dict]:
         import httpx
@@ -426,7 +465,7 @@ async def get_cookie_from_browser():
             if "xiaohongshu.com" in str(item.get("domain", ""))
         ]
 
-    def get_default_browser_order() -> list[str]:
+    def get_default_browser_order(preferred: str | None = None) -> list[str]:
         import subprocess
 
         mapping = {
@@ -437,7 +476,10 @@ async def get_cookie_from_browser():
             "com.brave.browser": "brave",
             "com.brave.Browser": "brave",
         }
+        preferred_name = (preferred or "").strip().lower()
         order: list[str] = []
+        if preferred_name and preferred_name not in {"default", "auto"}:
+            order.append(preferred_name)
         try:
             bundle_id = subprocess.check_output(
                 ["osascript", "-e", "id of app (path to default web browser)"],
@@ -455,12 +497,12 @@ async def get_cookie_from_browser():
                 order.append(name)
         return order
 
-    def get_cookies_from_browser_cookie3() -> tuple[list[dict], str]:
+    def get_cookies_from_browser_cookie3(preferred: str | None = None) -> tuple[list[dict], str]:
         import browser_cookie3
 
         cookie_list: list[dict] = []
         loaders = []
-        for name in get_default_browser_order():
+        for name in get_default_browser_order(preferred):
             loader = getattr(browser_cookie3, name, None)
             if loader:
                 loaders.append((name, loader))
@@ -505,7 +547,7 @@ async def get_cookie_from_browser():
             source = "CDP 浏览器"
         except Exception as e:
             errors.append(f"CDP: {e}")
-            cookie_list, source = get_cookies_from_browser_cookie3()
+            cookie_list, source = get_cookies_from_browser_cookie3(req.browser if req else None)
 
         if not cookie_list:
             return {
@@ -553,6 +595,12 @@ async def api_xiaohongshu_comments(req: CommentsRequest):
         max_comments=req.max_comments,
         sort_by=req.sort_by,
         cookie=req.cookie or load_config().get("xiaohongshu_cookie"),
+        use_extension=req.use_extension,
+        extension_port=req.extension_port,
+        dedicated_window_mode=req.dedicated_window_mode,
+        load_all_comments=req.load_all_comments,
+        click_more_replies=req.click_more_replies,
+        max_replies_threshold=req.max_replies_threshold,
     )
     return result
 
@@ -577,6 +625,9 @@ async def api_xiaohongshu_crawl_note(req: XHSCrawlNoteRequest):
             include_comments=req.include_comments,
             include_sub_comments=req.include_sub_comments,
             comments_limit=req.comments_limit,
+            use_extension=req.use_extension,
+            extension_port=req.extension_port,
+            dedicated_window_mode=req.dedicated_window_mode,
             use_cdp=req.use_cdp,
             cdp_port=req.cdp_port,
         )
@@ -609,6 +660,9 @@ async def api_xiaohongshu_crawl_batch(req: XHSCrawlBatchRequest):
                 include_comments=req.include_comments,
                 include_sub_comments=req.include_sub_comments,
                 comments_limit=req.comments_limit,
+                use_extension=req.use_extension,
+                extension_port=req.extension_port,
+                dedicated_window_mode=req.dedicated_window_mode,
                 use_cdp=req.use_cdp,
                 cdp_port=req.cdp_port,
             )
@@ -741,6 +795,9 @@ async def api_xiaohongshu_albums(req: XHSAlbumListRequest):
             cdp_port=req.cdp_port,
             background=req.background,
             allow_cdp_fallback=req.allow_cdp_fallback,
+            use_extension=req.use_extension,
+            extension_port=req.extension_port,
+            dedicated_window_mode=req.dedicated_window_mode,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -779,6 +836,9 @@ async def api_xiaohongshu_albums_start(req: XHSAlbumListRequest):
                 background=req.background,
                 allow_cdp_fallback=req.allow_cdp_fallback,
                 progress_callback=update_progress,
+                use_extension=req.use_extension,
+                extension_port=req.extension_port,
+                dedicated_window_mode=req.dedicated_window_mode,
             )
             _XHS_ALBUM_TASKS[task_id]["status"] = "completed"
             _XHS_ALBUM_TASKS[task_id]["stage"] = "专辑列表读取完成"
@@ -858,7 +918,12 @@ async def api_xiaohongshu_albums_crawl(req: XHSAlbumCrawlRequest):
                 recent_days=req.recent_days,
                 crawl_mode=req.crawl_mode,
                 crawl_delay_seconds=req.crawl_delay_seconds,
+                batch_size=req.batch_size,
+                batch_pause_seconds=req.batch_pause_seconds,
                 progress_callback=update_progress,
+                use_extension=req.use_extension,
+                extension_port=req.extension_port,
+                dedicated_window_mode=req.dedicated_window_mode,
             )
             _XHS_ALBUM_TASKS[task_id]["status"] = "completed"
             _XHS_ALBUM_TASKS[task_id]["stage"] = "全部完成"
@@ -1034,6 +1099,9 @@ async def api_xiaohongshu_search_start(req: SearchRequest):
                 min_likes=req.min_likes,
                 sort_by=req.sort_by,
                 cookie=req.cookie or load_config().get("xiaohongshu_cookie"),
+                use_extension=req.use_extension,
+                extension_port=req.extension_port,
+                dedicated_window_mode=req.dedicated_window_mode,
             )
             _update_xhs_task(task_id, status="completed", stage="搜索完成", result=result)
         except Exception as e:
@@ -1081,6 +1149,12 @@ async def api_xiaohongshu_comments_start(req: CommentsRequest):
                 max_comments=req.max_comments,
                 sort_by=req.sort_by,
                 cookie=req.cookie or load_config().get("xiaohongshu_cookie"),
+                use_extension=req.use_extension,
+                extension_port=req.extension_port,
+                dedicated_window_mode=req.dedicated_window_mode,
+                load_all_comments=req.load_all_comments,
+                click_more_replies=req.click_more_replies,
+                max_replies_threshold=req.max_replies_threshold,
             )
             _update_xhs_task(task_id, status="completed", stage="评论抓取完成", result=result)
         except Exception as e:
@@ -1106,6 +1180,9 @@ async def api_xiaohongshu_following_feed_start(req: FollowingFeedRequest):
                 cookie=req.cookie or load_config().get("xiaohongshu_cookie"),
                 keywords=req.keywords,
                 max_notes=req.max_notes,
+                use_extension=req.use_extension,
+                extension_port=req.extension_port,
+                dedicated_window_mode=req.dedicated_window_mode,
             )
             result = {
                 "total_found": len(notes),
@@ -1158,6 +1235,9 @@ async def api_xiaohongshu_crawl_note_start(req: XHSCrawlNoteRequest):
                 include_comments=req.include_comments,
                 include_sub_comments=req.include_sub_comments,
                 comments_limit=req.comments_limit,
+                use_extension=req.use_extension,
+                extension_port=req.extension_port,
+                dedicated_window_mode=req.dedicated_window_mode,
                 use_cdp=req.use_cdp,
                 cdp_port=req.cdp_port,
             )
@@ -1198,6 +1278,9 @@ async def api_xiaohongshu_crawl_batch_start(req: XHSCrawlBatchRequest):
                         include_comments=req.include_comments,
                         include_sub_comments=req.include_sub_comments,
                         comments_limit=req.comments_limit,
+                        use_extension=req.use_extension,
+                        extension_port=req.extension_port,
+                        dedicated_window_mode=req.dedicated_window_mode,
                         use_cdp=req.use_cdp,
                         cdp_port=req.cdp_port,
                     )
@@ -1288,6 +1371,12 @@ class BilibiliFollowedUpsCrawlRequest(BaseModel):
     max_count: int = 5000
 
 
+class BilibiliSmartGroupRequest(BaseModel):
+    sessdata: str
+    vault_path: Optional[str] = None
+    max_count: int = 5000
+
+
 class BilibiliVerifyRequest(BaseModel):
     sessdata: str
 
@@ -1336,6 +1425,8 @@ class BilibiliDynamicItem(BaseModel):
     dynamic_type: str
     pic: Optional[str] = None
     images: list[str] = []
+    bvid: str = ""
+    tags: list[str] = []
 
 
 class BilibiliSelectedDynamicsSaveRequest(BaseModel):
@@ -1428,6 +1519,122 @@ async def api_bilibili_followed_ups_crawl_progress(task_id: str):
     return task
 
 
+@router.post("/bilibili/followed-ups/smart-groups/start")
+async def api_bilibili_followed_ups_smart_groups_start(req: BilibiliSmartGroupRequest):
+    """根据本地 B 站收藏标签反推已关注 UP 的智能分组。"""
+    from abo.config import get_vault_path
+    from abo.main import _prefs
+
+    task_id = uuid.uuid4().hex
+    vault_path = req.vault_path or (str(get_vault_path()) if get_vault_path() else None)
+    _BILIBILI_TASKS[task_id] = {
+        "task_id": task_id,
+        "kind": "followed-up-smart-groups",
+        "status": "running",
+        "stage": "任务已创建",
+        "progress": 0,
+        "total_files": 0,
+        "processed_files": 0,
+        "matched_followed_count": 0,
+        "total_groups": 0,
+        "result": None,
+        "error": None,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+    def update_progress(payload: dict):
+        if task_id not in _BILIBILI_TASKS:
+            return
+        _BILIBILI_TASKS[task_id].update(payload)
+        _BILIBILI_TASKS[task_id]["updated_at"] = datetime.utcnow().isoformat()
+
+    async def runner():
+        try:
+            update_progress({"stage": "正在读取关注列表", "progress": 8})
+            followed = await bilibili_fetch_followed_ups(
+                sessdata=req.sessdata,
+                max_count=req.max_count,
+            )
+            update_progress(
+                {
+                    "stage": "正在分析本地收藏",
+                    "progress": 15,
+                    "total_followed_count": int(followed.get("total") or len(followed.get("ups") or [])),
+                }
+            )
+            result = await analyze_saved_bilibili_favorites(
+                vault_path=vault_path,
+                followed_ups=followed.get("ups") or [],
+                progress_callback=update_progress,
+            )
+
+            prefs = _prefs.all_data()
+            prefs.setdefault("modules", {})
+            module_prefs = prefs["modules"].setdefault("bilibili-tracker", {})
+            group_options = [
+                {"value": item.get("value"), "label": item.get("label")}
+                for item in result.get("group_options", [])
+                if item.get("value") and item.get("label")
+            ]
+            group_label_map = {item["value"]: item["label"] for item in group_options}
+            existing_selected_groups = [
+                item
+                for item in module_prefs.get("followed_up_groups", [])
+                if item in {option["value"] for option in group_options}
+            ]
+            existing_profiles = dict(module_prefs.get("creator_profiles", {}) or {})
+            merged_profiles = dict(result.get("profiles") or {})
+            for author_id, existing_profile in existing_profiles.items():
+                if not bool(existing_profile.get("manual_override")):
+                    continue
+                base_profile = dict(merged_profiles.get(author_id) or existing_profile or {})
+                manual_groups = [
+                    str(group).strip()
+                    for group in (existing_profile.get("smart_groups") or [])
+                    if str(group).strip()
+                ]
+                base_profile["manual_override"] = True
+                base_profile["smart_groups"] = manual_groups
+                base_profile["smart_group_labels"] = [
+                    group_label_map.get(group, group)
+                    for group in manual_groups
+                ]
+                merged_profiles[author_id] = base_profile
+
+            module_prefs["creator_profiles"] = merged_profiles
+            module_prefs["creator_group_options"] = group_options
+            module_prefs["followed_up_groups"] = existing_selected_groups
+            module_prefs.setdefault("followed_up_filter_mode", "and")
+            _prefs.update(prefs)
+
+            _BILIBILI_TASKS[task_id]["status"] = "completed"
+            _BILIBILI_TASKS[task_id]["stage"] = "智能分组完成"
+            _BILIBILI_TASKS[task_id]["progress"] = 100
+            _BILIBILI_TASKS[task_id]["matched_followed_count"] = int(result.get("matched_followed_count") or 0)
+            _BILIBILI_TASKS[task_id]["total_groups"] = len(group_options)
+            _BILIBILI_TASKS[task_id]["result"] = {
+                **result,
+                "group_options": result.get("group_options", []),
+            }
+            _BILIBILI_TASKS[task_id]["updated_at"] = datetime.utcnow().isoformat()
+        except Exception as e:
+            _BILIBILI_TASKS[task_id]["status"] = "failed"
+            _BILIBILI_TASKS[task_id]["stage"] = "智能分组失败"
+            _BILIBILI_TASKS[task_id]["error"] = str(e)
+            _BILIBILI_TASKS[task_id]["updated_at"] = datetime.utcnow().isoformat()
+
+    asyncio.create_task(runner())
+    return {"success": True, "task_id": task_id}
+
+
+@router.get("/bilibili/followed-ups/smart-groups/{task_id}")
+async def api_bilibili_followed_ups_smart_groups_progress(task_id: str):
+    task = _BILIBILI_TASKS.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="task not found")
+    return task
+
+
 @router.post("/bilibili/verify")
 async def api_bilibili_verify(req: BilibiliVerifyRequest):
     """验证 SESSDATA 是否有效"""
@@ -1463,7 +1670,7 @@ async def api_bilibili_save_selected_dynamics(req: BilibiliSelectedDynamicsSaveR
     try:
         if not req.dynamics:
             raise HTTPException(status_code=400, detail="未选择任何动态")
-        return save_selected_dynamics_to_vault(
+        return await save_selected_dynamics_to_vault(
             [item.model_dump() for item in req.dynamics],
             vault_path=req.vault_path,
         )
@@ -1744,9 +1951,9 @@ async def set_bilibili_config(config: CookieConfig):
 
 @router.post("/bilibili/config/from-browser")
 async def get_bilibili_cookie_from_browser():
-    """从本地 Chrome/Edge CDP 调试端口自动获取哔哩哔哩完整 Cookie"""
+    """从本地浏览器读取哔哩哔哩 Cookie；优先现有 CDP，失败后扫描浏览器 Cookie。"""
     try:
-        cookie_list = await export_bilibili_cookies_auto(port=9222)
+        cookie_list = await export_bilibili_cookies_auto(port=9222, auto_launch_browser=False)
 
         if not cookie_list:
             return {
@@ -1899,6 +2106,8 @@ async def api_arxiv_search(req: ArxivAPISearchRequest):
             sort_by=req.sort_by,
             sort_order=req.sort_order,
         )
+        for paper in papers:
+            _paper_store.upsert_from_payload(paper, source_module="arxiv-api")
         search_time_ms = (time.time() - start_time) * 1000
         return {
             "total": len(papers),
@@ -1932,6 +2141,11 @@ async def api_arxiv_figures(req: ArxivFiguresRequest):
     tool = ArxivAPITool()
     try:
         figures = await tool.fetch_figures(req.arxiv_id)
+        _paper_store.record_figures(
+            req.arxiv_id,
+            figures,
+            html_url=f"https://arxiv.org/html/{req.arxiv_id}",
+        )
         return {"figures": figures}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch figures: {str(e)}")
@@ -2040,6 +2254,23 @@ async def api_arxiv_save(req: ArxivSaveRequest):
     # 写入markdown文件
     async with aiofiles.open(md_file_path, "w", encoding="utf-8") as f:
         await f.write(md_content)
+
+    _paper_store.upsert_from_payload(
+        {
+            "id": req.arxiv_id,
+            "title": req.title,
+            "authors": req.authors,
+            "summary": req.summary,
+            "arxiv_url": req.arxiv_url,
+            "pdf_url": req.pdf_url,
+            "published": req.published,
+            "categories": [req.primary_category] if req.primary_category else [],
+            "figures": req.figures,
+            "literature_path": str(md_file_path),
+            "saved_to_literature": True,
+        },
+        source_module="arxiv-api",
+    )
 
     return {
         "success": True,

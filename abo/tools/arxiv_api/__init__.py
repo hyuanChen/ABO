@@ -14,6 +14,26 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["ArxivAPITool", "ArxivPaper", "arxiv_api_search"]
 
+_ARXIV_FIGURE_PATH_WITH_ID = re.compile(
+    r"^(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?/"
+)
+
+
+def resolve_arxiv_figure_url(arxiv_id: str, src: str) -> str:
+    """Normalize figure URLs extracted from arXiv HTML pages."""
+    raw = (src or "").strip()
+    if not raw or raw.startswith("data:"):
+        return ""
+    if raw.startswith(("http://", "https://")):
+        return raw
+    if raw.startswith("/"):
+        return f"https://arxiv.org{raw}"
+
+    normalized = raw.lstrip("./")
+    if _ARXIV_FIGURE_PATH_WITH_ID.match(normalized):
+        return f"https://arxiv.org/html/{normalized}"
+    return f"https://arxiv.org/html/{arxiv_id}/{normalized}"
+
 
 @dataclass
 class ArxivPaper:
@@ -36,12 +56,27 @@ class ArxivPaper:
 class ArxivAPITool:
     """Wrapper around the arxiv package for ABO integration"""
 
+    _last_request_time = 0.0
+
     def __init__(self):
         self.client = arxiv.Client(
             page_size=100,
             delay_seconds=3.0,
             num_retries=3
         )
+
+    async def _rate_limited_request(self, client: httpx.AsyncClient, url: str, timeout: int = 60) -> httpx.Response:
+        """Make a polite request to arXiv HTML endpoints."""
+        import time
+
+        min_interval = 3.0
+        elapsed = time.time() - ArxivAPITool._last_request_time
+        if elapsed < min_interval:
+            await asyncio.sleep(min_interval - elapsed)
+
+        resp = await client.get(url, headers={"User-Agent": "ABO-arXiv-API/1.0"}, timeout=timeout)
+        ArxivAPITool._last_request_time = time.time()
+        return resp
 
     def _build_query(
         self,
@@ -166,7 +201,7 @@ class ArxivAPITool:
 
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                resp = await client.get(html_url, headers={"User-Agent": "ABO-arXiv-API/1.0"}, timeout=15)
+                resp = await self._rate_limited_request(client, html_url, timeout=15)
 
             if resp.status_code != 200:
                 return figures
@@ -179,7 +214,7 @@ class ArxivAPITool:
             found_urls = set()
             img_matches = list(re.finditer(img_pattern, html, re.IGNORECASE))
 
-            for i, match in enumerate(img_matches[:8]):  # Limit to first 8 images
+            for i, match in enumerate(img_matches):
                 try:
                     src = match.group(1)
                     if not src:
@@ -191,18 +226,15 @@ class ArxivAPITool:
                     alt = alt_match.group(1) if alt_match else ""
 
                     # Skip non-figure images
-                    if any(skip in src.lower() for skip in ['icon', 'logo', 'button', 'spacer', 'avatar']):
+                    src_lower = src.lower()
+                    if src_lower.startswith("data:"):
+                        continue
+                    if any(skip in src_lower for skip in ['icon', 'logo', 'button', 'spacer', 'avatar']):
                         continue
 
-                    # Make absolute URL
-                    if src.startswith('/'):
-                        src = f"https://arxiv.org{src}"
-                    elif not src.startswith('http'):
-                        # Handle relative paths - arxiv HTML uses paths like "2604.01216v1/x1.png"
-                        if src.startswith(arxiv_id + '/'):
-                            src = f"https://arxiv.org/html/{src}"
-                        else:
-                            src = f"https://arxiv.org/html/{arxiv_id}/{src}"
+                    src = resolve_arxiv_figure_url(arxiv_id, src)
+                    if not src:
+                        continue
 
                     if src in found_urls:
                         continue
@@ -223,6 +255,8 @@ class ArxivAPITool:
                         'is_method': is_method_figure,
                         'type': 'img'
                     })
+                    if len(figures) >= 8:
+                        break
                 except Exception:
                     continue
 

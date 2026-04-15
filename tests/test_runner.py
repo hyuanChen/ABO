@@ -4,6 +4,7 @@ from abo.runtime.runner import ModuleRunner
 from abo.sdk.base import Module
 from abo.sdk.types import Item, Card
 from abo.store.cards import CardStore
+from abo.store.papers import PaperStore
 from abo.preferences.engine import PreferenceEngine
 from abo.runtime.broadcaster import Broadcaster
 
@@ -91,6 +92,36 @@ class ScoredModule(Module):
                 source_url="http://test.com/3",
                 obsidian_path="Test/item3.md",
             ),
+        ]
+
+
+class PaperModule(Module):
+    id = "paper-module"
+    name = "Paper Module"
+    schedule = "0 8 * * *"
+
+    async def fetch(self):
+        return [Item(id="2604.00001", raw={})]
+
+    async def process(self, items, prefs):
+        return [
+            Card(
+                id="2604.00001",
+                title="Follow-up Paper",
+                summary="Short summary",
+                score=0.9,
+                tags=["robotics", "follow-up"],
+                source_url="https://arxiv.org/abs/2604.00001",
+                obsidian_path="Literature/FollowUps/follow-up-paper.md",
+                metadata={
+                    "abo-type": "semantic-scholar-paper",
+                    "authors": ["Test Author"],
+                    "abstract": "Full abstract",
+                    "arxiv_id": "2604.00001",
+                    "paper_id": "s2-paper",
+                    "citation_count": 12,
+                },
+            )
         ]
 
 
@@ -205,3 +236,27 @@ async def test_runner_respects_max_cards(tmp_path, monkeypatch):
     # Verify only 2 vault files were created
     vault_files = list((vault_path / "Test").glob("*.md")) if (vault_path / "Test").exists() else []
     assert len(vault_files) == 2, f"Expected 2 vault files, got {len(vault_files)}"
+
+
+@pytest.mark.anyio
+async def test_runner_persists_normalized_paper_records(tmp_path):
+    db_path = tmp_path / "cards.db"
+    paper_db_path = tmp_path / "papers.db"
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+
+    store = CardStore(db_path=db_path)
+    paper_store = PaperStore(db_path=paper_db_path)
+    prefs = PreferenceEngine()
+    broadcaster = Broadcaster()
+
+    runner = ModuleRunner(store, prefs, broadcaster, vault_path=vault_path, paper_store=paper_store)
+
+    count = await runner.run(PaperModule())
+
+    assert count == 1
+    record = paper_store.get("arxiv:2604.00001")
+    assert record is not None
+    assert record["title"] == "Follow-up Paper"
+    assert record["source_modules"] == ["paper-module"]
+    assert record["citation_count"] == 12

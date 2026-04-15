@@ -19,6 +19,12 @@ from typing import Optional
 
 import httpx
 
+from abo.tools.bilibili_video_meta import (
+    extract_bvid,
+    fetch_bilibili_video_metadata,
+    merge_tags,
+)
+
 
 @dataclass
 class BiliDynamic:
@@ -34,10 +40,14 @@ class BiliDynamic:
     dynamic_type: str = "text"  # video, image, text, article
     images: list = None
     pic: str = ""  # 视频封面
+    bvid: str = ""
+    tags: list[str] = None
 
     def __post_init__(self):
         if self.images is None:
             self.images = []
+        if self.tags is None:
+            self.tags = []
 
 
 @dataclass
@@ -74,6 +84,7 @@ class BilibiliToolAPI:
         self.sessdata = sessdata
         self.timeout = timeout
         self.client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+        self._video_meta_cache: dict[str, dict] = {}
 
     def _build_headers(self, referer: str = "https://t.bilibili.com/") -> dict[str, str]:
         return {
@@ -181,6 +192,8 @@ class BilibiliToolAPI:
                 dynamic = self._parse_polymer_item(item, keywords)
                 if not dynamic:
                     continue
+                if dynamic.dynamic_type == "video":
+                    dynamic = await self._enrich_video_dynamic(dynamic)
                 if dynamic.published_at and dynamic.published_at < cutoff:
                     continue
 
@@ -215,6 +228,42 @@ class BilibiliToolAPI:
         all_dynamics.sort(key=lambda x: x.published_at or datetime.min, reverse=True)
         print(f"[bilibili-tool] Total: {len(all_dynamics)} dynamics (after pagination)")
         return all_dynamics[:limit]
+
+    async def _enrich_video_dynamic(self, dynamic: BiliDynamic) -> BiliDynamic:
+        bvid = dynamic.bvid or extract_bvid(dynamic.url)
+        if not bvid:
+            return dynamic
+
+        if bvid not in self._video_meta_cache:
+            try:
+                self._video_meta_cache[bvid] = await fetch_bilibili_video_metadata(
+                    self.client,
+                    bvid=bvid,
+                    headers=self._build_headers(referer=dynamic.url or f"https://www.bilibili.com/video/{bvid}"),
+                    referer=dynamic.url or f"https://www.bilibili.com/video/{bvid}",
+                )
+            except Exception as exc:
+                print(f"[bilibili-tool] Failed to enrich video {bvid}: {exc}")
+                self._video_meta_cache[bvid] = {}
+
+        metadata = self._video_meta_cache.get(bvid) or {}
+        dynamic.bvid = metadata.get("bvid") or dynamic.bvid or bvid
+        dynamic.title = metadata.get("title") or dynamic.title
+        detail_desc = str(metadata.get("description") or "").strip()
+        if detail_desc and len(detail_desc) >= len(dynamic.content or ""):
+            dynamic.content = detail_desc
+        dynamic.author = metadata.get("author") or dynamic.author
+        dynamic.url = metadata.get("url") or dynamic.url
+        dynamic.pic = metadata.get("cover") or dynamic.pic
+        dynamic.tags = merge_tags(dynamic.tags, metadata.get("tags") or [])
+
+        pub_ts = metadata.get("published_at_ts")
+        if pub_ts and not dynamic.published_at:
+            try:
+                dynamic.published_at = datetime.fromtimestamp(int(pub_ts))
+            except Exception:
+                pass
+        return dynamic
 
     async def _get_self_mid(self) -> str:
         headers = {
@@ -418,6 +467,7 @@ class BilibiliToolAPI:
                 published_at=published_at,
                 dynamic_type="video",
                 pic=archive.get("cover") or "",
+                bvid=bvid,
             )
 
         if item_type in {"DYNAMIC_TYPE_DRAW", "DYNAMIC_TYPE_ARTICLE"}:
@@ -490,6 +540,7 @@ class BilibiliToolAPI:
             published_at=datetime.fromtimestamp(timestamp) if timestamp else None,
             dynamic_type="video",
             pic=card.get("pic", ""),
+            bvid=bvid,
         )
 
     def _parse_image_card(
@@ -617,7 +668,7 @@ async def bilibili_fetch_followed(
                     "id": d.id,
                     "dynamic_id": d.dynamic_id,
                     "title": d.title,
-                    "content": d.content[:500] if d.content else "",
+                    "content": d.content or "",
                     "author": d.author,
                     "author_id": d.author_id,
                     "url": d.url,
@@ -625,6 +676,8 @@ async def bilibili_fetch_followed(
                     "dynamic_type": d.dynamic_type,
                     "pic": d.pic,
                     "images": d.images,
+                    "bvid": d.bvid,
+                    "tags": d.tags,
                 }
                 for d in dynamics
             ],

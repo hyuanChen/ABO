@@ -4,6 +4,9 @@ export interface SearchRequest {
   min_likes?: number;
   sort_by?: 'likes' | 'time';
   cookie?: string;
+  use_extension?: boolean;
+  extension_port?: number;
+  dedicated_window_mode?: boolean;
 }
 
 export interface CookieConfigResponse {
@@ -32,6 +35,10 @@ export interface BrowserCookieResponse {
   message?: string;
   error?: string;
   debug?: string[];
+}
+
+export interface BrowserCookieRequest {
+  browser?: string;
 }
 
 export interface SearchResponse {
@@ -69,12 +76,19 @@ export interface CommentsRequest {
   max_comments?: number;
   sort_by?: 'likes' | 'time';
   cookie?: string;
+  use_extension?: boolean;
+  extension_port?: number;
+  dedicated_window_mode?: boolean;
+  load_all_comments?: boolean;
+  click_more_replies?: boolean;
+  max_replies_threshold?: number;
 }
 
 export interface CommentsResponse {
   note_id: string;
   total_comments: number;
   sort_by: string;
+  strategy?: string;
   comments: {
     id: string;
     author: string;
@@ -121,6 +135,9 @@ export interface CrawlNoteRequest {
   include_comments?: boolean;
   include_sub_comments?: boolean;
   comments_limit?: number;
+  use_extension?: boolean;
+  extension_port?: number;
+  dedicated_window_mode?: boolean;
   use_cdp?: boolean;
   cdp_port?: number;
 }
@@ -133,7 +150,11 @@ export interface CrawlNoteResponse {
   url: string;
   markdown_path: string;
   xhs_dir: string;
+  used_extension: boolean;
   used_cdp: boolean;
+  detail_strategy?: string;
+  media_strategy?: string;
+  comment_strategy?: string | null;
   warnings: string[];
   remote_resources: {
     images: string[];
@@ -159,8 +180,44 @@ export interface CrawlBatchRequest {
   include_comments?: boolean;
   include_sub_comments?: boolean;
   comments_limit?: number;
+  use_extension?: boolean;
+  extension_port?: number;
+  dedicated_window_mode?: boolean;
   use_cdp?: boolean;
   cdp_port?: number;
+}
+
+export interface XHSAlbumListRequest {
+  cookie?: string;
+  cdp_port?: number;
+  background?: boolean;
+  allow_cdp_fallback?: boolean;
+  use_extension?: boolean;
+  extension_port?: number;
+  dedicated_window_mode?: boolean;
+  vault_path?: string;
+}
+
+export interface XHSAlbumCrawlRequest {
+  albums: Array<Record<string, unknown>>;
+  cookie?: string;
+  include_images?: boolean;
+  include_video?: boolean;
+  include_live_photo?: boolean;
+  include_comments?: boolean;
+  include_sub_comments?: boolean;
+  comments_limit?: number;
+  cdp_port?: number;
+  max_notes_per_album?: number;
+  before_date?: string;
+  recent_days?: number;
+  crawl_mode?: "incremental" | "full";
+  batch_size?: number;
+  batch_pause_seconds?: number;
+  use_extension?: boolean;
+  extension_port?: number;
+  dedicated_window_mode?: boolean;
+  vault_path?: string;
 }
 
 export interface CrawlBatchResponse {
@@ -306,10 +363,11 @@ export async function xiaohongshuSaveConfig(req: CookieSaveRequest): Promise<Coo
   return res.json();
 }
 
-export async function xiaohongshuGetCookieFromBrowser(): Promise<BrowserCookieResponse> {
+export async function xiaohongshuGetCookieFromBrowser(req?: BrowserCookieRequest): Promise<BrowserCookieResponse> {
   const res = await fetch(`${API_BASE}/xiaohongshu/config/from-browser`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req || {}),
   });
   if (!res.ok) throw new Error('Failed to get cookie from browser');
   return res.json();
@@ -433,7 +491,14 @@ export const xiaohongshuStartTrendsTask = (payload: TrendsRequest) =>
 export const xiaohongshuStartCommentsTask = (payload: CommentsRequest) =>
   startTask("/xiaohongshu/comments/start", payload);
 
-export const xiaohongshuStartFollowingFeedTask = (payload: { cookie?: string; keywords: string[]; max_notes?: number }) =>
+export const xiaohongshuStartFollowingFeedTask = (payload: {
+  cookie?: string;
+  keywords: string[];
+  max_notes?: number;
+  use_extension?: boolean;
+  extension_port?: number;
+  dedicated_window_mode?: boolean;
+}) =>
   startTask("/xiaohongshu/following-feed/start", payload);
 
 export const xiaohongshuStartCrawlNoteTask = (payload: CrawlNoteRequest) =>

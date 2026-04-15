@@ -1,5 +1,5 @@
 """
-Wiki 摘录构建器 — 使用 Claude CLI 将源材料提炼到 Wiki 知识库。
+Wiki 摘录构建器 — 使用 Agent CLI 将源材料提炼到 Wiki 知识库。
 """
 import json
 import re
@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from .store import WikiStore
-from ..claude_bridge.runner import batch_call
+from ..sdk.tools import agent
 
 
 def _slugify(text: str) -> str:
@@ -19,7 +19,7 @@ def _slugify(text: str) -> str:
 
 
 def _extract_json(text: str) -> Optional[Union[dict, list]]:
-    """从 Claude 响应中提取 JSON（兼容 markdown 代码块）。"""
+    """从 Agent 响应中提取 JSON（兼容 markdown 代码块）。"""
     m = re.search(r"```(?:json)?\s*([\s\S]+?)```", text)
     if m:
         try:
@@ -40,7 +40,7 @@ def _extract_json(text: str) -> Optional[Union[dict, list]]:
 
 
 class WikiBuilder:
-    """使用 Claude CLI 将源材料摘录到 Wiki 知识库。"""
+    """使用 Agent CLI 将源材料摘录到 Wiki 知识库。"""
 
     @staticmethod
     async def ingest_card(
@@ -92,17 +92,17 @@ class WikiBuilder:
         )
 
         try:
-            response = await batch_call(prompt)
+            response = await agent(prompt)
             data = _extract_json(response)
         except Exception as e:
             WikiStore.append_log(
-                vault_path, wiki_type, "ingest 失败", f"Claude 调用异常: {e}"
+                vault_path, wiki_type, "ingest 失败", f"Agent 调用异常: {e}"
             )
             return []
 
         if not data or not isinstance(data, dict):
             WikiStore.append_log(
-                vault_path, wiki_type, "ingest 失败", "Claude 返回格式无法解析"
+                vault_path, wiki_type, "ingest 失败", "Agent 返回格式无法解析"
             )
             return []
 
@@ -179,7 +179,7 @@ class WikiBuilder:
         )
 
         try:
-            response = await batch_call(prompt)
+            response = await agent(prompt)
             data = _extract_json(response)
         except Exception as e:
             WikiStore.append_log(vault_path, wiki_type, "ingest 文本失败", str(e))
@@ -213,7 +213,7 @@ class WikiBuilder:
 
     @staticmethod
     async def lint(vault_path: Path, wiki_type: str) -> dict:
-        """使用 Claude 检查 Wiki 健康状况。"""
+        """使用 Agent 检查 Wiki 健康状况。"""
         WikiStore.ensure_structure(vault_path, wiki_type)
         pages = WikiStore.list_pages(vault_path, wiki_type)
 
@@ -262,13 +262,13 @@ class WikiBuilder:
         )
 
         try:
-            response = await batch_call(prompt)
+            response = await agent(prompt)
             data = _extract_json(response)
         except Exception as e:
-            return {"status": "error", "message": f"Claude 调用失败: {e}", "issues": []}
+            return {"status": "error", "message": f"Agent 调用失败: {e}", "issues": []}
 
         if not data or not isinstance(data, dict):
-            return {"status": "error", "message": "Claude 返回格式无法解析", "issues": []}
+            return {"status": "error", "message": "Agent 返回格式无法解析", "issues": []}
 
         WikiStore.append_log(
             vault_path, wiki_type, "健康检查",

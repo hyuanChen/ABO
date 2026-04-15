@@ -203,6 +203,23 @@ interface AboStore {
   setArxivOrKeywords: (keywords: string) => void;
   appendArxivAndPaper: (paper: ArxivPaper) => void;
   appendArxivOrPaper: (paper: ArxivPaper) => void;
+  arxivTrackerActiveTab: "search" | "followups" | "monitors";
+  setArxivTrackerActiveTab: (tab: "search" | "followups" | "monitors") => void;
+  semanticScholarPapers: ArxivPaper[];
+  semanticScholarCrawling: boolean;
+  semanticScholarProgress: ArxivCrawlProgress | null;
+  semanticScholarQuery: string;
+  semanticScholarMaxResultsInput: string;
+  semanticScholarDaysBackInput: string;
+  semanticScholarSortBy: "recency" | "citation_count";
+  setSemanticScholarPapers: (papers: ArxivPaper[]) => void;
+  setSemanticScholarCrawling: (crawling: boolean) => void;
+  setSemanticScholarProgress: (progress: ArxivCrawlProgress | null) => void;
+  setSemanticScholarQuery: (query: string) => void;
+  setSemanticScholarMaxResultsInput: (value: string) => void;
+  setSemanticScholarDaysBackInput: (value: string) => void;
+  setSemanticScholarSortBy: (sortBy: "recency" | "citation_count") => void;
+  appendSemanticScholarPaper: (paper: ArxivPaper) => void;
 
   // Showcase Mode
   showcaseMode: boolean;
@@ -313,6 +330,24 @@ export const useStore = create<AboStore>((set) => ({
     set((s) => ({ arxivAndPapers: [...s.arxivAndPapers, paper] })),
   appendArxivOrPaper: (paper) =>
     set((s) => ({ arxivOrPapers: [...s.arxivOrPapers, paper] })),
+  arxivTrackerActiveTab: "followups",
+  setArxivTrackerActiveTab: (arxivTrackerActiveTab) => set({ arxivTrackerActiveTab }),
+  semanticScholarPapers: [],
+  semanticScholarCrawling: false,
+  semanticScholarProgress: null,
+  semanticScholarQuery: "",
+  semanticScholarMaxResultsInput: "",
+  semanticScholarDaysBackInput: "",
+  semanticScholarSortBy: "recency",
+  setSemanticScholarPapers: (semanticScholarPapers) => set({ semanticScholarPapers }),
+  setSemanticScholarCrawling: (semanticScholarCrawling) => set({ semanticScholarCrawling }),
+  setSemanticScholarProgress: (semanticScholarProgress) => set({ semanticScholarProgress }),
+  setSemanticScholarQuery: (semanticScholarQuery) => set({ semanticScholarQuery }),
+  setSemanticScholarMaxResultsInput: (semanticScholarMaxResultsInput) => set({ semanticScholarMaxResultsInput }),
+  setSemanticScholarDaysBackInput: (semanticScholarDaysBackInput) => set({ semanticScholarDaysBackInput }),
+  setSemanticScholarSortBy: (semanticScholarSortBy) => set({ semanticScholarSortBy }),
+  appendSemanticScholarPaper: (paper) =>
+    set((s) => ({ semanticScholarPapers: [...s.semanticScholarPapers, paper] })),
 
   // Showcase Mode (persisted to localStorage)
   showcaseMode: localStorage.getItem("abo-showcase") === "true",

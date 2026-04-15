@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from abo.sdk import Module, Item, Card, claude_json
+from abo.sdk import Module, Item, Card, agent_json
 
 
 class FolderMonitor(Module):
@@ -71,7 +71,7 @@ class FolderMonitor(Module):
                 f'"type":"paper|report|notes|other","tags":["<tag1>","<tag2>"]}}\n\n'
                 f"文件名：{p['filename']}\n\n内容（前3000字）：{p['text']}"
             )
-            result = await claude_json(prompt, prefs=prefs)
+            result = await agent_json(prompt, prefs=prefs)
 
             date_str = datetime.now().strftime("%Y-%m-%d")
             safe_name = Path(p["filename"]).stem[:50].replace(" ", "-")

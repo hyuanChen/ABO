@@ -10,6 +10,8 @@ export interface BiliDynamic {
   dynamic_type: "video" | "image" | "text" | "article";
   pic: string;
   images: string[];
+  bvid: string;
+  tags: string[];
 }
 
 export interface FetchFollowedRequest {
@@ -70,6 +72,65 @@ export interface FollowedUpsCrawlTask {
   updated_at: string;
   error?: string | null;
   result?: FetchFollowedUpsResponse | null;
+}
+
+export interface BilibiliSmartGroupOption {
+  value: string;
+  label: string;
+  count?: number;
+  sample_authors?: string[];
+  sample_tags?: string[];
+}
+
+export interface BilibiliSmartGroupProfile {
+  author?: string;
+  author_id?: string;
+  matched_author?: string;
+  manual_override?: boolean;
+  favorite_note_count?: number;
+  smart_groups?: string[];
+  smart_group_labels?: string[];
+  latest_title?: string;
+  sample_titles?: string[];
+  sample_tags?: string[];
+  sample_folders?: string[];
+  source_summary?: string;
+}
+
+export interface BilibiliSmartGroupResult {
+  success: boolean;
+  bilibili_dir: string;
+  favorites_dir: string;
+  total_files: number;
+  total_notes: number;
+  total_authors: number;
+  matched_followed_count: number;
+  unmatched_author_count: number;
+  group_options: BilibiliSmartGroupOption[];
+  profiles: Record<string, BilibiliSmartGroupProfile>;
+  message: string;
+}
+
+export interface BilibiliSmartGroupTask {
+  task_id: string;
+  kind: "followed-up-smart-groups";
+  status: "running" | "completed" | "failed";
+  stage: string;
+  progress: number;
+  total_files: number;
+  processed_files: number;
+  matched_followed_count: number;
+  total_groups: number;
+  total_followed_count?: number;
+  updated_at: string;
+  error?: string | null;
+  result?: BilibiliSmartGroupResult | null;
+}
+
+export interface BilibiliSmartGroupRequest {
+  sessdata: string;
+  vault_path?: string;
+  max_count?: number;
 }
 
 export interface VerifySessdataRequest {
@@ -287,6 +348,32 @@ export async function bilibiliGetFollowedUpsCrawlTask(
   const res = await fetch(`${API_BASE}/bilibili/followed-ups/crawl/${taskId}`);
   if (!res.ok) {
     const error = await readError(res, "Read followed ups crawl progress failed");
+    throw new Error(error);
+  }
+  return res.json();
+}
+
+export async function bilibiliStartSmartGroupTask(
+  req: BilibiliSmartGroupRequest
+): Promise<StartFollowedUpsCrawlResponse> {
+  const res = await fetch(`${API_BASE}/bilibili/followed-ups/smart-groups/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const error = await readError(res, "Start smart grouping failed");
+    throw new Error(error);
+  }
+  return res.json();
+}
+
+export async function bilibiliGetSmartGroupTask(
+  taskId: string
+): Promise<BilibiliSmartGroupTask> {
+  const res = await fetch(`${API_BASE}/bilibili/followed-ups/smart-groups/${taskId}`);
+  if (!res.ok) {
+    const error = await readError(res, "Read smart grouping progress failed");
     throw new Error(error);
   }
   return res.json();

@@ -5,7 +5,6 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-import hashlib
 import os
 import re
 
@@ -24,6 +23,7 @@ from .profile.routes import router as profile_router, init_routes as init_profil
 from .rss import rss_router
 from .routes.tools import router as tools_router
 from .modules.routes import router as modules_router
+from .paper_tracking import normalize_followup_monitors, normalize_keyword_monitors
 from .runtime.broadcaster import broadcaster
 from .runtime.discovery import ModuleRegistry, start_watcher
 from .runtime.runner import ModuleRunner
@@ -31,6 +31,7 @@ from .runtime.scheduler import ModuleScheduler
 from .runtime.state import ModuleStateStore
 from .sdk.types import Card, FeedbackAction
 from .store.cards import CardStore
+from .store.papers import PaperStore
 from .subscription_store import get_subscription_store
 from .summary import DailySummaryGenerator, SummaryScheduler
 
@@ -38,6 +39,7 @@ from .summary import DailySummaryGenerator, SummaryScheduler
 _registry = ModuleRegistry()
 _state_store = ModuleStateStore()
 _card_store = CardStore()
+_paper_store = PaperStore()
 _prefs = PreferenceEngine()
 _scheduler: ModuleScheduler | None = None
 _activity_tracker: ActivityTracker | None = None
@@ -53,6 +55,28 @@ def _validate_cron(expr: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _extract_arxiv_id_from_paper_payload(paper: dict) -> str:
+    meta = paper.get("metadata", {}) or {}
+    candidates = [
+        paper.get("id", ""),
+        paper.get("arxiv_id", ""),
+        meta.get("arxiv_id", ""),
+        meta.get("arxiv-id", ""),
+        paper.get("source_url", ""),
+        meta.get("pdf-url", ""),
+        meta.get("html-url", ""),
+    ]
+    pattern = re.compile(r"([a-z\-]+/\d{7}|\d{4}\.\d{4,5})(?:v\d+)?", re.IGNORECASE)
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return str(paper.get("id", "unknown"))
 
 # ── 爬取任务取消控制 ────────────────────────────────────────────
 _crawl_cancel_flags: dict[str, bool] = {}  # session_id -> should_cancel
@@ -88,7 +112,7 @@ def _write_sdk_readme():
         "保存后立即热加载，无需重启。\n\n"
         "## 最小可用模块\n\n"
         "```python\n"
-        "from abo.sdk import Module, Item, Card, claude_json\n\n"
+        "from abo.sdk import Module, Item, Card, agent_json\n\n"
         "class MyModule(Module):\n"
         "    id       = 'my-module'\n"
         "    name     = '我的模块'\n"
@@ -98,7 +122,7 @@ def _write_sdk_readme():
         "    async def fetch(self):\n"
         "        return [Item(id='1', raw={'title': '示例', 'url': ''})]\n\n"
         "    async def process(self, items, prefs):\n"
-        "        result = await claude_json(\n"
+        "        result = await agent_json(\n"
         "            f'评分(1-10)并用中文总结：{items[0].raw[\"title\"]}',\n"
         "            prefs=prefs\n"
         "        )\n"
@@ -124,7 +148,7 @@ async def lifespan(app: FastAPI):
     vault_path = get_vault_path()
     _registry.load_all()
     _state_store.apply_to_registry(_registry)
-    runner = ModuleRunner(_card_store, _prefs, broadcaster, vault_path)
+    runner = ModuleRunner(_card_store, _prefs, broadcaster, vault_path, paper_store=_paper_store)
     _scheduler = ModuleScheduler(runner)
     _scheduler.start(_registry.enabled())
     start_watcher(_registry, lambda reg: _scheduler.reschedule(reg.enabled()))
@@ -273,6 +297,30 @@ async def get_prioritized_cards(
         unread_only=unread_only,
     )
     return {"cards": [c.to_dict() for c in cards]}
+
+
+@app.get("/api/papers")
+async def get_papers(
+    limit: int = 50,
+    offset: int = 0,
+    source_module: str | None = None,
+    saved_only: bool = False,
+):
+    papers = _paper_store.list(
+        limit=limit,
+        offset=offset,
+        source_module=source_module,
+        saved_only=saved_only,
+    )
+    return {"papers": papers}
+
+
+@app.get("/api/papers/{paper_key}")
+async def get_paper(paper_key: str):
+    paper = _paper_store.get(paper_key)
+    if not paper:
+        raise HTTPException(404, "Paper not found")
+    return paper
 
 
 class FeedbackReq(BaseModel):
@@ -832,6 +880,7 @@ async def crawl_arxiv_live(data: dict = None):
 
             paper_data = paper_to_card_data(paper)
             results.append(paper_data)
+            _paper_store.upsert_from_payload(paper_data, source_module="arxiv-tracker")
 
             await broadcaster.send_event({
                 "type": "crawl_progress",
@@ -956,7 +1005,8 @@ async def save_arxiv_to_literature(data: dict):
 
     # Build filename: Title first, then arXiv ID (e.g., "Paper Title-arxiv.2501.12345.md")
     title = paper.get("title", "untitled")
-    arxiv_id = paper.get("id", "unknown")
+    meta = paper.get("metadata", {})
+    arxiv_id = _extract_arxiv_id_from_paper_payload(paper)
     safe_title = "".join(c for c in title[:80] if c.isalnum() or c in " -_").strip()
     filename_base = f"{safe_title}-{arxiv_id}"
     filename = f"{filename_base}.md"
@@ -966,7 +1016,6 @@ async def save_arxiv_to_literature(data: dict):
     figures_dir = target_dir / f"{filename_base}.figures"
     figures_dir.mkdir(exist_ok=True)
 
-    meta = paper.get("metadata", {})
     pdf_url = meta.get("pdf-url", f"https://arxiv.org/pdf/{arxiv_id}.pdf")
 
     # Download PDF if requested
@@ -1082,8 +1131,12 @@ async def save_arxiv_to_literature(data: dict):
     try:
         from .store.cards import CardStore
         card_store = CardStore()
-        existing_card = card_store.get(arxiv_id)
-        if existing_card:
+        for card_id in dict.fromkeys([str(paper.get("id", "")), arxiv_id, f"arxiv-monitor:{arxiv_id}"]):
+            if not card_id:
+                continue
+            existing_card = card_store.get(card_id)
+            if not existing_card:
+                continue
             existing_card.metadata["local_figures"] = local_figures
             existing_card.metadata["figures_dir"] = str(figures_dir.relative_to(lit_path))
             existing_card.metadata["saved_to_literature"] = True
@@ -1093,6 +1146,22 @@ async def save_arxiv_to_literature(data: dict):
             card_store.save(existing_card)
     except Exception as e:
         print(f"Failed to update CardStore for {arxiv_id}: {e}")
+
+    enriched_paper = {
+        **paper,
+        "metadata": {
+            **meta,
+            "local_figures": local_figures,
+            "figures_dir": str(figures_dir.relative_to(lit_path)),
+            "saved_to_literature": True,
+            "literature_path": str(target_path.relative_to(lit_path)),
+            **({"pdf_path": pdf_path} if pdf_path else {}),
+        },
+        "path": str(target_path.relative_to(lit_path)),
+        "literature_path": str(target_path.relative_to(lit_path)),
+        "saved_to_literature": True,
+    }
+    _paper_store.upsert_from_payload(enriched_paper, source_module="arxiv-tracker")
 
     return {
         "ok": True,
@@ -1239,6 +1308,7 @@ async def crawl_arxiv_by_category(data: dict = None):
         for i, paper in enumerate(api_papers):
             paper_data = paper_to_card_data(paper)
             results.append(paper_data)
+            _paper_store.upsert_from_payload(paper_data, source_module="arxiv-tracker")
 
             await broadcaster.send_event({
                 "type": "crawl_progress",
@@ -1355,6 +1425,7 @@ async def fetch_semantic_scholar_follow_ups(data: dict):
                     "metadata": card.metadata,
                 }
                 results.append(paper_data)
+                _paper_store.upsert_from_payload(paper_data, source_module="semantic-scholar-tracker")
 
                 # Send partial result
                 await broadcaster.send_event({
@@ -1682,21 +1753,22 @@ async def save_s2_to_literature(data: dict):
     title = paper.get("title", "untitled")
     paper_id = meta.get("paper_id", "unknown")
 
-    # Get source paper info for naming (from top-level data, not metadata)
-    source_paper = data.get("source_paper", "Unknown")
-    source_short = re.sub(r'[^\w\s-]', '', source_paper)[:20].strip() or "Unknown"
-    folder_name = f"{source_short}_FollowUp"
+    # Prefer explicit override, then the follow-up paper metadata carried from tracker results.
+    source_paper = (
+        data.get("source_paper")
+        or meta.get("source_paper_title")
+        or paper.get("source_paper_title")
+        or "Unknown"
+    )
+    source_folder_name = re.sub(r'[^\w\s-]', '', source_paper)[:80].strip() or "Unknown"
 
-    # Build paper folder name: AuthorYear-ShortTitle-Hash
+    # Build paper folder name: AuthorYear-ShortTitle
     authors = meta.get("authors", ["Unknown"])
     first_author = authors[0].split()[-1].replace(",", "").replace(" ", "") if authors else "Unknown"
     year = meta.get("year", datetime.now().year)
     short_title = "".join(c for c in title[:20] if c.isalnum()).upper() or "UNTITLED"
-    title_hash = hashlib.md5(title.encode()).hexdigest()[:6]
-    paper_folder_name = f"{first_author}{year}-{short_title}-{title_hash}"
-
-    # Build target path: Literature/{Source}_FollowUp/{AuthorYear-ShortTitle}/
-    base_dir = lit_path / folder_name
+    # Build target path: Literature/FollowUps/{Source}/{AuthorYear-ShortTitle}/
+    base_dir = lit_path / "FollowUps" / source_folder_name
     paper_folder = base_dir / f"{first_author}{year}-{short_title}"
     paper_folder.mkdir(parents=True, exist_ok=True)
 
@@ -1718,6 +1790,15 @@ async def save_s2_to_literature(data: dict):
             print(f"[s2-save] Fetched {len(local_figures)} figures for {arxiv_id}")
         except Exception as e:
             print(f"[s2-save] Failed to fetch figures: {e}")
+
+    paper_folder_rel = paper_folder.relative_to(lit_path)
+    frontend_figures = [
+        {
+            **fig,
+            "local_path": str((paper_folder_rel / fig["local_path"]).as_posix()),
+        }
+        for fig in local_figures
+    ]
 
     # Try to download PDF if arxiv_id exists
     pdf_path = None
@@ -1788,7 +1869,7 @@ async def save_s2_to_literature(data: dict):
         "citation-count": meta.get("citation_count", 0),
         "keywords": meta.get("keywords", []),
         "source-paper-title": source_paper,
-        "figures": local_figures,
+        "figures": frontend_figures,
         "figures-dir": str(figures_dir.relative_to(paper_folder)) if local_figures else None,
         "pdf-path": pdf_path,
         "saved-at": datetime.now().isoformat(),
@@ -1799,10 +1880,49 @@ async def save_s2_to_literature(data: dict):
     tmp.write_text(frontmatter.dumps(post), encoding="utf-8")
     os.replace(tmp, target_path)
 
+    enriched_paper = {
+        **paper,
+        "metadata": {
+            **meta,
+            "local_figures": frontend_figures,
+            "saved_to_literature": True,
+            "literature_path": str(target_path.relative_to(lit_path)),
+            **({"pdf_path": pdf_path} if pdf_path else {}),
+        },
+        "path": str(target_path.relative_to(lit_path)),
+        "literature_path": str(target_path.relative_to(lit_path)),
+        "saved_to_literature": True,
+    }
+    _paper_store.upsert_from_payload(enriched_paper, source_module="semantic-scholar-tracker")
+
+    try:
+        from .store.cards import CardStore
+
+        card_store = CardStore()
+        card_ids = [
+            str(paper.get("id", "")),
+            f"followup-monitor:{meta.get('arxiv_id')}" if meta.get("arxiv_id") else "",
+            f"followup-monitor:s2_{paper_id}" if paper_id else "",
+        ]
+        for card_id in dict.fromkeys(card_ids):
+            if not card_id:
+                continue
+            existing_card = card_store.get(card_id)
+            if not existing_card:
+                continue
+            existing_card.metadata["local_figures"] = frontend_figures
+            existing_card.metadata["saved_to_literature"] = True
+            existing_card.metadata["literature_path"] = str(target_path.relative_to(lit_path))
+            if pdf_path:
+                existing_card.metadata["pdf_path"] = pdf_path
+            card_store.save(existing_card)
+    except Exception as e:
+        print(f"[s2-save] Failed to update CardStore for {paper_id}: {e}")
+
     return {
         "ok": True,
         "path": str(target_path.relative_to(lit_path)),
-        "figures": local_figures,
+        "figures": frontend_figures,
         "pdf": pdf_path,
         "folder": str(paper_folder.relative_to(lit_path))
     }
@@ -1818,13 +1938,27 @@ async def crawl_semantic_scholar_tracker(data: dict = None):
 
     data = data or {}
     query = data.get("query", "VGGT")
-    max_results = data.get("max_results", 20)
-    days_back = data.get("days_back", 7)
+    raw_max_results = data.get("max_results")
+    raw_days_back = data.get("days_back")
+    sort_by = data.get("sort_by", "recency")
+
+    try:
+        max_results = int(raw_max_results) if raw_max_results not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        max_results = None
+
+    try:
+        days_back = int(raw_days_back) if raw_days_back not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        days_back = None
+
+    if sort_by not in {"recency", "citation_count"}:
+        sort_by = "recency"
 
     prefs = _prefs.get_prefs_for_module("semantic-scholar-tracker")
     tracker = SemanticScholarTracker()
     results = []
-    session_id = _generate_crawl_session_id()
+    session_id = data.get("session_id") or _generate_crawl_session_id()
 
     try:
         # Send session ID to client
@@ -1852,14 +1986,18 @@ async def crawl_semantic_scholar_tracker(data: dict = None):
             "session_id": session_id,
             "phase": "fetching",
             "current": 0,
-            "total": max_results,
-            "message": f"正在从 Semantic Scholar 搜索 '{query}' 的后续论文..."
+            "total": max_results or 0,
+            "message": (
+                f"正在从 Semantic Scholar 搜索 '{query}' 的后续论文..."
+                f"{'（全量）' if max_results is None else f'（最多 {max_results} 篇）'}"
+            ),
         })
 
         items = await tracker.fetch_followups(
             query=query,
             max_results=max_results,
-            days_back=days_back
+            days_back=days_back,
+            sort_by=sort_by,
         )
 
         if not items:
@@ -1914,6 +2052,7 @@ async def crawl_semantic_scholar_tracker(data: dict = None):
                         "metadata": card.metadata,
                     }
                     results.append(paper_data)
+                    _paper_store.upsert_from_payload(paper_data, source_module="semantic-scholar-tracker")
 
                     await broadcaster.send_event({
                         "type": "crawl_paper",
@@ -2124,6 +2263,8 @@ class ModuleConfig(BaseModel):
     keywords: list[str] = []
     up_uids: list[str] = []  # Bilibili
     followed_up_groups: list[str] = []  # Bilibili followed groups
+    followed_up_original_groups: list[int] = []  # Native Bilibili tag IDs
+    followed_up_filter_mode: str = "and"  # and | smart_only
     user_ids: list[str] = []  # Xiaohongshu
     users: list[str] = []  # Zhihu users
     topics: list[str] = []  # Zhihu topics
@@ -2140,6 +2281,10 @@ class ModuleConfig(BaseModel):
     creator_profiles: dict = {}
     creator_group_options: list[dict] = []
     keyword_filter: bool = True
+    keyword_monitors: list[dict] = []
+    followup_monitors: list[dict] = []
+    days_back: int | None = None
+    sort_by: str | None = None
 
 
 BILIBILI_FOLLOWED_GROUP_OPTIONS = [
@@ -2174,6 +2319,8 @@ async def get_module_config(module_id: str):
         "keywords": module_prefs.get("keywords", []),
         "up_uids": module_prefs.get("up_uids", []),
         "followed_up_groups": module_prefs.get("followed_up_groups", []),
+        "followed_up_original_groups": module_prefs.get("followed_up_original_groups", []),
+        "followed_up_filter_mode": module_prefs.get("followed_up_filter_mode", "and"),
         "user_ids": module_prefs.get("user_ids", []),
         "users": module_prefs.get("users", []),
         "topics": module_prefs.get("topics", []),
@@ -2195,12 +2342,23 @@ async def get_module_config(module_id: str):
         "cookie": module_prefs.get("cookie", ""),
         "web_session": module_prefs.get("web_session", ""),
         "id_token": module_prefs.get("id_token", ""),
+        "keyword_monitors": [],
+        "followup_monitors": [],
+        "days_back": module_prefs.get("days_back"),
+        "sort_by": module_prefs.get("sort_by"),
         # UI hints for adding subscriptions
         "subscription_types": subscription_types,
     }
 
     if module_id == "bilibili-tracker":
-        config["followed_up_group_options"] = BILIBILI_FOLLOWED_GROUP_OPTIONS
+        config["followed_up_group_options"] = module_prefs.get("creator_group_options") or BILIBILI_FOLLOWED_GROUP_OPTIONS
+    elif module_id == "arxiv-tracker":
+        config["keyword_monitors"] = normalize_keyword_monitors(module_prefs)
+        config["days_back"] = module_prefs.get("days_back", 30)
+    elif module_id == "semantic-scholar-tracker":
+        config["followup_monitors"] = normalize_followup_monitors(module_prefs)
+        config["days_back"] = module_prefs.get("days_back", 365)
+        config["sort_by"] = module_prefs.get("sort_by", "recency")
 
     # Add module-specific defaults if empty
     if "keywords" not in module_prefs and not config["keywords"]:
@@ -2228,10 +2386,23 @@ async def update_module_config(module_id: str, data: dict):
 
     if "keywords" in data:
         module_prefs["keywords"] = data["keywords"]
+    if "keyword_monitors" in data:
+        module_prefs["keyword_monitors"] = normalize_keyword_monitors({"keyword_monitors": data["keyword_monitors"]})
+    if "followup_monitors" in data:
+        module_prefs["followup_monitors"] = normalize_followup_monitors({"followup_monitors": data["followup_monitors"]})
     if "up_uids" in data:
         module_prefs["up_uids"] = data["up_uids"]
     if "followed_up_groups" in data:
         module_prefs["followed_up_groups"] = data["followed_up_groups"]
+    if "followed_up_original_groups" in data:
+        module_prefs["followed_up_original_groups"] = [
+            int(item)
+            for item in (data["followed_up_original_groups"] or [])
+            if str(item).strip().lstrip("-").isdigit()
+        ]
+    if "followed_up_filter_mode" in data:
+        value = str(data["followed_up_filter_mode"] or "and").strip().lower()
+        module_prefs["followed_up_filter_mode"] = "smart_only" if value == "smart_only" else "and"
     if "user_ids" in data:
         module_prefs["user_ids"] = data["user_ids"]
     if "users" in data:
@@ -2242,6 +2413,14 @@ async def update_module_config(module_id: str, data: dict):
         module_prefs["podcast_ids"] = data["podcast_ids"]
     if "max_results" in data:
         module_prefs["max_results"] = max(1, int(data["max_results"] or 1))
+    if "days_back" in data:
+        raw_days_back = data["days_back"]
+        if raw_days_back in (None, "", 0, "0"):
+            module_prefs["days_back"] = None
+        else:
+            module_prefs["days_back"] = max(1, int(raw_days_back))
+    if "sort_by" in data:
+        module_prefs["sort_by"] = str(data["sort_by"] or "recency").strip() or "recency"
     if "enable_keyword_search" in data:
         module_prefs["enable_keyword_search"] = bool(data["enable_keyword_search"])
     if "keyword_min_likes" in data:

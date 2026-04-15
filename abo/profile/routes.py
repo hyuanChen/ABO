@@ -4,7 +4,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..claude_bridge.runner import batch_call
+from ..sdk.tools import agent
 from ..config import load as load_config, is_demo_mode
 from ..demo.data import get_demo_profile, DEMO_STATS
 from ..store.cards import CardStore
@@ -156,8 +156,8 @@ async def generate_motto():
     )
 
     try:
-        motto = await batch_call(prompt)
-        description = await batch_call(description_prompt)
+        motto = await agent(prompt)
+        description = await agent(description_prompt)
     except Exception:
         motto = "专注当下，积累成势。"
         description = ""

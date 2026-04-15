@@ -169,7 +169,7 @@ function ColliderModal({
         {loading && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" aria-hidden />
-            <p className="text-sm text-slate-500 dark:text-slate-400">Claude 正在进行创意碰撞…</p>
+            <p className="text-sm text-slate-500 dark:text-slate-400">Agent 正在进行创意碰撞…</p>
           </div>
         )}
 

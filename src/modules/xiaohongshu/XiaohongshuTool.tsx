@@ -84,11 +84,14 @@ interface CommentsResponse {
   note_id: string;
   total_comments: number;
   sort_by: string;
+  strategy?: string;
   comments: XHSComment[];
 }
 
-type TabType = "search" | "collections" | "following";
+type TabType = "collections" | "following";
 type AlbumCrawlMode = "incremental" | "full";
+type BrowserChoice = "default" | "edge" | "chrome" | "brave" | "safari" | "firefox";
+const XIAOHONGSHU_TOOL_TAB_KEY = "xiaohongshu_tool_tab";
 
 interface FollowingFeedResponse {
   total_found: number;
@@ -124,9 +127,26 @@ interface XHSAlbumCrawlResponse {
     success: boolean;
     album?: string;
     board_id?: string;
+    mode?: string;
     found?: number;
     saved?: number;
     skipped?: number;
+    diagnostics?: {
+      loaded_notes?: number;
+      raw_seen_count?: number;
+      valid_seen_count?: number;
+      pruned_seen_count?: number;
+      candidate_notes?: number;
+      processable_notes?: number;
+      recent_days?: number | null;
+      before_date?: string | null;
+      skip_breakdown?: {
+        already_seen?: number;
+        older_than_recent_days?: number;
+        newer_than_before_date?: number;
+        invalid_note?: number;
+      };
+    };
     error?: string;
   }>;
 }
@@ -143,7 +163,10 @@ interface XHSCreatorProfile {
 }
 
 export function XiaohongshuTool() {
-  const [activeTab, setActiveTab] = useState<TabType>("search");
+  const [activeTab, setActiveTab] = useState<TabType>(() => {
+    const saved = localStorage.getItem(XIAOHONGSHU_TOOL_TAB_KEY);
+    return saved === "following" ? "following" : "collections";
+  });
   const toast = useToast();
 
   // Cookie config state
@@ -207,8 +230,14 @@ export function XiaohongshuTool() {
   });
   const [albumCrawlMode, setAlbumCrawlMode] = useState<AlbumCrawlMode>("full");
   const [albumResult, setAlbumResult] = useState<XHSAlbumCrawlResponse | null>(null);
-  const [albumRecentDaysInput, setAlbumRecentDaysInput] = useState("180");
-  const [albumCrawlDelay, setAlbumCrawlDelay] = useState(8);
+  const [albumRecentDaysInput, setAlbumRecentDaysInput] = useState("");
+  const [albumCookieBrowser, setAlbumCookieBrowser] = useState<BrowserChoice>("default");
+  const [albumDedicatedWindowMode, setAlbumDedicatedWindowMode] = useState(true);
+  const [albumExtensionPort, setAlbumExtensionPort] = useState(9334);
+  const [showAlbumRecoveryOptions, setShowAlbumRecoveryOptions] = useState(false);
+  const [albumRecoveryMode, setAlbumRecoveryMode] = useState(true);
+  const [albumBatchSize, setAlbumBatchSize] = useState(5);
+  const [albumBatchPauseSeconds, setAlbumBatchPauseSeconds] = useState(30);
   const [albumProgress, setAlbumProgress] = useState<any | null>(null);
   const [albumListProgress, setAlbumListProgress] = useState<any | null>(null);
   const [albumListTaskId, setAlbumListTaskId] = useState<string | null>(null);
@@ -262,7 +291,63 @@ export function XiaohongshuTool() {
     transition: "all 0.15s ease",
   });
 
+  const browserLabelMap: Record<BrowserChoice, string> = {
+    default: "默认浏览器",
+    edge: "Edge",
+    chrome: "Chrome",
+    brave: "Brave",
+    safari: "Safari",
+    firefox: "Firefox",
+  };
+
   const hasCookie = Boolean(fullCookie.trim() || webSession.trim() || backendCookieConfigured);
+  const xhsBridgeOptions = {
+    use_extension: true,
+    extension_port: albumExtensionPort,
+    dedicated_window_mode: albumDedicatedWindowMode,
+  };
+  const xhsCrawlFallbackOptions = {
+    ...xhsBridgeOptions,
+    use_cdp: true,
+    cdp_port: 9222,
+  };
+
+  const formatStrategyLabel = (strategy?: string | null) => {
+    switch (strategy) {
+      case "extension_note_detail_map":
+        return "插件详情 state";
+      case "extension_state_tree_detail":
+      case "extension_state_tree_note":
+        return "插件页面 state 补抓";
+      case "extension_dom_fallback":
+        return "插件 DOM 补抓";
+      case "extension_state_machine":
+        return "插件评论状态机";
+      case "plugin_state_urls":
+        return "插件 state 媒体链接";
+      case "plugin_dom_urls":
+        return "插件 DOM 媒体链接";
+      case "cdp_initial_state":
+        return "CDP 详情兜底";
+      case "cdp_state_urls":
+        return "CDP 媒体链接";
+      case "html_initial_state":
+        return "后端 HTML/Initial State";
+      case "html_state_urls":
+        return "后端 HTML 媒体链接";
+      default:
+        return strategy || "未标记";
+    }
+  };
+
+  const formatExecutionRoute = (payload?: {
+    used_extension?: boolean;
+    used_cdp?: boolean;
+  } | null) => {
+    if (payload?.used_extension) return "插件主链路";
+    if (payload?.used_cdp) return "CDP 兜底";
+    return "后端 HTML 兜底";
+  };
 
   useEffect(() => {
     return () => {
@@ -311,6 +396,10 @@ export function XiaohongshuTool() {
   };
 
   // Persist cookies
+  useEffect(() => {
+    localStorage.setItem(XIAOHONGSHU_TOOL_TAB_KEY, activeTab);
+  }, [activeTab]);
+
   useEffect(() => {
     if (webSession) {
       localStorage.setItem("xiaohongshu_websession", webSession);
@@ -476,10 +565,10 @@ export function XiaohongshuTool() {
     }
   };
 
-  const handleGetCookieFromBrowser = async () => {
+  const handleGetCookieFromBrowser = async (browser: BrowserChoice = albumCookieBrowser) => {
     setGettingCookie(true);
     try {
-      const res = await xiaohongshuGetCookieFromBrowser();
+      const res = await xiaohongshuGetCookieFromBrowser({ browser });
       if (!res.success) {
         toast.error("一键获取失败", res.error || "请先在本机浏览器登录小红书");
         return;
@@ -497,6 +586,24 @@ export function XiaohongshuTool() {
     } finally {
       setGettingCookie(false);
     }
+  };
+
+  const handleClearXhsLocalCache = () => {
+    localStorage.removeItem("xiaohongshu_album_cache");
+    localStorage.removeItem("xiaohongshu_websession");
+    localStorage.removeItem("xiaohongshu_idtoken");
+    localStorage.removeItem("xiaohongshu_full_cookie");
+    setAlbums([]);
+    setSelectedAlbumIds(new Set());
+    setAlbumResult(null);
+    setAlbumListProgress(null);
+    setAlbumProgress(null);
+    setWebSession("");
+    setIdToken("");
+    setFullCookie("");
+    setCookieVerified(false);
+    setBackendCookieConfigured(false);
+    toast.success("本地缓存已清空", "已清空 ABO 保存的小红书专辑和 Cookie 缓存，请重新登录并更新 Cookie");
   };
 
   const handleVerifyCookie = async () => {
@@ -548,6 +655,7 @@ export function XiaohongshuTool() {
           min_likes: minLikes,
           sort_by: sortBy,
           cookie: buildCookie() || undefined,
+          ...xhsBridgeOptions,
         }),
         (result) => setSearchResult(result),
         (result) => ({ title: `找到 ${result.total_found} 条结果` }),
@@ -578,6 +686,10 @@ export function XiaohongshuTool() {
           max_comments: 50,
           sort_by: "likes",
           cookie: buildCookie() || undefined,
+          ...xhsBridgeOptions,
+          load_all_comments: true,
+          click_more_replies: true,
+          max_replies_threshold: 10,
         }),
         (result) => setCommentsResult(result),
         (result) => ({ title: `获取 ${result.total_comments} 条评论` }),
@@ -604,6 +716,7 @@ export function XiaohongshuTool() {
           cookie: buildCookie() || undefined,
           keywords,
           max_notes: Math.max(1, Math.min(300, followingLimit || 50)),
+          ...xhsBridgeOptions,
         }),
         (result) => setFollowingResult(result),
         (result) => ({ title: `关注列表中找到 ${result.total_found} 条匹配结果` }),
@@ -633,7 +746,7 @@ export function XiaohongshuTool() {
           include_live_photo: includeLivePhoto,
           include_comments: includeComments,
           comments_limit: commentsLimit,
-          use_cdp: true,
+          ...xhsCrawlFallbackOptions,
         }),
         (result) => setCrawlResult(result),
         (result) => ({ title: "已保存到 xhs", description: result.markdown_path }),
@@ -664,7 +777,7 @@ export function XiaohongshuTool() {
           include_live_photo: includeLivePhoto,
           include_comments: includeComments,
           comments_limit: commentsLimit,
-          use_cdp: true,
+          ...xhsCrawlFallbackOptions,
         }),
         (result) => setBatchResult(result),
         (result) => ({ title: "批量入库完成", description: `成功 ${result.saved} 条，失败 ${result.failed} 条` }),
@@ -731,8 +844,9 @@ export function XiaohongshuTool() {
       const started = await api.post<{ success: boolean; task_id: string }>("/api/tools/xiaohongshu/albums/start", {
         cookie: buildCookie() || undefined,
         cdp_port: 9222,
-        background: true,
+        background: !albumDedicatedWindowMode,
         allow_cdp_fallback: false,
+        ...xhsBridgeOptions,
       });
       setAlbumListTaskId(started.task_id);
       setAlbumListProgress({ status: "running", stage: "任务已创建", albums_total: 0 });
@@ -818,14 +932,16 @@ export function XiaohongshuTool() {
           ? undefined
           : (() => {
               const raw = albumRecentDaysInput.trim();
-              if (!raw) return 180;
+              if (!raw) return undefined;
               const next = Number(raw);
-              if (!Number.isFinite(next)) return 180;
+              if (!Number.isFinite(next)) return undefined;
               return Math.max(1, Math.min(3650, next));
             })(),
         crawl_mode: mode,
-        crawl_delay_seconds: Math.max(3, Math.min(8, albumCrawlDelay || 8)),
+        batch_size: albumRecoveryMode ? Math.max(1, Math.min(20, albumBatchSize || 5)) : undefined,
+        batch_pause_seconds: albumRecoveryMode ? Math.max(10, Math.min(180, albumBatchPauseSeconds || 30)) : undefined,
         cdp_port: 9222,
+        ...xhsBridgeOptions,
       });
       setAlbumCrawlTaskId(started.task_id);
       setAlbumProgress({ status: "running", stage: "任务已创建", total_albums: selected.length, saved: 0, skipped: 0, failed: 0 });
@@ -838,8 +954,24 @@ export function XiaohongshuTool() {
             albumCrawlTimerRef.current = null;
             setAlbumResult(progress.result);
             setAlbumCrawlTaskId(null);
-            toast.success(`专辑${mode === "full" ? "全量" : "增量"}抓取完成`, `新增 ${progress.result.saved} 条，跳过 ${progress.result.skipped} 条`);
-            await handleFetchAlbums();
+            const failedCount = Number(progress.result?.failed || 0);
+            const savedCount = Number(progress.result?.saved || 0);
+            const skippedCount = Number(progress.result?.skipped || 0);
+            const firstFailedItem = Array.isArray(progress.result?.results)
+              ? progress.result.results.find((item: any) => !item?.success)
+              : null;
+            const failureDetail = firstFailedItem?.error ? `；原因：${firstFailedItem.error}` : "";
+            if (failedCount > 0) {
+              toast.error(
+                `专辑${mode === "full" ? "全量" : "增量"}抓取结束`,
+                `新增 ${savedCount} 条，跳过 ${skippedCount} 条，失败 ${failedCount} 条；已保留当前专辑列表${failureDetail}`,
+              );
+            } else {
+              toast.success(
+                `专辑${mode === "full" ? "全量" : "增量"}抓取完成`,
+                `新增 ${savedCount} 条，跳过 ${skippedCount} 条；已保留当前专辑列表`,
+              );
+            }
           } else if (progress.status === "cancelled") {
             window.clearInterval(timer);
             albumCrawlTimerRef.current = null;
@@ -1169,18 +1301,11 @@ export function XiaohongshuTool() {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+        gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
         gap: "12px",
       }}
     >
       {[
-        {
-          id: "search" as const,
-          label: "笔记搜索",
-          icon: Search,
-          accent: "#FF2442",
-          bg: "rgba(255, 36, 66, 0.12)",
-        },
         {
           id: "collections" as const,
           label: "收藏专辑抓取",
@@ -1248,6 +1373,25 @@ export function XiaohongshuTool() {
       });
     } catch {
       return value;
+    }
+  };
+
+  const formatTaskKindLabel = (kind: string) => {
+    switch (kind) {
+      case "search":
+        return "关键词扫描";
+      case "following-feed":
+        return "关注流扫描";
+      case "crawl-note":
+        return "单条入库";
+      case "crawl-batch":
+        return "批量入库";
+      case "comments":
+        return "评论抓取";
+      case "author-candidates":
+        return "博主候选分析";
+      default:
+        return kind;
     }
   };
 
@@ -1475,10 +1619,16 @@ export function XiaohongshuTool() {
               Markdown：{crawlResult.markdown_path}
             </div>
             <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", color: "var(--text-muted)", fontSize: "0.8125rem" }}>
+              <span>执行路径：{formatExecutionRoute(crawlResult)}</span>
               <span>图片 {crawlResult.remote_resources.images.length}</span>
               <span>Live {crawlResult.remote_resources.live.length}</span>
+              <span>视频 {crawlResult.remote_resources.video ? 1 : 0}</span>
               <span>本地资源 {crawlResult.local_resources.length}</span>
-              <span>{crawlResult.used_cdp ? "使用了隐藏浏览器兜底" : "后端直抓成功"}</span>
+              <span>详情链路：{formatStrategyLabel(crawlResult.detail_strategy)}</span>
+              <span>媒体链路：{formatStrategyLabel(crawlResult.media_strategy)}</span>
+              {crawlResult.comment_strategy ? (
+                <span>评论链路：{formatStrategyLabel(crawlResult.comment_strategy)}</span>
+              ) : null}
             </div>
             {crawlResult.warnings.length > 0 && (
               <div style={{ color: "var(--color-warning)", fontSize: "0.8125rem", lineHeight: 1.6 }}>
@@ -1509,7 +1659,9 @@ export function XiaohongshuTool() {
                   wordBreak: "break-all",
                 }}
               >
-                {"markdown_path" in item ? `已保存：${item.markdown_path}` : `失败：${item.url} · ${item.error}`}
+                {"markdown_path" in item
+                  ? `已保存：${item.markdown_path} · ${formatExecutionRoute(item)} · ${formatStrategyLabel(item.detail_strategy)}`
+                  : `失败：${item.url} · ${item.error}`}
               </div>
             ))}
           </div>
@@ -1522,12 +1674,12 @@ export function XiaohongshuTool() {
 
   const renderCollectionsTab = () => (
     <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-      <Card title="收藏专辑抓取（小红书反爬严格，速度很慢，约 5s 一条）" icon={<Save style={{ width: "18px", height: "18px" }} />}>
+      <Card title="收藏专辑抓取（反爬严格，约 10s 一条）（如遇限流，等待，更新 Cookie，切换 IP，重新登录）" icon={<Save style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
           <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
-            <strong style={{ color: "var(--text-main)" }}>须：</strong>
-            <strong style={{ color: "var(--text-main)" }}>先读取收藏专辑，再按你选中的专辑抓取。</strong>
-            增量会跳过本地 JSON 已记录笔记，全量会重新处理专辑内全部已读取笔记。
+            <strong style={{ color: "var(--text-main)" }}>注意：</strong>
+            <strong style={{ color: "var(--text-main)" }}>因系统限制，小红书窗口不能被完全遮挡，须漏出一点才可滚动爬取。</strong>
+            当前默认是插件优先，失败后再走兜底；增量会跳过本地仍存在 Markdown 文件的已抓笔记，最近天数留空表示不限。
           </p>
 
           <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
@@ -1567,17 +1719,108 @@ export function XiaohongshuTool() {
                   if (!raw) return;
                   const next = Number(raw);
                   if (!Number.isFinite(next)) {
-                    setAlbumRecentDaysInput("180");
+                    setAlbumRecentDaysInput("");
                     return;
                   }
                   setAlbumRecentDaysInput(String(Math.max(1, Math.min(3650, next))));
                 }}
                 inputMode="numeric"
+                placeholder="不限"
                 style={{ ...compactControlStyle, width: "82px", background: "transparent" }}
               />
               天
             </label>
+            <button
+              type="button"
+              onClick={() => setShowAlbumRecoveryOptions((v) => !v)}
+              style={{
+                ...segmentedButtonStyle(showAlbumRecoveryOptions),
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+            >
+              <Zap style={{ width: "15px", height: "15px" }} />
+              恢复抓取设置
+              {showAlbumRecoveryOptions ? <ChevronUp style={{ width: "14px", height: "14px" }} /> : <ChevronDown style={{ width: "14px", height: "14px" }} />}
+            </button>
           </div>
+
+          {showAlbumRecoveryOptions && (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "12px",
+                padding: "14px 16px",
+                borderRadius: "var(--radius-md)",
+                background: "rgba(255, 107, 129, 0.06)",
+                border: "1px solid rgba(255, 107, 129, 0.16)",
+              }}
+            >
+              <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>恢复浏览器</span>
+                <select
+                  value={albumCookieBrowser}
+                  onChange={(e) => setAlbumCookieBrowser(e.target.value as BrowserChoice)}
+                  style={{ ...compactControlStyle, minWidth: "132px" }}
+                >
+                  {Object.entries(browserLabelMap).map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => handleGetCookieFromBrowser(albumCookieBrowser)}
+                  disabled={gettingCookie}
+                  style={segmentedButtonStyle(false)}
+                >
+                  {gettingCookie ? "更新 Cookie 中..." : `用${browserLabelMap[albumCookieBrowser]}更新 Cookie`}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleClearXhsLocalCache}
+                  style={{ ...segmentedButtonStyle(false), borderColor: "rgba(239, 68, 68, 0.2)", color: "var(--color-danger)" }}
+                >
+                  清本地缓存
+                </button>
+              </div>
+
+              <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
+                <button type="button" onClick={() => setAlbumRecoveryMode((prev) => !prev)} style={segmentedButtonStyle(albumRecoveryMode)}>
+                  低频多次分批抓取
+                </button>
+                <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-main)", fontSize: "0.875rem" }}>
+                  每批
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={albumBatchSize}
+                    onChange={(e) => setAlbumBatchSize(Number(e.target.value || 5))}
+                    style={{ ...compactControlStyle, width: "74px" }}
+                  />
+                  条
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-main)", fontSize: "0.875rem" }}>
+                  批间等待
+                  <input
+                    type="number"
+                    min={10}
+                    max={180}
+                    value={albumBatchPauseSeconds}
+                    onChange={(e) => setAlbumBatchPauseSeconds(Number(e.target.value || 30))}
+                    style={{ ...compactControlStyle, width: "82px" }}
+                  />
+                  秒
+                </label>
+              </div>
+
+              <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+                可先切换浏览器重新获取 Cookie。若仍限流，建议先清浏览器站点缓存并重新登录，再用低频分批模式继续抓取。
+              </div>
+            </div>
+          )}
 
           <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
             <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>抓取方式</span>
@@ -1608,20 +1851,29 @@ export function XiaohongshuTool() {
           </div>
           <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
             <button type="button" onClick={() => setIncludeComments((v) => !v)} style={segmentedButtonStyle(includeComments)}>
-              记录评论（测试中，需要打开浏览器页面）
+              记录评论（插件状态机）
+            </button>
+            <button
+              type="button"
+              onClick={() => setAlbumDedicatedWindowMode((v) => !v)}
+              style={segmentedButtonStyle(albumDedicatedWindowMode)}
+            >
+              当前 Edge 独立窗口
             </button>
             <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-main)", fontSize: "0.875rem" }}>
-              随机间隔 3 -
+              扩展端口
               <input
                 type="number"
-                min={3}
-                max={8}
-                value={albumCrawlDelay}
-                onChange={(e) => setAlbumCrawlDelay(Number(e.target.value || 8))}
-                style={{ ...compactControlStyle, width: "76px" }}
+                min={1024}
+                max={65535}
+                value={albumExtensionPort}
+                onChange={(e) => setAlbumExtensionPort(Number(e.target.value || 9334))}
+                style={{ ...compactControlStyle, width: "88px" }}
               />
-              秒
             </label>
+          </div>
+          <div style={{ color: "var(--text-muted)", fontSize: "0.8125rem" }}>
+            抓取链路：插件优先（端口 {albumExtensionPort}，{albumDedicatedWindowMode ? "独立窗口" : "当前窗口"}）{` -> `}CDP / 后端兜底
           </div>
 
           {albumListProgress && (
@@ -1683,7 +1935,9 @@ export function XiaohongshuTool() {
                   ? `已读取 ${albumListProgress.albums_total || 0} 个专辑`
                   : albumListProgress.status === "cancelled"
                     ? "已中断，保留当前页面已有专辑。"
-                  : `后台无界面加载中，不会影响当前窗口。步骤 ${albumListProgress.current_step || 0}/${albumListProgress.total_steps || 7}`}
+                  : albumDedicatedWindowMode
+                    ? `当前 Edge 独立窗口读取中。步骤 ${albumListProgress.current_step || 0}/${albumListProgress.total_steps || 7}`
+                    : `后台无界面加载中，不会影响当前窗口。步骤 ${albumListProgress.current_step || 0}/${albumListProgress.total_steps || 7}`}
               </div>
             </div>
           )}
@@ -1742,6 +1996,9 @@ export function XiaohongshuTool() {
                 <span>新增：{albumProgress.saved || 0}</span>
                 <span>跳过：{albumProgress.skipped || 0}</span>
                 <span>失败：{albumProgress.failed || 0}</span>
+                {albumProgress.pruned_seen_count ? (
+                  <span>修正无效已抓 {albumProgress.pruned_seen_count}</span>
+                ) : null}
               </div>
               {albumProgress.total_notes ? (
                 <div style={{ color: "var(--text-secondary)", fontSize: "0.8125rem" }}>
@@ -1750,6 +2007,11 @@ export function XiaohongshuTool() {
                     ? " · 后台无界面加载中"
                     : ""}
                   {albumProgress.delay_seconds ? ` · 等待 ${albumProgress.delay_seconds} 秒后继续` : ""}
+                </div>
+              ) : null}
+              {albumProgress.skip_breakdown ? (
+                <div style={{ color: "var(--text-secondary)", fontSize: "0.8125rem" }}>
+                  过滤明细：已抓 {albumProgress.skip_breakdown.already_seen || 0} · 较旧 {albumProgress.skip_breakdown.older_than_recent_days || 0} · 较新 {albumProgress.skip_breakdown.newer_than_before_date || 0} · 无效 {albumProgress.skip_breakdown.invalid_note || 0}
                 </div>
               ) : null}
             </div>
@@ -1874,8 +2136,14 @@ export function XiaohongshuTool() {
                 }}
               >
                 {item.success
-                  ? `${item.album}：发现 ${item.found || 0}，新增 ${item.saved || 0}，跳过 ${item.skipped || 0}`
+                  ? `${item.album}：发现 ${item.found || 0}，新增 ${item.saved || 0}，跳过 ${item.skipped || 0}${item.mode ? ` · ${item.mode === "full" ? "全量" : "增量"}` : ""}`
                   : `${item.album || "专辑"}：${item.error || "失败"}`}
+                {item.success && item.diagnostics ? (
+                  <div style={{ marginTop: "6px", color: "var(--text-muted)" }}>
+                    已抓校验：原记录 {item.diagnostics.raw_seen_count || 0} · 有效 {item.diagnostics.valid_seen_count || 0} · 已修正 {item.diagnostics.pruned_seen_count || 0} · 可处理 {item.diagnostics.processable_notes || 0}
+                    {item.diagnostics.skip_breakdown ? ` · 过滤：已抓 ${item.diagnostics.skip_breakdown.already_seen || 0} / 较旧 ${item.diagnostics.skip_breakdown.older_than_recent_days || 0} / 较新 ${item.diagnostics.skip_breakdown.newer_than_before_date || 0}` : ""}
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>
@@ -2127,14 +2395,48 @@ export function XiaohongshuTool() {
 
   const renderFollowingTab = () => (
     <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-      <Card title="关注列表监控" icon={<Users style={{ width: "18px", height: "18px" }} />}>
+      <Card title="关注监控实验台" icon={<Users style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
           <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
-            监控你关注的用户发布的内容，筛选包含指定关键词的笔记。
+            关注流扫描和关键词扫描共用同一套抓取配置，优先走插件 bridge 读取真实页面 state，再回退到浏览器兜底链路。
             {!cookieVerified && (
               <span style={{ color: "var(--color-warning)" }}>（需先配置 Cookie）</span>
             )}
           </p>
+
+          <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
+            <button
+              type="button"
+              onClick={() => setAlbumDedicatedWindowMode((v) => !v)}
+              style={segmentedButtonStyle(albumDedicatedWindowMode)}
+            >
+              {albumDedicatedWindowMode ? "当前 Edge 独立窗口" : "使用当前窗口"}
+            </button>
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-main)", fontSize: "0.875rem" }}>
+              扩展端口
+              <input
+                type="number"
+                min={1024}
+                max={65535}
+                value={albumExtensionPort}
+                onChange={(e) => setAlbumExtensionPort(Number(e.target.value || 9334))}
+                style={{ ...compactControlStyle, width: "88px" }}
+              />
+            </label>
+          </div>
+
+          <div style={{ color: "var(--text-muted)", fontSize: "0.8125rem" }}>
+            抓取链路：插件优先（端口 {albumExtensionPort}，{albumDedicatedWindowMode ? "独立窗口" : "当前窗口"}）{` -> `}Playwright 兜底
+          </div>
+
+          <div style={{ height: "1px", background: "var(--border-light)" }} />
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>关注流扫描</div>
+            <div style={{ color: "var(--text-secondary)", fontSize: "0.8125rem" }}>
+              先看关注用户最近发了什么，再按关键词过滤。
+            </div>
+          </div>
 
           <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-main)", fontSize: "0.875rem" }}>
             抓取上限
@@ -2199,6 +2501,8 @@ export function XiaohongshuTool() {
           </div>
         </div>
       </Card>
+
+      {renderSearchTab()}
 
       <Card title="关注推送" icon={<Users style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
@@ -2489,11 +2793,11 @@ export function XiaohongshuTool() {
         </Card>
       )}
 
-      {!followingResult && !followingRunning && (
+      {!followingResult && !followingRunning && !searchResult && !searchRunning && (
         <EmptyState
           icon={Users}
-          title="关注列表监控"
-          description="输入关键词，监控你关注的用户发布的相关内容"
+          title="关注监控"
+          description="先扫关注流，再用关键词扫描补充公开笔记"
         />
       )}
 
@@ -2568,7 +2872,7 @@ export function XiaohongshuTool() {
             </div>
           </div>
           <button
-            onClick={handleGetCookieFromBrowser}
+            onClick={() => handleGetCookieFromBrowser()}
             disabled={gettingCookie}
             style={{
               display: "flex",
@@ -2720,15 +3024,18 @@ export function XiaohongshuTool() {
 
   const renderSearchTab = () => (
     <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-      {/* Search Input Area */}
-      <Card title="搜索条件" icon={<Filter style={{ width: "18px", height: "18px" }} />}>
+      <Card title="关键词扫描" icon={<Filter style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+            作为关注监控的补充子链路，用同一套插件优先抓取配置扫描公开高赞笔记。
+          </div>
           <div style={{ display: "flex", gap: "12px" }}>
             <input
               type="text"
               value={searchKeyword}
               onChange={(e) => setSearchKeyword(e.target.value)}
-              placeholder="输入关键词搜索小红书笔记..."
+              placeholder="输入关键词，补充扫描小红书笔记..."
+              disabled={!cookieVerified}
               style={{
                 flex: 1,
                 padding: "12px 16px",
@@ -2738,11 +3045,12 @@ export function XiaohongshuTool() {
                 color: "var(--text-main)",
                 fontSize: "0.9375rem",
                 outline: "none",
+                opacity: cookieVerified ? 1 : 0.5,
               }}
             />
             <button
               onClick={handleSearch}
-              disabled={searchRunning || !searchKeyword.trim()}
+              disabled={searchRunning || !searchKeyword.trim() || !cookieVerified}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -2750,24 +3058,24 @@ export function XiaohongshuTool() {
                 padding: "12px 24px",
                 borderRadius: "var(--radius-md)",
                 border: "none",
-                background: searchRunning ? "var(--bg-hover)" : "var(--color-primary)",
+                background: searchRunning || !cookieVerified ? "var(--bg-hover)" : "var(--color-primary)",
                 color: "white",
                 fontSize: "0.9375rem",
                 fontWeight: 600,
-                cursor: searchRunning || !searchKeyword.trim() ? "not-allowed" : "pointer",
-                opacity: searchRunning || !searchKeyword.trim() ? 0.6 : 1,
+                cursor: searchRunning || !searchKeyword.trim() || !cookieVerified ? "not-allowed" : "pointer",
+                opacity: searchRunning || !searchKeyword.trim() || !cookieVerified ? 0.6 : 1,
                 transition: "all 0.2s ease",
               }}
             >
               {searchRunning ? (
                 <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                   <span className="animate-spin">⟳</span>
-                  搜索中...
+                  扫描中...
                 </span>
               ) : (
                 <>
                   <Search style={{ width: "16px", height: "16px" }} />
-                  搜索
+                  扫描
                 </>
               )}
             </button>
@@ -2842,7 +3150,7 @@ export function XiaohongshuTool() {
       {/* Search Results */}
       {searchResult && (
         <Card
-          title={`搜索结果 (${searchResult.total_found})`}
+          title={`关键词扫描结果 (${searchResult.total_found})`}
           icon={<BookOpen style={{ width: "18px", height: "18px" }} />}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
@@ -3029,14 +3337,6 @@ export function XiaohongshuTool() {
           </div>
         </Card>
       )}
-
-      {!searchResult && !searchRunning && (
-        <EmptyState
-          icon={Search}
-          title="开始搜索"
-          description="输入关键词搜索小红书高赞笔记"
-        />
-      )}
     </div>
   );
 
@@ -3102,6 +3402,11 @@ export function XiaohongshuTool() {
           icon={<Users style={{ width: "18px", height: "18px" }} />}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            {commentsResult.strategy ? (
+              <div style={{ color: "var(--text-muted)", fontSize: "0.8125rem" }}>
+                读取链路：{formatStrategyLabel(commentsResult.strategy)}
+              </div>
+            ) : null}
             {commentsResult.comments.map((comment) => (
               <div
                 key={comment.id}
@@ -3245,7 +3550,7 @@ export function XiaohongshuTool() {
       {renderCookieConfigModal()}
       <PageHeader
         title="小红书分析工具"
-        subtitle="笔记搜索、收藏专辑抓取、关注监控，一键获取 Cookie 并保存到情报库 xhs"
+        subtitle="关注监控（含关键词扫描）、收藏专辑抓取，一键获取 Cookie 并保存到情报库 xhs"
         icon={Search}
         actions={
           <button
@@ -3281,7 +3586,7 @@ export function XiaohongshuTool() {
                   {backgroundTask.stage}
                 </div>
                 <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                  任务类型：{backgroundTask.kind} · Task ID: {backgroundTask.taskId}
+                  任务类型：{formatTaskKindLabel(backgroundTask.kind)} · Task ID: {backgroundTask.taskId}
                 </div>
                 <div
                   style={{
@@ -3435,7 +3740,7 @@ export function XiaohongshuTool() {
                                 }}
                               >
                                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {task.kind}
+                                  {formatTaskKindLabel(task.kind)}
                                 </span>
                                 <span style={{ color, flexShrink: 0 }}>
                                   {task.status === "completed"
@@ -3538,7 +3843,7 @@ export function XiaohongshuTool() {
                       >
                         <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center" }}>
                           <span style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
-                            {selectedTask.kind}
+                            {formatTaskKindLabel(selectedTask.kind)}
                           </span>
                           <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
                             {selectedTask.task_id}
@@ -3560,7 +3865,6 @@ export function XiaohongshuTool() {
             </Card>
           )}
 
-          {activeTab === "search" && renderSearchTab()}
           {activeTab === "collections" && renderCollectionsTab()}
           {activeTab === "following" && renderFollowingTab()}
           {false && renderManualCrawlTools()}

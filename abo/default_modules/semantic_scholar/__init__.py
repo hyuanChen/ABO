@@ -2,7 +2,7 @@ import asyncio
 import httpx
 from datetime import datetime
 
-from abo.sdk import Module, Item, Card, claude_json
+from abo.sdk import Module, Item, Card, agent_json
 
 
 class SemanticScholarTracker(Module):
@@ -323,7 +323,7 @@ class SemanticScholarTracker(Module):
             )
 
             try:
-                result = await claude_json(prompt, prefs=prefs)
+                result = await agent_json(prompt, prefs=prefs)
             except Exception:
                 result = {}
 

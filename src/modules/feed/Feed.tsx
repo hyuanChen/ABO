@@ -3,6 +3,7 @@ import { Inbox, Sparkles, Wifi, WifiOff, Layers } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, FeedCard } from "../../core/store";
 import CardView from "./CardView";
+import { useToast } from "../../components/Toast";
 
 const WS_URL = "ws://127.0.0.1:8765/ws/feed";
 
@@ -12,6 +13,37 @@ async function loadModules(setFeedModules: (modules: any[]) => void) {
     const r = await api.get<{ modules: any[] }>("/api/modules");
     setFeedModules(r.modules);
   } catch {}
+}
+
+type PaperTrackingKind = "all" | "keyword" | "followup";
+
+function getPaperTrackingType(card: FeedCard): "keyword" | "followup" | null {
+  const value = typeof card.metadata?.paper_tracking_type === "string"
+    ? card.metadata.paper_tracking_type
+    : "";
+  if (value === "keyword" || value === "followup") {
+    return value;
+  }
+  if (card.module_id === "arxiv-tracker") return "keyword";
+  if (card.module_id === "semantic-scholar-tracker") return "followup";
+  return null;
+}
+
+function getPaperTrackingLabels(card: FeedCard): string[] {
+  const labels = Array.isArray(card.metadata?.paper_tracking_labels)
+    ? card.metadata.paper_tracking_labels.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    : [];
+  if (labels.length > 0) return labels;
+
+  const single = typeof card.metadata?.paper_tracking_label === "string"
+    ? card.metadata.paper_tracking_label.trim()
+    : "";
+  if (single) return [single];
+
+  const sourceTitle = typeof card.metadata?.source_paper_title === "string"
+    ? card.metadata.source_paper_title.trim()
+    : "";
+  return sourceTitle ? [sourceTitle] : [];
 }
 
 
@@ -119,10 +151,13 @@ export default function Feed() {
     activeModuleFilter, setActiveModuleFilter,
     setUnreadCounts, feedModules, unreadCounts,
   } = useStore();
+  const toast = useToast();
   const [focusIdx, setFocusIdx] = useState(0);
   const [isConnected, setIsConnected] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [cardRatings, setCardRatings] = useState<Record<string, "like" | "neutral" | "dislike">>({});
+  const [paperTrackingFilter, setPaperTrackingFilter] = useState<PaperTrackingKind>("all");
+  const [paperTrackingLabel, setPaperTrackingLabel] = useState("all");
   const wsRef = useRef<WebSocket | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -138,6 +173,17 @@ export default function Feed() {
   useEffect(() => {
     loadCards();
   }, [activeModuleFilter, setFeedCards, setUnreadCounts]);
+
+  useEffect(() => {
+    setPaperTrackingLabel("all");
+    if (activeModuleFilter !== "arxiv-tracker" && activeModuleFilter !== "semantic-scholar-tracker") {
+      setPaperTrackingFilter("all");
+    }
+  }, [activeModuleFilter]);
+
+  useEffect(() => {
+    setFocusIdx(0);
+  }, [activeModuleFilter, paperTrackingFilter, paperTrackingLabel]);
 
   async function loadCards() {
     // Load modules first so FeedSidebar can display them
@@ -233,13 +279,53 @@ export default function Feed() {
     if (activeModuleFilter) {
       cards = cards.filter((c) => c.module_id === activeModuleFilter);
     }
+    if (paperTrackingFilter !== "all") {
+      cards = cards.filter((card) => getPaperTrackingType(card) === paperTrackingFilter);
+    }
+    if (paperTrackingLabel !== "all") {
+      cards = cards.filter((card) => getPaperTrackingLabels(card).includes(paperTrackingLabel));
+    }
     return cards;
   }
 
+  async function savePaperCard(card: FeedCard): Promise<boolean> {
+    const trackingType = getPaperTrackingType(card);
+    if (!trackingType) {
+      return true;
+    }
+
+    const payload = {
+      paper: {
+        id: card.id,
+        title: card.title,
+        summary: card.summary,
+        score: card.score,
+        tags: card.tags,
+        source_url: card.source_url,
+        metadata: card.metadata,
+      },
+      save_pdf: true,
+      max_figures: 5,
+    };
+
+    try {
+      if (trackingType === "keyword") {
+        await api.post("/api/modules/arxiv-tracker/save-to-literature", payload);
+      } else {
+        await api.post("/api/modules/semantic-scholar/save-to-literature", payload);
+      }
+      toast.success("已保存到文献库", trackingType === "keyword" ? "关键词论文已入库" : "Follow Up 论文已入库");
+      return true;
+    } catch (error) {
+      toast.error("保存失败", error instanceof Error ? error.message : "请检查文献库路径");
+      return false;
+    }
+  }
+
   async function handleFeedback(cardId: string, action: string) {
+    const card = feedCards.find((c) => c.id === cardId);
     if (action === "wiki") {
       // 摘录到 Wiki（情报库）
-      const card = feedCards.find((c) => c.id === cardId);
       if (card) {
         try {
           await api.post("/api/wiki/intel/ingest", {
@@ -259,6 +345,14 @@ export default function Feed() {
       }
       return;
     }
+
+    if (action === "save" && card) {
+      const saved = await savePaperCard(card);
+      if (!saved) {
+        return;
+      }
+    }
+
     await api.post(`/api/cards/${cardId}/feedback`, { action }).catch(() => {});
     if (action === "skip") {
       setFeedCards(feedCards.filter((c) => c.id !== cardId));
@@ -273,6 +367,31 @@ export default function Feed() {
   }
 
   const visible = filteredCards();
+  const scopedCards = activeModuleFilter
+    ? feedCards.filter((card) => card.module_id === activeModuleFilter)
+    : feedCards;
+  const paperCards = scopedCards.filter((card) => getPaperTrackingType(card) !== null);
+  const showPaperTrackingFilters =
+    paperCards.length > 0 || activeModuleFilter === "arxiv-tracker" || activeModuleFilter === "semantic-scholar-tracker";
+  const paperTrackingOptions = [
+    {
+      key: "keyword" as const,
+      label: "关键词",
+      count: paperCards.filter((card) => getPaperTrackingType(card) === "keyword").length,
+    },
+    {
+      key: "followup" as const,
+      label: "Follow Up",
+      count: paperCards.filter((card) => getPaperTrackingType(card) === "followup").length,
+    },
+  ];
+  const paperTrackingSubOptions = Array.from(
+    new Set(
+      paperCards
+        .filter((card) => paperTrackingFilter === "all" || getPaperTrackingType(card) === paperTrackingFilter)
+        .flatMap((card) => getPaperTrackingLabels(card))
+    )
+  );
 
   // Empty State - only when there are no cards at all (not due to filtering)
   if (feedCards.length === 0) {
@@ -400,6 +519,107 @@ export default function Feed() {
               </div>
             </div>
           </div>
+
+          {showPaperTrackingFilters && (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "12px",
+                padding: "16px",
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-card)",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                <span style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+                  论文追踪
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaperTrackingFilter("all");
+                    setPaperTrackingLabel("all");
+                  }}
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: "8px",
+                    border: `1px solid ${paperTrackingFilter === "all" ? "var(--color-primary)" : "var(--border-light)"}`,
+                    background: paperTrackingFilter === "all" ? "rgba(188, 164, 227, 0.12)" : "var(--bg-app)",
+                    color: paperTrackingFilter === "all" ? "var(--color-primary)" : "var(--text-secondary)",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  全部
+                </button>
+                {paperTrackingOptions.map((option) => (
+                  <button
+                    key={option.key}
+                    type="button"
+                    onClick={() => {
+                      setPaperTrackingFilter(option.key);
+                      setPaperTrackingLabel("all");
+                    }}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: "8px",
+                      border: `1px solid ${paperTrackingFilter === option.key ? "var(--color-primary)" : "var(--border-light)"}`,
+                      background: paperTrackingFilter === option.key ? "rgba(188, 164, 227, 0.12)" : "var(--bg-app)",
+                      color: paperTrackingFilter === option.key ? "var(--color-primary)" : "var(--text-secondary)",
+                      fontSize: "0.8125rem",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {option.label} {option.count > 0 ? `(${option.count})` : ""}
+                  </button>
+                ))}
+              </div>
+
+              {paperTrackingFilter !== "all" && paperTrackingSubOptions.length > 0 && (
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={() => setPaperTrackingLabel("all")}
+                    style={{
+                      padding: "5px 10px",
+                      borderRadius: "999px",
+                      border: `1px solid ${paperTrackingLabel === "all" ? "var(--color-primary)" : "var(--border-light)"}`,
+                      background: paperTrackingLabel === "all" ? "rgba(188, 164, 227, 0.12)" : "var(--bg-app)",
+                      color: paperTrackingLabel === "all" ? "var(--color-primary)" : "var(--text-secondary)",
+                      fontSize: "0.75rem",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    全部子项
+                  </button>
+                  {paperTrackingSubOptions.map((label) => (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => setPaperTrackingLabel(label)}
+                      style={{
+                        padding: "5px 10px",
+                        borderRadius: "999px",
+                        border: `1px solid ${paperTrackingLabel === label ? "var(--color-primary)" : "var(--border-light)"}`,
+                        background: paperTrackingLabel === label ? "rgba(188, 164, 227, 0.12)" : "var(--bg-app)",
+                        color: paperTrackingLabel === label ? "var(--color-primary)" : "var(--text-secondary)",
+                        fontSize: "0.75rem",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Cards */}
           <div style={{ display: "flex", flexDirection: "column", gap: "clamp(12px, 1.5vw, 16px)" }}>

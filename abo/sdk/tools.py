@@ -59,13 +59,13 @@ def build_ai_command(
     return resolved, ["claude", "--print", full]
 
 
-async def claude(
+async def agent(
     prompt: str,
     prefs: dict | None = None,
     timeout: int = 30,
     provider: str | None = None,
 ) -> str:
-    """调用当前配置的 AI CLI，保留 claude 名称以兼容旧调用方。"""
+    """调用当前配置的 Agent CLI。"""
     resolved, command = build_ai_command(prompt, prefs=prefs, provider=provider)
     proc = await asyncio.create_subprocess_exec(
         *command,
@@ -85,15 +85,20 @@ async def claude(
         raise Exception(f"{resolved} CLI 调用超时（{timeout}秒）")
 
 
-async def claude_json(prompt: str, prefs: dict | None = None, provider: str | None = None) -> dict:
-    """调用当前配置的 AI CLI 并解析 JSON（自动剥离 markdown code fence）"""
-    raw = await claude(prompt, prefs=prefs, provider=provider)
+async def agent_json(prompt: str, prefs: dict | None = None, provider: str | None = None) -> dict:
+    """调用当前配置的 Agent CLI 并解析 JSON（自动剥离 markdown code fence）"""
+    raw = await agent(prompt, prefs=prefs, provider=provider)
     match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
     text = match.group(1) if match else raw
     try:
         return json.loads(text.strip())
     except json.JSONDecodeError:
         return {}
+
+
+# Backward-compatible aliases for older modules.
+claude = agent
+claude_json = agent_json
 
 
 async def fetch_rss(url: str) -> list[dict]:

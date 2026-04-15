@@ -156,3 +156,110 @@ def test_xhs_comment_dataclass():
 
     assert comment.is_top is True
     assert comment.reply_to is None
+
+
+def _note(note_id: str, title: str, content: str, likes: int = 100) -> XHSNote:
+    return XHSNote(
+        id=note_id,
+        title=title,
+        content=content,
+        author="测试作者",
+        author_id="author-1",
+        likes=likes,
+        collects=0,
+        comments_count=0,
+        url=f"https://www.xiaohongshu.com/explore/{note_id}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_by_keyword_uses_search_page_state(monkeypatch):
+    api = XiaohongshuAPI()
+    captured: dict[str, object] = {}
+
+    async def fake_extract_via_extension(**kwargs):
+        captured.update(kwargs)
+        return [_note("note-search", "科研工具", "科研写作工作流", likes=320)]
+
+    monkeypatch.setattr(api, "_extract_cards_via_extension", fake_extract_via_extension)
+
+    try:
+        notes = await api.search_by_keyword(
+            keyword="科研",
+            max_results=5,
+            min_likes=0,
+            cookie="web_session=test-token",
+        )
+    finally:
+        await api.close()
+
+    assert len(notes) == 1
+    assert captured["page_kind"] == "search"
+    assert captured["max_results"] == 10
+    assert captured["url"] == "https://www.xiaohongshu.com/search_result?keyword=%E7%A7%91%E7%A0%94"
+
+
+@pytest.mark.asyncio
+async def test_following_feed_uses_feed_page_state(monkeypatch):
+    api = XiaohongshuAPI()
+    captured: dict[str, object] = {}
+
+    async def fake_extract_via_extension(**kwargs):
+        captured.update(kwargs)
+        return [
+            _note("note-follow-hit", "科研日报", "分享科研和论文写作经验", likes=180),
+            _note("note-follow-skip", "生活记录", "周末咖啡探店", likes=20),
+        ]
+
+    monkeypatch.setattr(api, "_extract_cards_via_extension", fake_extract_via_extension)
+
+    try:
+        notes = await api.get_following_feed_with_cookie(
+            cookie="web_session=test-token",
+            keywords=["科研", "论文"],
+            max_notes=5,
+        )
+    finally:
+        await api.close()
+
+    assert [note.id for note in notes] == ["note-follow-hit"]
+    assert getattr(notes[0], "matched_keywords") == ["科研", "论文"]
+    assert captured["page_kind"] == "feed"
+    assert captured["max_results"] == 10
+    assert captured["url"] == "https://www.xiaohongshu.com/explore?tab=following"
+
+
+@pytest.mark.asyncio
+async def test_search_falls_back_to_playwright_when_extension_errors(monkeypatch):
+    api = XiaohongshuAPI()
+    fallback_calls: list[dict[str, object]] = []
+
+    async def fail_extension(**kwargs):
+        raise RuntimeError("transient bridge timeout")
+
+    async def fake_extract_via_playwright(**kwargs):
+        fallback_calls.append(kwargs)
+        return [_note("note-fallback", "科研工作流", "通过回退链路抓到的内容", likes=260)]
+
+    monkeypatch.setattr(api, "_extract_cards_via_extension", fail_extension)
+    monkeypatch.setattr(api, "_extract_cards_via_playwright", fake_extract_via_playwright)
+
+    try:
+        notes = await api.search_by_keyword(
+            keyword="科研",
+            max_results=3,
+            min_likes=0,
+            cookie="web_session=test-token",
+        )
+    finally:
+        await api.close()
+
+    assert [note.id for note in notes] == ["note-fallback"]
+    assert fallback_calls == [
+        {
+            "url": "https://www.xiaohongshu.com/search_result?keyword=%E7%A7%91%E7%A0%94",
+            "cookie": "web_session=test-token",
+            "max_results": 6,
+            "page_kind": "search",
+        }
+    ]

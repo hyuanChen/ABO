@@ -57,7 +57,7 @@ export default function RoleCard({
       toast.success("座右铭已更新", r.motto);
       onUpdated();
     } catch {
-      toast.error("生成失败，Claude 可能未运行");
+      toast.error("生成失败，后台 Agent 可能未运行");
     } finally {
       setGeneratingMotto(false);
     }

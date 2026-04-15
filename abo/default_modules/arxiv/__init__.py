@@ -5,8 +5,10 @@ from typing import Literal
 
 import httpx
 
-from abo.sdk import Module, Item, Card, claude_json
+from abo.sdk import Module, Item, Card, agent_json
 from abo.default_modules.arxiv.category import get_category_name, ALL_SUBCATEGORIES
+from abo.store.papers import PaperStore
+from abo.tools.arxiv_api import arxiv_api_search, resolve_arxiv_figure_url
 
 
 class ArxivTracker(Module):
@@ -20,6 +22,14 @@ class ArxivTracker(Module):
 
     # Rate limiting: track last request time
     _last_request_time = 0
+
+    def _load_config(self) -> dict:
+        from abo.paper_tracking import load_module_preferences
+
+        return load_module_preferences(self.id)
+
+    def _load_existing_ids(self) -> set[str]:
+        return PaperStore().existing_identifiers(source_module=self.id)
 
     async def _rate_limited_request(self, client: httpx.AsyncClient, url: str, timeout: int = 60) -> httpx.Response:
         """Make a rate-limited request to arXiv."""
@@ -301,7 +311,7 @@ class ArxivTracker(Module):
             found_urls = set()
             img_matches = list(re.finditer(img_pattern, html, re.IGNORECASE))
 
-            for i, match in enumerate(img_matches[:5]):  # Limit to first 5 images
+            for i, match in enumerate(img_matches):
                 try:
                     src = match.group(1)
                     if not src:
@@ -313,21 +323,15 @@ class ArxivTracker(Module):
                     alt = alt_match.group(1) if alt_match else ""
 
                     # Skip non-figure images
-                    if any(skip in src.lower() for skip in ['icon', 'logo', 'button', 'spacer']):
+                    src_lower = src.lower()
+                    if src_lower.startswith("data:"):
+                        continue
+                    if any(skip in src_lower for skip in ['icon', 'logo', 'button', 'spacer']):
                         continue
 
-                    # Make absolute URL
-                    if src.startswith('/'):
-                        src = f"https://arxiv.org{src}"
-                    elif not src.startswith('http'):
-                        # Handle relative paths - arxiv HTML uses paths like "2604.01216v1/x1.png"
-                        # which are relative to the HTML page
-                        if src.startswith(arxiv_id + '/'):
-                            # Path already includes arxiv_id, just prepend base
-                            src = f"https://arxiv.org/html/{src}"
-                        else:
-                            # Path is relative, need to prepend full path
-                            src = f"https://arxiv.org/html/{arxiv_id}/{src}"
+                    src = resolve_arxiv_figure_url(arxiv_id, src)
+                    if not src:
+                        continue
 
                     if src in found_urls:
                         continue
@@ -347,6 +351,8 @@ class ArxivTracker(Module):
                         'is_method': is_method_figure,
                         'type': 'img'
                     })
+                    if len(figures) >= 5:
+                        break
                 except Exception:
                     continue
 
@@ -371,16 +377,131 @@ class ArxivTracker(Module):
                 mode=kwargs.get("mode", "OR"),
             )
 
+        if kwargs:
+            return await self.fetch_by_category(**kwargs)
+
+        from abo.paper_tracking import (
+            expand_arxiv_categories,
+            normalize_keyword_monitors,
+            split_keyword_groups,
+        )
+
+        config = self._load_config()
+        monitors = [monitor for monitor in normalize_keyword_monitors(config) if monitor.get("enabled", True)]
+        if not monitors:
+            return []
+
+        max_results = max(1, int(config.get("max_results", 20) or 20))
+        days_back = max(1, int(config.get("days_back", 30) or 30))
+        existing_ids = self._load_existing_ids()
+        merged_items: dict[str, Item] = {}
+
+        for monitor in monitors:
+            monitor_categories = monitor.get("categories") or config.get("default_categories") or ["cs.*"]
+            expanded_categories = expand_arxiv_categories(monitor_categories)
+            mode, groups = split_keyword_groups(monitor.get("query", ""))
+            if not groups:
+                continue
+
+            papers: list[dict] = []
+            if mode == "AND_OR":
+                seen_monitor_ids: set[str] = set()
+                for group in groups:
+                    group_papers = await arxiv_api_search(
+                        keywords=group,
+                        categories=expanded_categories or None,
+                        mode="AND",
+                        max_results=max_results,
+                        days_back=days_back,
+                        sort_by="submittedDate",
+                    )
+                    for paper in group_papers:
+                        paper_id = str(paper.get("id", "")).strip()
+                        if not paper_id or paper_id in seen_monitor_ids or paper_id in existing_ids:
+                            continue
+                        seen_monitor_ids.add(paper_id)
+                        papers.append(paper)
+            else:
+                papers = [
+                    paper
+                    for paper in await arxiv_api_search(
+                        keywords=groups[0],
+                        categories=expanded_categories or None,
+                        mode="AND",
+                        max_results=max_results,
+                        days_back=days_back,
+                        sort_by="submittedDate",
+                    )
+                    if str(paper.get("id", "")).strip() and str(paper.get("id", "")).strip() not in existing_ids
+                ]
+
+            match_info = {
+                "id": monitor["id"],
+                "label": monitor["label"],
+                "query": monitor["query"],
+                "categories": expanded_categories or [],
+                "type": "keyword",
+            }
+
+            for paper in papers:
+                item = self._paper_from_api_result(paper)
+                if not item:
+                    continue
+                existing_item = merged_items.get(item.id)
+                if existing_item:
+                    matches = existing_item.raw.setdefault("monitor_matches", [])
+                    if all(existing_match.get("id") != match_info["id"] for existing_match in matches):
+                        matches.append(match_info)
+                    continue
+                item.raw["monitor_matches"] = [match_info]
+                merged_items[item.id] = item
+
+        return list(merged_items.values())
+
         # 新的按分类调用
         return await self.fetch_by_category(**kwargs)
 
+    def _paper_from_api_result(self, paper: dict) -> Item | None:
+        arxiv_id = str(paper.get("id", "")).strip()
+        if not arxiv_id:
+            return None
+
+        categories = paper.get("categories") or []
+        primary_category = paper.get("primary_category") or (categories[0] if categories else "")
+        published = paper.get("published")
+        updated = paper.get("updated") or published
+
+        return Item(
+            id=arxiv_id,
+            raw={
+                "title": paper.get("title", "Untitled"),
+                "abstract": paper.get("summary", ""),
+                "authors": paper.get("authors", []),
+                "author_count": len(paper.get("authors", [])),
+                "published": published.isoformat() if hasattr(published, "isoformat") else (published or ""),
+                "updated": updated.isoformat() if hasattr(updated, "isoformat") else (updated or ""),
+                "primary_category": primary_category,
+                "primary_category_name": get_category_name(primary_category),
+                "categories": categories,
+                "all_categories": [get_category_name(c) for c in categories],
+                "comments": paper.get("comment") or "",
+                "journal_ref": paper.get("journal_ref") or "",
+                "doi": paper.get("doi") or "",
+                "url": paper.get("arxiv_url") or f"https://arxiv.org/abs/{arxiv_id}",
+                "pdf_url": paper.get("pdf_url") or f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+                "html_url": f"https://arxiv.org/html/{arxiv_id}",
+            },
+        )
+
     async def process(self, items: list[Item], prefs: dict) -> list[Card]:
-        """Process papers into Cards with Claude analysis"""
+        """Process papers into Cards with agent analysis"""
         import asyncio
         cards = []
 
         for item in items:
             p = item.raw
+            monitor_matches = p.get("monitor_matches", [])
+            monitor_labels = [match.get("label", "") for match in monitor_matches if match.get("label")]
 
             # Fetch figures
             try:
@@ -404,12 +525,12 @@ class ArxivTracker(Module):
             )
 
             try:
-                result = await asyncio.wait_for(claude_json(prompt, prefs=prefs), timeout=30)
+                result = await asyncio.wait_for(agent_json(prompt, prefs=prefs), timeout=30)
             except asyncio.TimeoutError:
-                print(f"[arxiv] Claude timeout for {item.id}, using fallback")
+                print(f"[arxiv] Agent timeout for {item.id}, using fallback")
                 result = {}
             except Exception as e:
-                print(f"[arxiv] Claude error for {item.id}: {e}")
+                print(f"[arxiv] Agent error for {item.id}: {e}")
                 result = {}
 
             # Build category path for Obsidian
@@ -441,14 +562,24 @@ class ArxivTracker(Module):
                 "abstract": p["abstract"],
                 "keywords": result.get("tags", []),
                 "figures": figures,
+                "paper_tracking_type": "keyword",
+                "paper_tracking_label": monitor_labels[0] if monitor_labels else "",
+                "paper_tracking_labels": monitor_labels,
+                "paper_tracking_matches": monitor_matches,
+                "relationship_label": "关键词追踪",
             }
 
+            card_tags = list(
+                dict.fromkeys(
+                    [*result.get("tags", []), primary_cat, *monitor_labels[:2]]
+                )
+            )
             cards.append(Card(
-                id=item.id,
+                id=f"arxiv-monitor:{item.id}",
                 title=p["title"],
                 summary=result.get("summary", p["abstract"][:150]),
                 score=min(result.get("score", 5), 10) / 10,
-                tags=result.get("tags", []) + [primary_cat],
+                tags=card_tags,
                 source_url=p.get("url", ""),
                 obsidian_path=f"Literature/arXiv/{cat_folder}/{first_author}{year}-{slug}.md",
                 metadata=metadata,

@@ -3,13 +3,14 @@ Semantic Scholar 论文追踪器 - 用于查找某篇论文的后续研究（引
 API Key: fxlcd3addOaOHGTwYCVLF1kmJBA0hYVy62KShAP4
 """
 
-import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import httpx
 
-from abo.sdk import Module, Item, Card, claude_json
+from abo.paper_tracking import load_module_preferences, normalize_followup_monitors
+from abo.sdk import Module, Item, Card, agent_json
+from abo.store.papers import PaperStore
 
 
 class SemanticScholarTracker(Module):
@@ -35,6 +36,12 @@ class SemanticScholarTracker(Module):
     _request_count = 0
     _rate_limit_reset = None
 
+    def _load_config(self) -> dict:
+        return load_module_preferences(self.id)
+
+    def _load_existing_ids(self) -> set[str]:
+        return PaperStore().existing_identifiers(source_module=self.id)
+
     async def _rate_limited_request(self, client: httpx.AsyncClient, url: str, params: dict = None) -> httpx.Response:
         """Make a rate-limited request to Semantic Scholar API."""
         import time
@@ -53,14 +60,48 @@ class SemanticScholarTracker(Module):
         if self.API_KEY:
             headers["x-api-key"] = self.API_KEY
 
-        resp = await client.get(url, headers=headers, params=params, timeout=60)
-        SemanticScholarTracker._last_request_time = time.time()
+        max_retries = 4
+        resp: httpx.Response | None = None
 
-        # Check rate limit headers
+        for attempt in range(max_retries):
+            elapsed = time.time() - SemanticScholarTracker._last_request_time
+            if elapsed < min_interval:
+                await asyncio.sleep(min_interval - elapsed)
+
+            resp = await client.get(url, headers=headers, params=params, timeout=60)
+            SemanticScholarTracker._last_request_time = time.time()
+
+            if resp.status_code not in {429, 500, 502, 503, 504}:
+                break
+
+            if attempt == max_retries - 1:
+                break
+
+            retry_after = resp.headers.get("retry-after")
+            if retry_after:
+                try:
+                    wait_seconds = float(retry_after)
+                except ValueError:
+                    wait_seconds = 2.0 * (attempt + 1)
+            else:
+                wait_seconds = min(30.0, 2.0 * (2 ** attempt))
+
+            print(
+                f"[s2] Request retry {attempt + 1}/{max_retries - 1} "
+                f"after status {resp.status_code}, waiting {wait_seconds:.1f}s"
+            )
+            await asyncio.sleep(wait_seconds)
+
+        if resp is None:
+            raise RuntimeError("Semantic Scholar request failed before response was created")
+
         remaining = resp.headers.get("x-ratelimit-remaining")
-        if remaining and int(remaining) < 10:
-            print(f"[s2] Rate limit low: {remaining} remaining, slowing down...")
-            await asyncio.sleep(3)
+        try:
+            if remaining is not None and int(remaining) < 10:
+                print(f"[s2] Rate limit low: {remaining} remaining, slowing down...")
+                await asyncio.sleep(3)
+        except ValueError:
+            pass
 
         return resp
 
@@ -132,50 +173,111 @@ class SemanticScholarTracker(Module):
 
         return None
 
-    async def get_citing_papers(self, client: httpx.AsyncClient, paper_id: str, limit: int = 20) -> list[dict]:
-        """获取引用该论文的论文列表"""
+    def _parse_publication_datetime(self, paper: dict) -> datetime | None:
+        """Parse publication date with a year-only fallback."""
+        publication_date = paper.get("publicationDate", "")
+        if publication_date:
+            try:
+                return datetime.fromisoformat(publication_date.replace("Z", "+00:00")).replace(tzinfo=None)
+            except ValueError:
+                pass
+
+        year = paper.get("year")
+        if isinstance(year, int) and year > 0:
+            return datetime(year, 1, 1)
+
+        return None
+
+    def _sort_papers(self, papers: list[dict], sort_by: Literal["recency", "citation_count"]) -> list[dict]:
+        """Sort papers deterministically for presentation and filtering."""
+        if sort_by == "citation_count":
+            return sorted(
+                papers,
+                key=lambda paper: (
+                    int(paper.get("citationCount") or 0),
+                    self._parse_publication_datetime(paper) or datetime.min,
+                    paper.get("title", "").lower(),
+                ),
+                reverse=True,
+            )
+
+        return sorted(
+            papers,
+            key=lambda paper: (
+                self._parse_publication_datetime(paper) or datetime.min,
+                int(paper.get("citationCount") or 0),
+                paper.get("title", "").lower(),
+            ),
+            reverse=True,
+        )
+
+    async def get_citing_papers(
+        self,
+        client: httpx.AsyncClient,
+        paper_id: str,
+        max_results: int | None = None,
+    ) -> list[dict]:
+        """获取引用该论文的论文列表，自动翻完所有分页。"""
         url = f"{self.BASE_URL}/paper/{paper_id}/citations"
-        params = {
-            "fields": "paperId,title,authors,year,citationCount,referenceCount,abstract,fieldsOfStudy,publicationDate,venue",
-            "limit": limit
-        }
-
-        resp = await self._rate_limited_request(client, url, params)
-
-        if resp.status_code != 200:
-            print(f"[s2] Get citations error: {resp.status_code} - {resp.text[:200]}")
-            return []
-
-        data = resp.json()
-        citing = data.get("data", [])
-
-        # 提取 citingPaper 字段
         papers = []
-        for item in citing:
-            paper = item.get("citingPaper", {})
-            if paper:
+        seen_paper_ids: set[str] = set()
+        offset = 0
+        page_size = 100
+
+        while True:
+            remaining = None if max_results is None else max_results - len(papers)
+            if remaining is not None and remaining <= 0:
+                break
+
+            params = {
+                "fields": "paperId,title,authors,year,citationCount,referenceCount,abstract,fieldsOfStudy,publicationDate,venue,externalIds,url",
+                "offset": offset,
+                "limit": page_size if remaining is None else min(page_size, remaining),
+            }
+
+            resp = await self._rate_limited_request(client, url, params)
+
+            if resp.status_code != 200:
+                print(f"[s2] Get citations error: {resp.status_code} - {resp.text[:200]}")
+                break
+
+            data = resp.json()
+            citing = data.get("data", [])
+            if not citing:
+                break
+
+            for item in citing:
+                paper = item.get("citingPaper", {})
+                paper_id_value = paper.get("paperId", "")
+                if not paper or not paper_id_value or paper_id_value in seen_paper_ids:
+                    continue
+                seen_paper_ids.add(paper_id_value)
                 papers.append(paper)
+
+            next_offset = data.get("next")
+            if next_offset is None or next_offset == offset:
+                break
+            offset = next_offset
 
         return papers
 
     async def fetch_followups(
         self,
         query: str,  # arXiv ID 或论文标题
-        max_results: int = 20,
-        days_back: int = 7,
-        existing_ids: set[str] = None,
+        max_results: int | None = None,
+        days_back: int | None = None,
+        existing_ids: set[str] | None = None,
+        sort_by: Literal["recency", "citation_count"] = "recency",
     ) -> list[Item]:
         """
         查找某篇论文的后续研究（引用该论文的论文）
 
         Args:
             query: arXiv ID (如 "2501.12345") 或论文标题
-            max_results: 最大结果数
-            days_back: 只获取最近 N 天发表的论文
+            max_results: 最大结果数；为 None 或 <=0 时表示全量抓取
+            days_back: 只获取最近 N 天发表的论文；为 None 或 <=0 时不限制
             existing_ids: 已存在的论文 ID 集合（用于去重）
         """
-        import asyncio
-
         print(f"[s2] Searching for follow-ups of: {query}")
 
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
@@ -200,39 +302,53 @@ class SemanticScholarTracker(Module):
             print(f"[s2] Found source paper: {paper_title} (ID: {paper_id})")
 
             # Step 2: 获取引用该论文的论文
-            citing_papers = await self.get_citing_papers(client, paper_id, limit=max_results * 2)
-            print(f"[s2] Found {len(citing_papers)} citing papers")
+            normalized_max_results = max_results if max_results and max_results > 0 else None
+            citing_papers = await self.get_citing_papers(client, paper_id)
+            print(
+                f"[s2] Found {len(citing_papers)} citing papers "
+                f"(source citationCount={source_paper.get('citationCount', 'unknown')})"
+            )
 
             # Step 3: 过滤和转换
             items = []
-            cutoff = datetime.utcnow() - timedelta(days=days_back)
+            cutoff = None
+            if days_back and days_back > 0:
+                cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days_back)
             existing_ids = existing_ids or set()
+            seen_item_ids = set(existing_ids)
+            filtered_papers = []
 
             for paper in citing_papers:
-                # 去重
                 paper_id_new = paper.get("paperId", "")
-                if paper_id_new in existing_ids:
+                external_ids = paper.get("externalIds", {}) or {}
+                arxiv_id = external_ids.get("ArXiv", "")
+                dedupe_key = arxiv_id if arxiv_id else (f"s2_{paper_id_new}" if paper_id_new else "")
+                if paper_id_new in existing_ids or (dedupe_key and dedupe_key in seen_item_ids):
                     continue
 
-                # 时间过滤
-                pub_date = paper.get("publicationDate", "")
-                if pub_date:
-                    try:
-                        pub_dt = datetime.fromisoformat(pub_date.replace("Z", "+00:00")).replace(tzinfo=None)
-                        if pub_dt < cutoff:
-                            continue
-                    except ValueError:
-                        # 如果日期解析失败，使用年份
-                        year = paper.get("year", 0)
-                        if year and year < datetime.now().year:
-                            continue
+                published_at = self._parse_publication_datetime(paper)
+                if cutoff and published_at and published_at < cutoff:
+                    continue
+                if cutoff and not published_at:
+                    continue
 
-                items.append(self._paper_to_item(paper, source_paper_title=paper_title))
+                filtered_papers.append(paper)
 
-                if len(items) >= max_results:
-                    break
+            sorted_papers = self._sort_papers(filtered_papers, sort_by=sort_by)
+            if normalized_max_results is not None:
+                sorted_papers = sorted_papers[:normalized_max_results]
 
-            print(f"[s2] Filtered to {len(items)} recent follow-up papers")
+            for paper in sorted_papers:
+                item = self._paper_to_item(paper, source_paper_title=paper_title)
+                if item.id in seen_item_ids:
+                    continue
+                seen_item_ids.add(item.id)
+                items.append(item)
+
+            print(
+                f"[s2] Filtered to {len(items)} follow-up papers "
+                f"(days_back={days_back or 'all'}, sort_by={sort_by})"
+            )
             return items
 
     def _paper_to_item(self, paper: dict, source_paper_title: str = "") -> Item:
@@ -293,15 +409,75 @@ class SemanticScholarTracker(Module):
 
     async def fetch(self, **kwargs) -> list[Item]:
         """Module SDK 兼容的 fetch 方法"""
+        if kwargs:
+            return await self.fetch_followups(**kwargs)
+
+        config = self._load_config()
+        monitors = [monitor for monitor in normalize_followup_monitors(config) if monitor.get("enabled", True)]
+        if not monitors:
+            return []
+
+        max_results = max(1, int(config.get("max_results", 20) or 20))
+        days_back_raw = config.get("days_back")
+        days_back = max(1, int(days_back_raw or 365)) if days_back_raw not in (None, "", 0, "0") else None
+        sort_by = str(config.get("sort_by", "recency") or "recency").strip()
+        if sort_by not in {"recency", "citation_count"}:
+            sort_by = "recency"
+
+        existing_ids = self._load_existing_ids()
+        merged_items: dict[str, Item] = {}
+
+        for monitor in monitors:
+            match_info = {
+                "id": monitor["id"],
+                "label": monitor["label"],
+                "query": monitor["query"],
+                "type": "followup",
+            }
+            items = await self.fetch_followups(
+                query=monitor["query"],
+                max_results=max_results,
+                days_back=days_back,
+                existing_ids=existing_ids,
+                sort_by=sort_by,
+            )
+
+            for item in items:
+                existing_item = merged_items.get(item.id)
+                if existing_item:
+                    matches = existing_item.raw.setdefault("monitor_matches", [])
+                    if all(existing_match.get("id") != match_info["id"] for existing_match in matches):
+                        matches.append(match_info)
+                    continue
+                item.raw["monitor_matches"] = [match_info]
+                merged_items[item.id] = item
+
+        return list(merged_items.values())
+
         return await self.fetch_followups(**kwargs)
 
     async def process(self, items: list[Item], prefs: dict) -> list[Card]:
-        """Process papers into Cards with Claude analysis"""
+        """Process papers into Cards with agent analysis"""
         import asyncio
+        from abo.tools.arxiv_api import ArxivAPITool
+
         cards = []
+        arxiv_api = ArxivAPITool()
 
         for item in items:
             p = item.raw
+            arxiv_id = p.get("arxiv_id", "")
+            figures: list[dict] = []
+            monitor_matches = p.get("monitor_matches", [])
+            monitor_labels = [match.get("label", "") for match in monitor_matches if match.get("label")]
+
+            if arxiv_id:
+                try:
+                    figures = await asyncio.wait_for(arxiv_api.fetch_figures(arxiv_id), timeout=15)
+                except asyncio.TimeoutError:
+                    print(f"[s2] arXiv figure fetch timeout for {arxiv_id}")
+                except Exception as e:
+                    print(f"[s2] arXiv figure fetch error for {arxiv_id}: {e}")
 
             # Build prompt for follow-up papers (强调这是后续研究)
             source_title = p.get("source_paper_title", "")
@@ -319,12 +495,12 @@ class SemanticScholarTracker(Module):
             )
 
             try:
-                result = await asyncio.wait_for(claude_json(prompt, prefs=prefs), timeout=30)
+                result = await asyncio.wait_for(agent_json(prompt, prefs=prefs), timeout=30)
             except asyncio.TimeoutError:
-                print(f"[s2] Claude timeout for {item.id}, using fallback")
+                print(f"[s2] Agent timeout for {item.id}, using fallback")
                 result = {}
             except Exception as e:
-                print(f"[s2] Claude error for {item.id}: {e}")
+                print(f"[s2] Agent error for {item.id}: {e}")
                 result = {}
 
             # Build metadata
@@ -338,7 +514,7 @@ class SemanticScholarTracker(Module):
                 "authors": p["authors"],
                 "author_count": p.get("author_count", len(p["authors"])),
                 "paper_id": p.get("paper_id", ""),
-                "arxiv_id": p.get("arxiv_id", ""),
+                "arxiv_id": arxiv_id,
                 "year": year,
                 "venue": p.get("venue", ""),
                 "published": p.get("published", ""),
@@ -351,14 +527,27 @@ class SemanticScholarTracker(Module):
                 "keywords": result.get("tags", []),
                 "s2_url": p.get("s2_url", ""),
                 "arxiv_url": p.get("arxiv_url", ""),
+                "pdf-url": f"https://arxiv.org/pdf/{arxiv_id}.pdf" if arxiv_id else "",
+                "html-url": f"https://arxiv.org/html/{arxiv_id}" if arxiv_id else "",
+                "figures": figures,
+                "paper_tracking_type": "followup",
+                "paper_tracking_label": monitor_labels[0] if monitor_labels else source_title,
+                "paper_tracking_labels": monitor_labels,
+                "paper_tracking_matches": monitor_matches,
+                "relationship_label": "Follow Up 追踪",
             }
 
+            card_tags = list(
+                dict.fromkeys(
+                    [*result.get("tags", []), "follow-up", *(p.get("fields_of_study", [])[:1]), *monitor_labels[:2]]
+                )
+            )
             cards.append(Card(
-                id=item.id,
+                id=f"followup-monitor:{item.id}",
                 title=p["title"],
                 summary=result.get("summary", p.get("abstract", "")[:150]),
                 score=min(result.get("score", 5), 10) / 10,
-                tags=result.get("tags", []) + ["follow-up"] + (p.get("fields_of_study", [])[:1]),
+                tags=card_tags,
                 source_url=p.get("url", p.get("s2_url", "")),
                 obsidian_path=f"Literature/FollowUps/{source_slug}/{first_author}{year}-{slug}.md",
                 metadata=metadata,

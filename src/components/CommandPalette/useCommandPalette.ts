@@ -222,10 +222,10 @@ export function useCommandPalette(): UseCommandPaletteReturn {
     },
     {
       id: 'goto-chat',
-      title: '打开 Claude 对话',
-      subtitle: '与 Claude AI 助手对话',
+      title: '打开 Agent 对话',
+      subtitle: '与 AI 助手对话',
       icon: LayoutDashboard,
-      keywords: ['chat', '对话', 'claude', 'ai', '助手'],
+      keywords: ['chat', '对话', 'agent', 'claude', 'codex', 'ai', '助手'],
       action: () => setActiveTab('chat'),
     },
   ], [setActiveTab, addToast]);

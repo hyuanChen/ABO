@@ -195,7 +195,7 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
           finalizeCrawlTask(taskId);
           if (showToast) {
             toast.success(
-              "收藏夹已增量入库",
+              crawlResult.crawl_mode === "full" ? "收藏夹已全量入库" : "收藏夹已增量入库",
               `新增 ${crawlResult.favorite_count} 条，稍后再看 ${crawlResult.watch_later_count} 条，跳过 ${crawlResult.skipped_count} 条`
             );
           }
@@ -349,7 +349,9 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
       kind: "crawl",
       title: "收藏内容入库",
       stage: "正在准备入库任务",
-      detail: `已选择 ${selectedIds.size} 个条目，正在检查增量基线与登录态。`,
+      detail: crawlMode === "full"
+        ? `已选择 ${selectedIds.size} 个条目，正在准备全量入库。`
+        : `已选择 ${selectedIds.size} 个条目，正在检查增量基线与登录态。`,
       ratio: 0.1,
     });
     try {
@@ -380,7 +382,7 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
           setResult(crawlResult);
           setCookieConfigured(true);
           toast.success(
-            "收藏夹已增量入库",
+            crawlResult.crawl_mode === "full" ? "收藏夹已全量入库" : "收藏夹已增量入库",
             `新增 ${crawlResult.favorite_count} 条，稍后再看 ${crawlResult.watch_later_count} 条，跳过 ${crawlResult.skipped_count} 条`
           );
           setLegacyStatus({
@@ -573,7 +575,9 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
                     lineHeight: 1.65,
                   }}
                 >
-                  {result.crawl_mode === "full" ? "全量" : "增量"}爬取完成：新增收藏 {result.favorite_count} 条，稍后再看 {result.watch_later_count} 条，跳过已记录 {result.skipped_count} 条。已按收藏日期重命名 {result.renamed_favorite_count ?? 0} 个收藏文件。增量记录保存在 {result.state_path}
+                  {result.crawl_mode === "full"
+                    ? `全量爬取完成：新增收藏 ${result.favorite_count} 条，稍后再看 ${result.watch_later_count} 条，跳过 ${result.skipped_count} 条。已按收藏日期重命名 ${result.renamed_favorite_count ?? 0} 个收藏文件。状态记录保存在 ${result.state_path}`
+                    : `增量爬取完成：新增收藏 ${result.favorite_count} 条，稍后再看 ${result.watch_later_count} 条，跳过已记录 ${result.skipped_count} 条。已按收藏日期重命名 ${result.renamed_favorite_count ?? 0} 个收藏文件。增量记录保存在 ${result.state_path}`}
                 </div>
               )}
 

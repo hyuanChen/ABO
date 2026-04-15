@@ -19,10 +19,17 @@ import {
   Eye,
   Sparkles,
   User,
+  Headphones,
+  HelpCircle,
+  FolderOpen,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
 import { api } from "../../core/api";
-import { useStore } from "../../core/store";
+import {
+  MODULES_HIDDEN_FROM_MANAGEMENT,
+  filterHiddenManagementModules,
+} from "../../core/moduleVisibility";
+import { useStore, FeedModule } from "../../core/store";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -94,10 +101,19 @@ function SettingItem({ icon, title, description, children, onClick }: SettingIte
   );
 }
 
-function Toggle({ enabled, onToggle }: { enabled: boolean; onToggle: () => void }) {
+function Toggle({
+  enabled,
+  onToggle,
+  disabled = false,
+}: {
+  enabled: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+}) {
   return (
     <button
       onClick={onToggle}
+      disabled={disabled}
       style={{
         position: "relative",
         width: "48px",
@@ -107,9 +123,10 @@ function Toggle({ enabled, onToggle }: { enabled: boolean; onToggle: () => void 
           ? "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))"
           : "var(--bg-hover)",
         border: "none",
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
         transition: "all 0.3s ease",
         boxShadow: enabled ? "0 2px 8px rgba(188, 164, 227, 0.4)" : "inset 0 2px 4px rgba(0,0,0,0.1)",
+        opacity: disabled ? 0.6 : 1,
       }}
     >
       <span
@@ -128,6 +145,18 @@ function Toggle({ enabled, onToggle }: { enabled: boolean; onToggle: () => void 
     </button>
   );
 }
+
+const HIDDEN_MODULE_ICONS: Record<string, React.ReactNode> = {
+  "xiaoyuzhou-tracker": <Headphones style={{ width: "20px", height: "20px" }} />,
+  "zhihu-tracker": <HelpCircle style={{ width: "20px", height: "20px" }} />,
+  "folder-monitor": <FolderOpen style={{ width: "20px", height: "20px" }} />,
+};
+
+const HIDDEN_MODULE_DESCRIPTIONS: Record<string, string> = {
+  "xiaoyuzhou-tracker": "已从模块管理页隐藏，可在这里控制播客追踪是否参与调度",
+  "zhihu-tracker": "已从模块管理页隐藏，可在这里控制知乎追踪是否参与调度",
+  "folder-monitor": "已从模块管理页隐藏，可在这里控制文件夹监控是否参与调度",
+};
 
 function TabButton({
   active,
@@ -394,6 +423,105 @@ function RSSSection() {
   );
 }
 
+function HiddenModuleSection() {
+  const [modules, setModules] = useState<FeedModule[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [updatingModuleId, setUpdatingModuleId] = useState<string | null>(null);
+  const { addToast, setFeedModules } = useStore();
+
+  useEffect(() => {
+    loadModules();
+  }, []);
+
+  async function loadModules() {
+    try {
+      setLoading(true);
+      const data = await api.get<{ modules: FeedModule[] }>("/api/modules");
+      setFeedModules(data.modules);
+      setModules(filterHiddenManagementModules(data.modules));
+    } catch (e) {
+      console.error("Failed to load hidden modules:", e);
+      addToast({ kind: "error", title: "加载模块开关失败" });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function toggleModule(module: FeedModule) {
+    const nextEnabled = !module.enabled;
+    setUpdatingModuleId(module.id);
+
+    try {
+      await api.patch(`/api/modules/${module.id}`, { enabled: nextEnabled });
+      const nextModules = modules.map((item) =>
+        item.id === module.id ? { ...item, enabled: nextEnabled } : item
+      );
+      setModules(nextModules);
+      setFeedModules(
+        useStore.getState().feedModules.map((item) =>
+          item.id === module.id ? { ...item, enabled: nextEnabled } : item
+        )
+      );
+      addToast({
+        kind: "success",
+        title: `${module.name}${nextEnabled ? "已启用" : "已关闭"}`,
+      });
+    } catch (e) {
+      console.error("Failed to update hidden module:", e);
+      addToast({ kind: "error", title: `更新 ${module.name} 失败` });
+    } finally {
+      setUpdatingModuleId(null);
+    }
+  }
+
+  return (
+    <Card title="隐藏模块开关" icon={<SettingsIcon style={{ width: "18px", height: "18px" }} />}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+        <div
+          style={{
+            padding: "12px 16px",
+            borderRadius: "var(--radius-md)",
+            background: "var(--bg-hover)",
+            border: "1px solid var(--border-light)",
+            fontSize: "0.75rem",
+            color: "var(--text-muted)",
+            lineHeight: 1.6,
+          }}
+        >
+          小宇宙追踪、知乎追踪、文件夹监控已从模块管理页隐藏，统一在这里控制开关。
+        </div>
+
+        {loading ? (
+          <div style={{ padding: "20px", textAlign: "center", color: "var(--text-muted)", fontSize: "0.875rem" }}>
+            加载中...
+          </div>
+        ) : (
+          modules.map((module) => (
+            <SettingItem
+              key={module.id}
+              icon={HIDDEN_MODULE_ICONS[module.id] || <SettingsIcon style={{ width: "20px", height: "20px" }} />}
+              title={module.name}
+              description={HIDDEN_MODULE_DESCRIPTIONS[module.id] || "已从模块管理页隐藏，可在这里控制启停"}
+            >
+              <Toggle
+                enabled={module.enabled}
+                disabled={updatingModuleId === module.id}
+                onToggle={() => toggleModule(module)}
+              />
+            </SettingItem>
+          ))
+        )}
+
+        {!loading && modules.length !== MODULES_HIDDEN_FROM_MANAGEMENT.length && (
+          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", padding: "0 4px" }}>
+            部分隐藏模块暂未加载到前端列表。
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 function GeneralSection() {
   const [darkMode, setDarkMode] = useState(() =>
     document.documentElement.classList.contains("dark")
@@ -463,6 +591,8 @@ function GeneralSection() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      <HiddenModuleSection />
+
       {/* Demo Mode */}
       <Card title="展示模式" icon={<Eye style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>

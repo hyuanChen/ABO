@@ -92,6 +92,13 @@ function metadataString(metadata: Record<string, unknown>, key: string): string 
   return typeof value === "string" ? value : "";
 }
 
+function metadataStringList(metadata: Record<string, unknown>, key: string): string[] {
+  const value = metadata[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
 function proxiedImage(url: string): string {
   if (!url) return "";
   return `http://127.0.0.1:8765/api/proxy/image?url=${encodeURIComponent(url)}`;
@@ -106,6 +113,10 @@ export default function CardView({ card, focused, onClick, onFeedback, onRating,
   const published = metadataString(card.metadata, "published");
   const thumbnail = metadataString(card.metadata, "thumbnail");
   const thumbnailUrl = thumbnail ? proxiedImage(thumbnail) : "";
+  const paperTrackingType = metadataString(card.metadata, "paper_tracking_type");
+  const paperTrackingLabels = metadataStringList(card.metadata, "paper_tracking_labels");
+  const paperTrackingLabel = paperTrackingLabels[0] || metadataString(card.metadata, "paper_tracking_label");
+  const sourcePaperTitle = metadataString(card.metadata, "source_paper_title");
   const bilibiliTypeLabel =
     dynamicType === "video"
       ? "视频"
@@ -383,6 +394,48 @@ export default function CardView({ card, focused, onClick, onFeedback, onRating,
       >
         {card.title}
       </h3>
+
+      {(paperTrackingLabel || sourcePaperTitle) && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "8px",
+            marginBottom: "12px",
+          }}
+        >
+          {paperTrackingLabel && (
+            <span
+              style={{
+                fontSize: "0.75rem",
+                fontWeight: 600,
+                padding: "5px 10px",
+                borderRadius: "999px",
+                background: "rgba(188, 164, 227, 0.12)",
+                color: "var(--color-primary)",
+                border: "1px solid rgba(188, 164, 227, 0.16)",
+              }}
+            >
+              {paperTrackingType === "followup" ? "Follow Up" : "关键词"} · {paperTrackingLabel}
+            </span>
+          )}
+          {paperTrackingType === "followup" && sourcePaperTitle && (
+            <span
+              style={{
+                fontSize: "0.75rem",
+                fontWeight: 600,
+                padding: "5px 10px",
+                borderRadius: "999px",
+                background: "rgba(123, 200, 240, 0.14)",
+                color: "#2C7FB8",
+                border: "1px solid rgba(123, 200, 240, 0.18)",
+              }}
+            >
+              Source · {sourcePaperTitle}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Rating Section - 三级打分 (横排，移到摘要上方) */}
       <div style={{ marginBottom: "12px" }}>

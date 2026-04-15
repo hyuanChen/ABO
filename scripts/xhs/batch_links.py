@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from abo.config import get_vault_path, load as load_config
-from abo.tools.xhs_crawler import crawl_xhs_note_to_vault
+from abo.tools.xhs_crawler import classify_xhs_runtime_error, crawl_xhs_note_to_vault
 
 
 def _load_links(args: argparse.Namespace) -> list[str]:
@@ -48,15 +48,27 @@ async def _run(args: argparse.Namespace) -> list[dict]:
                 include_comments=args.comments,
                 include_sub_comments=args.sub_comments,
                 comments_limit=args.comments_limit,
+                use_extension=not args.no_extension,
+                extension_port=args.extension_port,
                 use_cdp=not args.no_cdp,
                 cdp_port=args.cdp_port,
             )
             results.append(result)
             print(f"[{idx}] OK {result['markdown_path']}")
         except Exception as exc:
-            error = {"success": False, "url": link, "error": str(exc)}
+            classified = classify_xhs_runtime_error(exc)
+            error = {
+                "success": False,
+                "url": link,
+                "error_code": classified["code"],
+                "error": classified["message"],
+                "stopped": classified["stop"],
+            }
             results.append(error)
-            print(f"[{idx}] FAIL {link}: {exc}", file=sys.stderr)
+            print(f"[{idx}] FAIL {link}: {classified['message']}", file=sys.stderr)
+            if classified["stop"]:
+                print(f"[{idx}] STOP 批量任务已停止，原因: {classified['code']}", file=sys.stderr)
+                break
     return results
 
 
@@ -71,6 +83,8 @@ def main() -> None:
     parser.add_argument("--comments", action="store_true", help="在 Markdown 中记录评论抓取选项")
     parser.add_argument("--sub-comments", action="store_true", help="记录二级评论抓取选项")
     parser.add_argument("--comments-limit", type=int, default=20)
+    parser.add_argument("--no-extension", action="store_true", help="禁用浏览器扩展 bridge 主链路")
+    parser.add_argument("--extension-port", type=int, default=9334, help="扩展 bridge server 端口")
     parser.add_argument("--no-cdp", action="store_true", help="禁用本地浏览器 CDP 兜底")
     parser.add_argument("--cdp-port", type=int, default=9222)
     args = parser.parse_args()

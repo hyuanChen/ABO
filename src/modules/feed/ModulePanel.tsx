@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { LayoutGrid, Play, Terminal, ArrowRight, Clock, Rss } from "lucide-react";
 import { api } from "../../core/api";
+import { filterModulesForManagement } from "../../core/moduleVisibility";
 import { useStore, FeedModule } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Grid } from "../../components/Layout";
 import ModuleDetail from "./ModuleDetail";
@@ -20,6 +21,7 @@ export default function ModulePanel() {
   const { feedModules, setFeedModules, unreadCounts, moduleToConfigure } = useStore();
   const [selectedModule, setSelectedModule] = useState<FeedModule | null>(null);
   const [showSummary, setShowSummary] = useState(false);
+  const managementModules = filterModulesForManagement(feedModules);
 
   useEffect(() => {
     api.get<{ modules: FeedModule[] }>("/api/modules")
@@ -38,15 +40,15 @@ export default function ModulePanel() {
       if (moduleToConfigure === null && selectedModule) {
         // User clicked the header button - reset to list
         setSelectedModule(null);
-      } else if (moduleToConfigure && feedModules.length > 0) {
-        const mod = feedModules.find(m => m.id === moduleToConfigure);
+      } else if (moduleToConfigure && managementModules.length > 0) {
+        const mod = managementModules.find(m => m.id === moduleToConfigure);
         if (mod) {
           setSelectedModule(mod);
         }
         // Don't reset moduleToConfigure here - let NavSidebar handle it
       }
     }
-  }, [moduleToConfigure, feedModules, selectedModule]);
+  }, [moduleToConfigure, managementModules, selectedModule]);
 
   async function runNow(moduleId: string, e: React.MouseEvent) {
     e.stopPropagation();
@@ -90,7 +92,7 @@ export default function ModulePanel() {
             </button>
             <button
               onClick={() => alert(
-                "在终端运行 Claude Code，告诉它：\n\n" +
+                "在终端运行你的 Agent CLI，告诉它：\n\n" +
                 "「帮我写一个 ABO 模块，放在 ~/.abo/modules/ 目录下」\n\n" +
                 "ABO 会自动检测并加载新模块。"
               )}
@@ -117,7 +119,7 @@ export default function ModulePanel() {
       />
       <PageContent maxWidth="1200px">
         <Grid columns={2} gap="md">
-          {feedModules.map((mod) => {
+          {managementModules.map((mod) => {
             const unread = unreadCounts[mod.id] ?? 0;
             return (
               <div

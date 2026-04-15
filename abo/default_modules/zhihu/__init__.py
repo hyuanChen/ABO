@@ -12,7 +12,7 @@ from pathlib import Path
 
 import httpx
 
-from abo.sdk import Module, Item, Card, claude_json
+from abo.sdk import Module, Item, Card, agent_json
 
 
 class ZhihuTracker(Module):
@@ -245,7 +245,7 @@ class ZhihuTracker(Module):
             )
 
             try:
-                result = await claude_json(prompt, prefs=prefs)
+                result = await agent_json(prompt, prefs=prefs)
             except Exception:
                 result = {}
 

@@ -110,15 +110,18 @@ crawl_xhs_albums_incremental
 
 限速策略：
 
-- 专辑抓取默认每条详情页随机间隔 `3-8` 秒。
-- 前端可调整 `crawl_delay_seconds` 作为随机上限，后端会限制在 `3-8` 秒范围内。
+- 专辑抓取默认每条详情页随机间隔 `8-15` 秒，默认上限是 `12` 秒。
+- 前端可调整 `crawl_delay_seconds` 作为随机上限，后端会限制在 `8-15` 秒范围内。
 - 成功和失败都会进入等待阶段，避免失败时连续高频请求。
-- 如果小红书返回 `300012`、安全限制、重新登录等风控状态，应停止压测，先重新获取 Cookie 或切换可靠网络。
+- 如果小红书返回 `300012`、`300013`、安全限制、访问频繁、重新登录等风控状态，任务会直接中断，避免继续压测。
 
 专辑内笔记列表现在优先使用无界面 Playwright 抓取：
 
 ```text
-_fetch_board_notes
+crawl_xhs_albums_incremental
+-> 一次任务内复用同一个 headless browser/context/page
+-> 按专辑顺序逐个切换 board 页面
+-> _fetch_board_notes
 -> _fetch_board_notes_headless
 -> 打开 https://www.xiaohongshu.com/board/<board_id>
 -> 读取 window.__INITIAL_STATE__.board.boardFeedsMap[board_id].notes

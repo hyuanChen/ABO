@@ -52,7 +52,7 @@ from pathlib import Path
 
 import httpx
 
-from abo.sdk import Module, Item, Card, claude_json
+from abo.sdk import Module, Item, Card, agent_json
 from abo.default_modules.bilibili.wbi import enc_wbi, get_wbi_keys
 
 
@@ -74,6 +74,8 @@ DEFAULT_CONFIG = {
     "up_uids": [],                 # Specific UIDs to track (backward compat)
     "followed_up_groups": [],      # Followed UP group filters
     "followed_up_original_groups": [],  # Native Bilibili followed group tag IDs
+    "followed_up_filter_mode": "and",  # and | smart_only
+    "creator_profiles": {},        # Smart grouping result keyed by followed mid
     "sessdata": None,              # Bilibili SESSDATA cookie
 }
 
@@ -219,6 +221,8 @@ class BilibiliTracker(Module):
         use_follow_feed = use_follow_feed and config.get("follow_feed", True)
         followed_up_groups = config.get("followed_up_groups", []) or []
         followed_up_original_groups = config.get("followed_up_original_groups", []) or []
+        followed_up_filter_mode = str(config.get("followed_up_filter_mode", "and") or "and").strip().lower()
+        creator_profiles = config.get("creator_profiles", {}) or {}
 
         # Parse SESSDATA from various formats (Cookie-Editor JSON, simple string, etc.)
         raw_sessdata = config.get("sessdata", "")
@@ -233,6 +237,8 @@ class BilibiliTracker(Module):
                 explicit_uids=up_uids,
                 followed_up_groups=followed_up_groups,
                 followed_up_original_groups=followed_up_original_groups,
+                followed_up_filter_mode=followed_up_filter_mode,
+                creator_profiles=creator_profiles,
             )
             follow_items = await self._fetch_follow_feed(
                 sessdata=parsed_sessdata,
@@ -344,7 +350,9 @@ class BilibiliTracker(Module):
         sessdata: str,
         explicit_uids: list[str] | None,
         followed_up_groups: list[str] | None,
-        followed_up_original_groups: list[str | int] | None,
+        followed_up_original_groups: list[str | int] | None = None,
+        followed_up_filter_mode: str = "and",
+        creator_profiles: dict | None = None,
     ) -> set[str] | None:
         """Resolve allowed followed UPs from explicit UIDs and configured groups."""
         normalized_uids = {
@@ -377,7 +385,17 @@ class BilibiliTracker(Module):
             return allowed_uids or None
 
         for up in followed_ups:
-            up_group_hit = self._classify_followed_up(up) in normalized_groups if normalized_groups else False
+            mid = str(up.get("mid", "")).strip()
+            profile = (creator_profiles or {}).get(mid, {}) if mid else {}
+            manual_override = bool(profile.get("manual_override"))
+            profile_groups = {
+                str(group).strip()
+                for group in (profile.get("smart_groups") or [])
+                if str(group).strip()
+            }
+            if not profile_groups and not manual_override:
+                profile_groups = {self._classify_followed_up(up)}
+            up_group_hit = bool(profile_groups & normalized_groups) if normalized_groups else False
             up_original_tags = {
                 int(tag_id)
                 for tag_id in (up.get("tag") or [])
@@ -385,10 +403,18 @@ class BilibiliTracker(Module):
             }
             up_original_hit = bool(up_original_tags & normalized_original_groups) if normalized_original_groups else False
 
-            if up_group_hit or up_original_hit:
-                mid = str(up.get("mid", "")).strip()
-                if mid:
-                    allowed_uids.add(mid)
+            if normalized_groups and normalized_original_groups:
+                if followed_up_filter_mode == "smart_only":
+                    matched = up_group_hit
+                else:
+                    matched = up_group_hit and up_original_hit
+            elif normalized_groups:
+                matched = up_group_hit
+            else:
+                matched = up_original_hit
+
+            if matched and mid:
+                allowed_uids.add(mid)
 
         return allowed_uids or None
 
@@ -870,7 +896,7 @@ class BilibiliTracker(Module):
                 obsidian_path = f"SocialMedia/Bilibili/Dynamic/{safe_title}.md"
 
             try:
-                result = await claude_json(prompt, prefs=prefs)
+                result = await agent_json(prompt, prefs=prefs)
             except Exception:
                 result = {}
 

@@ -200,6 +200,18 @@ os.replace(tmp, path)
 
 ---
 
+## TODO
+
+- `semantic-scholar-tracker` 当前在两种场景都会调用 `agent_json` 做后续论文摘要/打分/标签生成：
+  1. 手动搜索 follow up 论文时，走 `POST /api/modules/semantic-scholar-tracker/crawl`
+  2. 模块定时任务运行时（默认每天 10:00）
+- 后续需要支持一个“关闭 agent 分析”的开关或降级模式：搜索/监控 follow up 论文时，允许跳过 `agent_json`，只返回基础论文信息、图片、链接和原始 metadata，避免本机 CLI 不稳定时影响搜索链路。
+- 相关实现位置：
+  - `abo/main.py` 中 `crawl_semantic_scholar_tracker()`
+  - `abo/default_modules/semantic_scholar_tracker/__init__.py` 中 `process()` 里的 `agent_json(prompt, prefs=prefs)`
+
+---
+
 ## API Routes
 
 **Feed:** `GET /api/cards` · `GET /api/cards/unread-counts` · `POST /api/cards/{id}/feedback`

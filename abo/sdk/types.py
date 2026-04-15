@@ -13,7 +13,7 @@ class Item:
 
 @dataclass
 class Card:
-    """经 Claude 处理后的标准化内容卡片"""
+    """经 Agent 处理后的标准化内容卡片"""
     id: str
     title: str
     summary: str

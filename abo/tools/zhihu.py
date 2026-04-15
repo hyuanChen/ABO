@@ -3,7 +3,7 @@
 
 功能：
 1. 关键词搜索，返回高赞内容（回答/文章/视频）
-2. Trends 分析（使用 Claude）
+2. Trends 分析（使用 Agent）
 3. 评论区爬取，按赞排序
 
 数据来源：知乎 API / RSSHub / 搜索引擎
@@ -778,13 +778,13 @@ class ZhihuAPI:
 }}
 """
 
-        # 调用 Claude
-        from abo.sdk.tools import claude_json
+        # 调用 Agent
+        from abo.sdk.tools import agent_json
 
         try:
-            result = await claude_json(prompt, prefs=prefs)
+            result = await agent_json(prompt, prefs=prefs)
         except Exception as e:
-            print(f"Claude 分析失败: {e}")
+            print(f"Agent 分析失败: {e}")
             result = {
                 "hot_topics": [],
                 "trending_tags": [],

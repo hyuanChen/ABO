@@ -1,8 +1,9 @@
 """小红书笔记入库爬取器。
 
-把 skill 中验证过的单帖抓取流程封装成 ABO 可调用的后端能力：
-- 优先后端请求详情页并解析 window.__INITIAL_STATE__
-- 数据缺失时可复用本机 Edge/Chrome CDP 调试端口兜底
+当前主链路：
+- 优先通过本地浏览器扩展 bridge 复用真实浏览器和真实登录态
+- bridge 不可用时再复用本机 Edge/Chrome CDP 调试端口
+- 两条浏览器链路都失败时，最后再回退到后端详情页 HTML 解析
 - 保留远程图片/视频链接，同时下载本地资源到 vault/xhs
 - 输出 skill 风格 Markdown
 """
@@ -11,15 +12,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import random
 import re
+import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+
+from abo.tools.xhs_extension_bridge import XHSExtensionBridge
 
 
 BASE_URL = "https://www.xiaohongshu.com"
@@ -55,6 +60,7 @@ class XHSCrawledNote:
     images: list[dict[str, Any]] = field(default_factory=list)
     video_url: str = ""
     live_urls: list[dict[str, Any]] = field(default_factory=list)
+    comments: list[dict[str, Any]] = field(default_factory=list)
     local_resources: list[LocalResource] = field(default_factory=list)
     used_cdp: bool = False
     warnings: list[str] = field(default_factory=list)
@@ -82,6 +88,126 @@ def _safe_str(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _extension_should_navigate_background(dedicated_window_mode: bool) -> bool:
+    return bool(dedicated_window_mode)
+
+
+def _is_xhs_risk_error(error: Any) -> bool:
+    text = _safe_str(error)
+    if not text:
+        return False
+    keywords = [
+        "300012",
+        "300013",
+        "安全限制",
+        "访问频繁",
+        "请稍后再试",
+        "ip存在风险",
+        "ip 风险",
+        "登录状态异常",
+    ]
+    lowered = text.lower()
+    return any(keyword.lower() in lowered for keyword in keywords)
+
+
+def _classify_xhs_page_text(text: str) -> tuple[str, str] | None:
+    normalized = _safe_str(text)
+    if not normalized:
+        return None
+
+    rules = [
+        ("risk_limited", "访问频繁", "命中小红书访问频繁限制，任务已停止"),
+        ("risk_limited", "安全限制", "命中小红书安全限制，任务已停止"),
+        ("risk_limited", "安全访问", "命中小红书安全访问限制，任务已停止"),
+        ("risk_limited", "请稍后再试", "小红书要求稍后重试，任务已停止"),
+        ("manual_required", "扫码", "页面要求扫码验证，任务已停止，等待人工处理"),
+        ("auth_invalid", "请先登录", "当前浏览器未登录小红书，任务已停止"),
+        ("auth_invalid", "登录后查看更多内容", "当前页面要求登录后查看，任务已停止"),
+        ("not_found", "300031", "当前笔记暂时无法浏览，任务已停止"),
+        ("not_found", "页面不见了", "页面已不可访问，任务已停止"),
+        ("not_found", "你访问的页面不见了", "页面已不可访问，任务已停止"),
+        ("not_found", "内容无法展示", "页面内容不可展示，任务已停止"),
+        ("not_found", "笔记不存在", "笔记不存在或已删除，任务已停止"),
+        ("not_found", "内容已无法查看", "内容已无法查看，任务已停止"),
+    ]
+    for code, marker, message in rules:
+        if marker in normalized:
+            return code, message
+    return None
+
+
+def _should_stop_xhs_task(error: Any) -> bool:
+    text = _safe_str(error)
+    stop_markers = [
+        "[risk_limited]",
+        "[manual_required]",
+        "[auth_invalid]",
+        "[not_found]",
+        "任务已停止",
+    ]
+    lowered = text.lower()
+    return any(marker.lower() in lowered for marker in stop_markers)
+
+
+def classify_xhs_runtime_error(error: Any) -> dict[str, Any]:
+    text = _safe_str(error)
+    match = re.search(r"\[(?P<code>[a-z_]+)\]\s*(?P<message>.+)", text)
+    if match:
+        code = match.group("code")
+        message = match.group("message")
+        return {"code": code, "message": message, "stop": _should_stop_xhs_task(text)}
+
+    if _is_xhs_risk_error(text):
+        return {"code": "risk_limited", "message": text or "命中风控限制", "stop": True}
+
+    return {"code": "unknown_error", "message": text or "未知错误", "stop": _should_stop_xhs_task(text)}
+
+
+def _raise_for_xhs_snapshot(snapshot: Any) -> None:
+    if not isinstance(snapshot, dict):
+        return
+    risk = snapshot.get("risk")
+    if isinstance(risk, dict) and risk.get("code"):
+        code = _safe_str(risk.get("code"))
+        message = _safe_str(risk.get("message")) or "页面状态异常"
+        raise RuntimeError(f"[{code}] {message}，任务已停止")
+
+
+async def _wait_xhs_state_via_bridge(
+    bridge: XHSExtensionBridge,
+    *,
+    kind: str,
+    note_id: str = "",
+    board_id: str = "",
+    timeout_ms: int = 15000,
+    interval_ms: int = 500,
+    command_timeout: float = 20.0,
+) -> dict[str, Any]:
+    """在页面 MAIN world 等待 XHS 状态对象就绪。
+
+    参考 xiaohongshu-skills 的 bridge 思路：
+    CLI/后端 -> bridge -> 扩展 -> 真实浏览器 tab -> MAIN world 读取页面状态。
+    这里不抓接口，优先等页面已经渲染出的状态路径：
+    - 首页 Feed: window.__INITIAL_STATE__.feed.feeds
+    - 搜索结果: window.__INITIAL_STATE__.search.feeds
+    - 详情页: window.__INITIAL_STATE__.note.noteDetailMap
+    - 专辑页: window.__INITIAL_STATE__.board.boardFeedsMap[boardId].notes
+    """
+    snapshot = await bridge.call(
+        "wait_for_xhs_state",
+        {
+            "kind": kind,
+            "noteId": note_id,
+            "boardId": board_id,
+            "timeout": timeout_ms,
+            "interval": interval_ms,
+        },
+        timeout=command_timeout,
+    )
+    _raise_for_xhs_snapshot(snapshot)
+    return snapshot if isinstance(snapshot, dict) else {}
 
 
 def _parse_count(value: Any) -> int:
@@ -171,9 +297,19 @@ def _extract_note_root(state: dict[str, Any], note_id: str) -> dict[str, Any] | 
         detail_map = note_section.get("noteDetailMap")
         if isinstance(detail_map, dict) and detail_map:
             candidates = []
-            if note_id in detail_map:
+            if note_id and note_id in detail_map:
                 candidates.append(detail_map[note_id])
-            candidates.extend(detail_map.values())
+            elif not note_id:
+                candidates.extend(detail_map.values())
+            if note_id and not candidates:
+                for item in detail_map.values():
+                    if not isinstance(item, dict):
+                        continue
+                    note = item.get("note") if isinstance(item.get("note"), dict) else item
+                    candidate_id = _safe_str(note.get("noteId") or note.get("id")) if isinstance(note, dict) else ""
+                    if candidate_id == note_id:
+                        candidates.append(item)
+                        break
             for item in candidates:
                 if isinstance(item, dict):
                     note = item.get("note")
@@ -268,11 +404,473 @@ def _headers(cookie: str | None = None, referer: str = BASE_URL) -> dict[str, st
     return headers
 
 
+async def _macos_real_browser_tab_pulse() -> dict[str, Any]:
+    if sys.platform != "darwin":
+        return {"ok": False, "reason": "unsupported_platform"}
+
+    async def run_for_app(app_name: str) -> dict[str, Any]:
+        script = f'''
+tell application "{app_name}"
+  if not running then error "not_running"
+  activate
+  if (count of windows) = 0 then error "no_window"
+  set targetWindow to front window
+  set tabCount to count of tabs of targetWindow
+  if tabCount < 1 then error "no_tab"
+  set originalIndex to active tab index of targetWindow
+  if tabCount > 1 then
+    set altIndex to originalIndex + 1
+    if altIndex > tabCount then set altIndex to 1
+    set active tab index of targetWindow to altIndex
+    delay 0.35
+    set active tab index of targetWindow to originalIndex
+    delay 0.35
+    return "ok|existing_tab"
+  end if
+  return "single_tab"
+end tell
+'''
+        proc = await asyncio.create_subprocess_exec(
+            "/usr/bin/osascript",
+            "-",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate(script.encode("utf-8"))
+        if proc.returncode != 0:
+            return {
+                "ok": False,
+                "app": app_name,
+                "reason": "osascript_failed",
+                "stderr": (stderr or b"").decode("utf-8", errors="ignore").strip(),
+            }
+        text = (stdout or b"").decode("utf-8", errors="ignore").strip()
+        if text == "ok|existing_tab":
+            return {"ok": True, "app": app_name, "mode": "existing_tab"}
+        if text == "single_tab":
+            return {"ok": False, "app": app_name, "reason": "single_tab"}
+        return {"ok": False, "app": app_name, "reason": "invalid_output", "output": text}
+
+    errors: list[dict[str, Any]] = []
+    for app_name in ["Microsoft Edge", "Google Chrome", "Chromium"]:
+        result = await run_for_app(app_name)
+        if result.get("ok"):
+            return result
+        if result.get("reason") == "single_tab":
+            return result
+        errors.append(result)
+    return {"ok": False, "reason": "no_supported_browser", "attempts": errors}
+
+
+async def _macos_frontmost_app_name() -> str:
+    if sys.platform != "darwin":
+        return ""
+    proc = await asyncio.create_subprocess_exec(
+        "/usr/bin/osascript",
+        "-e",
+        'tell application "System Events" to get name of first application process whose frontmost is true',
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return ""
+    return (stdout or b"").decode("utf-8", errors="ignore").strip()
+
+
+async def _macos_activate_app(app_name: str) -> dict[str, Any]:
+    if sys.platform != "darwin" or not app_name:
+        return {"ok": False, "reason": "unsupported_or_empty"}
+    proc = await asyncio.create_subprocess_exec(
+        "/usr/bin/osascript",
+        "-e",
+        f'tell application "{app_name}" to activate',
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        return {
+            "ok": False,
+            "reason": "activate_failed",
+            "app": app_name,
+            "stderr": (stderr or b"").decode("utf-8", errors="ignore").strip(),
+        }
+    return {"ok": True, "app": app_name}
+
+
 async def _fetch_state_backend(url: str, cookie: str | None) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         resp = await client.get(url, headers=_headers(cookie, BASE_URL))
         resp.raise_for_status()
         return extract_initial_state(resp.text)
+
+
+def _build_extension_note_expression(note_id: str) -> str:
+    note_id_js = json.dumps(note_id, ensure_ascii=False)
+    return (
+        "(() => {"
+        f"const noteId = {note_id_js};"
+        "const unwrap = (value) => {"
+        "  let current = value;"
+        "  const seen = new Set();"
+        "  while (current && typeof current === 'object' && !seen.has(current)) {"
+        "    seen.add(current);"
+        "    if (Array.isArray(current)) return current;"
+        "    if ('_value' in current) { current = current._value; continue; }"
+        "    if ('value' in current) { current = current.value; continue; }"
+        "    break;"
+        "  }"
+        "  return current;"
+        "};"
+        "const isNoteLike = (value) => {"
+        "  if (!value || typeof value !== 'object') return false;"
+        "  const id = value.noteId || value.note_id || value.id || '';"
+        "  const hasText = !!(value.title || value.desc || value.content || value.noteDesc || value.displayTitle);"
+        "  const hasMedia = Array.isArray(value.imageList) || !!value.video || !!value.interactInfo || !!value.user || !!value.userInfo;"
+        "  return !!id && hasText && hasMedia;"
+        "};"
+        "const wrapDetail = (value) => {"
+        "  if (!value || typeof value !== 'object') return null;"
+        "  if (value.note && typeof value.note === 'object') return value;"
+        "  if (isNoteLike(value)) return { note: value };"
+        "  return null;"
+        "};"
+        "const state = window.__INITIAL_STATE__ || {};"
+        "const text = document.body?.innerText || '';"
+        "const noteState = unwrap(state.note) || {};"
+        "const map = unwrap(noteState.noteDetailMap) || {};"
+        "const mapValues = map && typeof map === 'object' ? Object.values(map) : [];"
+        "const findDetailById = (items, targetId) => {"
+        "  for (const item of (Array.isArray(items) ? items : [])) {"
+        "    if (!item || typeof item !== 'object') continue;"
+        "    const note = item.note && typeof item.note === 'object' ? item.note : item;"
+        "    const candidateId = note.noteId || note.note_id || note.id || '';"
+        "    if (!targetId || candidateId === targetId) return item;"
+        "  }"
+        "  return null;"
+        "};"
+        "let detail = noteId ? (map[noteId] || findDetailById(mapValues, noteId)) : (mapValues[0] || null);"
+        "let detailStrategy = detail ? 'extension_note_detail_map' : '';"
+        "if (!detail) {"
+        "  const roots = ["
+        "    unwrap(state.note),"
+        "    unwrap(state.feed?.feeds),"
+        "    unwrap(state.feed?.items),"
+        "    unwrap(state.search?.feeds),"
+        "    unwrap(state.search?.notes),"
+        "    unwrap(state.search?.noteList),"
+        "    unwrap(state.board?.boardFeedsMap)"
+        "  ].filter(Boolean);"
+        "  const queue = roots.map((value) => ({ value, depth: 0 }));"
+        "  const seenObjects = new WeakSet();"
+        "  let visits = 0;"
+        "  while (queue.length && visits < 2800 && !detail) {"
+        "    const current = queue.shift();"
+        "    const value = current?.value;"
+        "    const depth = current?.depth || 0;"
+        "    if (!value || typeof value !== 'object' || depth > 6 || seenObjects.has(value)) continue;"
+        "    seenObjects.add(value);"
+        "    visits += 1;"
+        "    if (value.note && typeof value.note === 'object' && isNoteLike(value.note)) {"
+        "      const candidateId = value.note.noteId || value.note.note_id || value.note.id || '';"
+        "      if (!noteId || candidateId === noteId) {"
+        "        detail = value;"
+        "        detailStrategy = 'extension_state_tree_detail';"
+        "        break;"
+        "      }"
+        "    }"
+        "    if (isNoteLike(value)) {"
+        "      const candidateId = value.noteId || value.note_id || value.id || '';"
+        "      if (!noteId || candidateId === noteId) {"
+        "        detail = { note: value };"
+        "        detailStrategy = 'extension_state_tree_note';"
+        "        break;"
+        "      }"
+        "    }"
+        "    const children = Array.isArray(value)"
+        "      ? value.slice(0, 120)"
+        "      : Object.keys(value).slice(0, 120).map((key) => {"
+        "          try { return value[key]; } catch (_) { return null; }"
+        "        });"
+        "    for (const child of children) {"
+        "      if (child && typeof child === 'object') queue.push({ value: child, depth: depth + 1 });"
+        "    }"
+        "  }"
+        "}"
+        "const feedState = unwrap(state.feed) || {};"
+        "const feeds = unwrap(feedState.feeds);"
+        "const feedItems = Array.isArray(feeds) ? feeds.slice(0, 10).map((item) => ({"
+        "  id: item?.id || item?.noteId || item?.note_id || item?.noteCard?.noteId || '',"
+        "  xsecToken: item?.xsecToken || item?.xsec_token || item?.noteCard?.xsecToken || item?.noteCard?.xsec_token || '',"
+        "  title: item?.noteCard?.displayTitle || item?.noteCard?.title || item?.title || ''"
+        "})) : [];"
+        "return {"
+        "  href: location.href,"
+        "  title: document.title || '',"
+        "  text: text.slice(0, 2000),"
+        "  hasState: !!window.__INITIAL_STATE__,"
+        "  hasDetail: !!detail,"
+        "  detailStrategy: detailStrategy || '',"
+        "  feedItems,"
+        "  state: detail ? { note: { noteDetailMap: { [noteId || 'note']: detail } } } : null"
+        "};"
+        "})()"
+    )
+
+
+def _build_extension_dom_note_expression(note_id: str) -> str:
+    note_id_js = json.dumps(note_id, ensure_ascii=False)
+    return (
+        "(() => {"
+        f"const noteId = {note_id_js};"
+        "const textOf = (selectors) => {"
+        "  for (const selector of selectors) {"
+        "    const el = document.querySelector(selector);"
+        "    const text = (el?.innerText || el?.textContent || '').trim();"
+        "    if (text) return text;"
+        "  }"
+        "  return '';"
+        "};"
+        "const attrOf = (selector, attr) => document.querySelector(selector)?.getAttribute(attr) || '';"
+        "const parseCount = (text) => {"
+        "  const clean = String(text || '').replace(/[,，\\s]/g, '').trim();"
+        "  if (!clean) return 0;"
+        "  const m = clean.match(/([0-9]+(?:\\.[0-9]+)?)(万)?/);"
+        "  if (!m) return 0;"
+        "  const value = Number(m[1]);"
+        "  return Number.isFinite(value) ? Math.round(m[2] ? value * 10000 : value) : 0;"
+        "};"
+        "const detailRoot = document.querySelector('.note-scroller, .note-content, article, main') || document.body;"
+        "const withinRoot = (selector) => detailRoot?.querySelector(selector) || null;"
+        "const title = (withinRoot('h1')?.innerText || withinRoot('[data-testid=\"note-title\"]')?.innerText || withinRoot('.title')?.innerText || '').trim() ||"
+        "  textOf(['h1', '[data-testid=\"note-title\"]', '.note-content .title']);"
+        "const desc = (withinRoot('.desc, .note-content, .note-scroller, article')?.innerText || '').trim() ||"
+        "  attrOf('meta[name=\"description\"]', 'content');"
+        "const authorLink = [...document.querySelectorAll('a[href*=\"/user/profile/\"]')].find((el) => {"
+        "  const text = (el.innerText || el.textContent || '').trim();"
+        "  return text && text !== '我' && !/关注|粉丝|获赞/.test(text);"
+        "}) || withinRoot('a[href*=\"/user/profile/\"]');"
+        "const author = (authorLink?.innerText || authorLink?.textContent || '').trim() ||"
+        "  ((withinRoot('.author-container .username, .user-name, .author-name')?.innerText || '').trim());"
+        "const authorHref = authorLink?.getAttribute('href') || '';"
+        "const authorIdMatch = authorHref.match(/\\/user\\/profile\\/([^/?#]+)/);"
+        "const ipLocationText = Array.from(detailRoot.querySelectorAll('span,div,p')).map((el) => (el.innerText || '').trim()).find((text) => text.includes('IP') && text.includes('属地')) || '';"
+        "const metrics = Array.from(detailRoot.querySelectorAll('button, span, div')).map((el) => (el.innerText || '').trim()).filter(Boolean);"
+        "const liked = parseCount(metrics.find((text) => /赞|点赞/.test(text)) || '');"
+        "const collected = parseCount(metrics.find((text) => /收藏/.test(text)) || '');"
+        "const comments = parseCount(metrics.find((text) => /评论/.test(text)) || '');"
+        "const shares = parseCount(metrics.find((text) => /分享/.test(text)) || '');"
+        "const images = Array.from(detailRoot.querySelectorAll('img')).map((img) => img.getAttribute('src') || img.getAttribute('data-src') || '').filter((src) => /^https?:/.test(src) && !/sns-avatar/.test(src));"
+        "const uniqueImages = [...new Set(images)].slice(0, 20).map((src, index) => ({ index, urlDefault: src, urlPre: src, livePhoto: false }));"
+        "const video = withinRoot('video source')?.getAttribute('src') || withinRoot('video')?.getAttribute('src') || attrOf('video source', 'src') || attrOf('video', 'src');"
+        "const tags = Array.from(detailRoot.querySelectorAll('a, span')).map((el) => (el.innerText || '').trim()).filter((text) => /^#/.test(text)).slice(0, 20);"
+        "if (!title && !desc && !author) return null;"
+        "return {"
+        "  noteId: noteId || (location.pathname.match(/\\/explore\\/([^/?#]+)/)?.[1] || ''),"
+        "  title: title || '无标题',"
+        "  desc: desc || '',"
+        "  type: video ? 'video' : 'normal',"
+        "  time: 0,"
+        "  ipLocation: ipLocationText,"
+        "  user: { nickname: author || '未知', userId: authorIdMatch ? authorIdMatch[1] : '' },"
+        "  interactInfo: {"
+        "    likedCount: liked,"
+        "    collectedCount: collected,"
+        "    commentCount: comments,"
+        "    shareCount: shares"
+        "  },"
+        "  tagList: tags.map((name) => ({ name })),"
+        "  imageList: uniqueImages,"
+        "  video: video ? { media: { stream: { h264: [{ masterUrl: video, backupUrls: [] }] } }, url: video } : {}"
+        "};"
+        "})()"
+    )
+
+
+async def _fetch_note_payload_via_extension(
+    url: str,
+    port: int = 9334,
+    connect_timeout: float = 20.0,
+    page_timeout: float = 45.0,
+    dedicated_window_mode: bool = False,
+) -> dict[str, Any]:
+    note_id = _extract_note_id(url)
+    if not note_id:
+        raise RuntimeError("无法从 URL 中提取 note_id")
+
+    async with XHSExtensionBridge(port=port) as bridge:
+        await bridge.wait_until_ready(timeout=connect_timeout)
+        navigate_background = _extension_should_navigate_background(dedicated_window_mode)
+
+        if dedicated_window_mode:
+            await bridge.call(
+                "ensure_dedicated_xhs_tab",
+                {"url": url},
+                timeout=60.0,
+            )
+
+        async def read_page() -> dict[str, Any]:
+            await bridge.call("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+            result: dict[str, Any] | None = None
+            last_state_error = ""
+            for attempt in range(3):
+                try:
+                    # 先观察页面 MAIN world 状态对象是否就绪，再读取详情。
+                    # 这里优先多观察几次当前真实页面，而不是立刻触发更多兜底请求。
+                    await _wait_xhs_state_via_bridge(
+                        bridge,
+                        kind="note",
+                        note_id=note_id,
+                        timeout_ms=15000 if attempt == 0 else 6000,
+                        interval_ms=500,
+                        command_timeout=20.0,
+                    )
+                except Exception as exc:
+                    last_state_error = _safe_str(exc)
+                current = await bridge.call(
+                    "evaluate",
+                    {"expression": _build_extension_note_expression(note_id)},
+                    timeout=20.0,
+                )
+                if isinstance(current, dict):
+                    result = current
+                    state = current.get("state")
+                    note_map = (
+                        state.get("note", {}).get("noteDetailMap", {})
+                        if isinstance(state, dict)
+                        else {}
+                    )
+                    detail = note_map.get(note_id) if isinstance(note_map, dict) else None
+                    note_obj = detail.get("note") if isinstance(detail, dict) else None
+                    if isinstance(note_obj, dict) and note_obj:
+                        break
+                if attempt < 2:
+                    await asyncio.sleep(0.8 + attempt * 0.7)
+                    await bridge.call("wait_dom_stable", {"timeout": 6000, "interval": 400}, timeout=8.0)
+
+            if not isinstance(result, dict):
+                raise RuntimeError(last_state_error or "扩展未返回有效页面状态")
+            page_text = _safe_str(result.get("text"))
+            page_title = _safe_str(result.get("title"))
+            page_href = _safe_str(result.get("href"))
+            classified = _classify_xhs_page_text("\n".join([page_title, page_href, page_text]))
+            if classified:
+                code, message = classified
+                raise RuntimeError(f"[{code}] {message}")
+
+            detail_strategy = _safe_str(result.get("detailStrategy")) or "extension_note_detail_map"
+            state = result.get("state")
+            note_map = (
+                state.get("note", {}).get("noteDetailMap", {})
+                if isinstance(state, dict)
+                else {}
+            )
+            detail = note_map.get(note_id) if isinstance(note_map, dict) else None
+            note_obj = detail.get("note") if isinstance(detail, dict) else None
+            if not isinstance(note_obj, dict) or not note_obj:
+                dom_note = await bridge.call(
+                    "evaluate",
+                    {"expression": _build_extension_dom_note_expression(note_id)},
+                    timeout=20.0,
+                )
+                if isinstance(dom_note, dict) and dom_note:
+                    result["state"] = {"note": {"noteDetailMap": {note_id: {"note": dom_note}}}}
+                    detail_strategy = "extension_dom_fallback"
+            result["detailStrategy"] = detail_strategy
+            result["mediaStrategy"] = (
+                "plugin_state_urls"
+                if detail_strategy != "extension_dom_fallback"
+                else "plugin_dom_urls"
+            )
+            return result
+
+        async def human_pause(min_seconds: float = 0.6, max_seconds: float = 1.4) -> None:
+            await asyncio.sleep(random.uniform(min_seconds, max_seconds))
+
+        current_url = _safe_str(await bridge.call("get_url", {}, timeout=10.0))
+        result: dict[str, Any] | None = None
+        if note_id and note_id in current_url:
+            result = await read_page()
+        else:
+            snapshot = await bridge.call(
+                "get_xhs_page_snapshot",
+                {"kind": "any", "noteId": note_id, "textLimit": 1200},
+                timeout=10.0,
+            )
+            _raise_for_xhs_snapshot(snapshot)
+
+            selector = f'a[href*="/explore/{note_id}"]'
+            has_link = False
+            if not dedicated_window_mode:
+                try:
+                    has_link = bool(await bridge.call("has_element", {"selector": selector}, timeout=10.0))
+                except Exception:
+                    has_link = False
+            if has_link:
+                await human_pause()
+                await bridge.call("click_element", {"selector": selector}, timeout=15.0)
+                await bridge.call(
+                    "wait_for_load",
+                    {"timeout": int(page_timeout * 1000), "background": navigate_background},
+                    timeout=page_timeout,
+                )
+            else:
+                await human_pause(1.0, 2.0)
+                await bridge.call(
+                    "navigate",
+                    {"url": url, "background": navigate_background},
+                    timeout=page_timeout,
+                )
+                await bridge.call(
+                    "wait_for_load",
+                    {"timeout": int(page_timeout * 1000), "background": navigate_background},
+                    timeout=page_timeout,
+                )
+            result = await read_page()
+
+    if not isinstance(result, dict):
+        raise RuntimeError("扩展未返回有效页面状态")
+
+    state = result.get("state")
+    if not isinstance(state, dict) or not state:
+        href = _safe_str(result.get("href"))
+        title = _safe_str(result.get("title"))
+        raise RuntimeError(f"扩展未读取到 noteDetailMap，当前页面: {href or url} / {title}")
+    return {
+        "state": state,
+        "detail_strategy": _safe_str(result.get("detailStrategy")) or "extension_note_detail_map",
+        "media_strategy": _safe_str(result.get("mediaStrategy")) or "plugin_state_urls",
+        "used_extension": True,
+    }
+
+
+async def _fetch_state_via_extension(
+    url: str,
+    port: int = 9334,
+    connect_timeout: float = 20.0,
+    page_timeout: float = 45.0,
+    dedicated_window_mode: bool = False,
+) -> dict[str, Any]:
+    payload = await _fetch_note_payload_via_extension(
+        url,
+        port=port,
+        connect_timeout=connect_timeout,
+        page_timeout=page_timeout,
+        dedicated_window_mode=dedicated_window_mode,
+    )
+    state = payload.get("state")
+    if not isinstance(state, dict) or not state:
+        raise RuntimeError("扩展未返回有效页面状态")
+    return state
+
+
+async def _get_cookies_via_extension(port: int = 9334, domain: str = "xiaohongshu.com") -> str:
+    async with XHSExtensionBridge(port=port) as bridge:
+        await bridge.wait_until_ready(timeout=15.0)
+        cookies = await bridge.call("get_cookies", {"domain": domain}, timeout=15.0)
+    return _cookie_to_header(json.dumps(cookies, ensure_ascii=False)) if cookies else ""
 
 
 async def _fetch_state_via_cdp(url: str, port: int = 9222, wait_seconds: float = 10.0) -> dict[str, Any]:
@@ -566,14 +1164,32 @@ def _extract_datetime(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, str):
-        if value.isdigit():
-            value = int(value)
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            value = int(text)
         else:
+            for fmt in [
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S.%fZ",
+                "%Y-%m-%d",
+            ]:
+                try:
+                    parsed = datetime.strptime(text, fmt)
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc).astimezone()
+                    return parsed
+                except ValueError:
+                    continue
             return None
     if isinstance(value, (int, float)):
         timestamp = float(value)
         if timestamp > 10_000_000_000:
             timestamp /= 1000
+        if timestamp <= 0 or timestamp < 1_262_304_000:
+            return None
         try:
             return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone()
         except Exception:
@@ -611,8 +1227,8 @@ def _note_from_root(note_root: dict[str, Any], url: str, used_cdp: bool = False)
         id=note_id,
         title=_safe_str(note_root.get("title")) or "无标题",
         desc=_safe_str(note_root.get("desc") or note_root.get("content") or note_root.get("noteDesc")),
-        author=_safe_str(user.get("nickname") or user.get("name") or user.get("userName")) or "未知",
-        author_id=_safe_str(user.get("userId") or user.get("uid") or user.get("id")),
+        author=_safe_str(user.get("nickname") or user.get("nickName") or user.get("name") or user.get("userName")) or "未知",
+        author_id=_safe_str(user.get("userId") or user.get("user_id") or user.get("uid") or user.get("id")),
         url=normalize_note_url(url),
         note_type=_safe_str(note_root.get("type")) or "normal",
         published_at=_extract_datetime(note_root.get("time") or note_root.get("publishTime") or note_root.get("lastUpdateTime")),
@@ -627,6 +1243,78 @@ def _note_from_root(note_root: dict[str, Any], url: str, used_cdp: bool = False)
         live_urls=live_urls,
         used_cdp=used_cdp,
     )
+
+
+def _note_root_validation_issues(
+    note_root: dict[str, Any],
+    *,
+    url: str,
+    expected_note_id: str = "",
+    source: str = "",
+) -> list[str]:
+    note = _note_from_root(note_root, url)
+    issues: list[str] = []
+    default_title = note.title.strip() in {"", "无标题"}
+    default_desc = note.desc.strip() in {"", "暂无简介"}
+    suspicious_author = note.author.strip() in {"", "未知", "我"}
+    total_interactions = note.liked_count + note.collected_count + note.comment_count + note.share_count
+    avatar_like_images = sum(
+        1
+        for item in note.images
+        if "sns-avatar" in _safe_str(item.get("remote_default")).lower()
+    )
+
+    if expected_note_id and note.id and note.id != expected_note_id:
+        issues.append("note_id 与目标链接不一致")
+    if not note.id:
+        issues.append("缺少 note_id")
+    if note.published_at is None:
+        issues.append("缺少可信发布时间")
+    if note.published_at and note.published_at.year < 2013:
+        issues.append("发布时间异常过早")
+    if default_title and default_desc:
+        issues.append("标题和正文同时缺失")
+    if suspicious_author and not note.tags:
+        issues.append("作者字段异常")
+    if (
+        note.liked_count == 0
+        and note.comment_count == 0
+        and (note.collected_count >= 1_000_000 or note.share_count >= 1_000_000)
+    ):
+        issues.append("互动字段疑似混入页面备案号/页脚数字")
+    if avatar_like_images >= max(3, len(note.images) // 2) and len(note.images) >= 6:
+        issues.append("图片集合疑似混入头像/页面装饰图")
+    if source == "extension_dom_fallback":
+        if suspicious_author:
+            issues.append("DOM fallback 作者不可信")
+        if default_title:
+            issues.append("DOM fallback 标题缺失")
+        if total_interactions == 0:
+            issues.append("DOM fallback 未提取到可信互动数据")
+
+    unique_issues: list[str] = []
+    for item in issues:
+        if item not in unique_issues:
+            unique_issues.append(item)
+    return unique_issues
+
+
+def _merge_seed_metadata(note: XHSCrawledNote, seed_data: dict[str, Any] | None) -> XHSCrawledNote:
+    if not isinstance(seed_data, dict):
+        return note
+    if not note.title or note.title == "无标题":
+        seed_title = _safe_str(seed_data.get("title"))
+        if seed_title:
+            note.title = seed_title
+    if not note.author or note.author == "未知":
+        seed_author = _safe_str(seed_data.get("author"))
+        if seed_author:
+            note.author = seed_author
+    if note.liked_count <= 0:
+        note.liked_count = _parse_count(seed_data.get("likes"))
+    if not note.published_at:
+        note.published_at = _extract_datetime(seed_data.get("time"))
+    return note
 
 
 def _vault_xhs_dir(vault_path: str | Path | None) -> Path:
@@ -940,10 +1628,30 @@ def _render_markdown(
 
     comment_lines: list[str]
     if include_comments:
-        comment_lines = [
-            "评论正文需要动态评论接口。当前入库流程已保留选项，但本次未抓到评论正文。",
-            f"请求数量：{comments_limit} 条；二级评论：{'开启' if include_sub_comments else '关闭'}。",
-        ]
+        if note.comments:
+            comment_lines = []
+            for index, item in enumerate(note.comments[: max(1, comments_limit)], 1):
+                author = _safe_str(item.get("author")) or "未知"
+                content = _safe_str(item.get("content"))
+                likes = _parse_count(item.get("likes"))
+                reply_to = _safe_str(item.get("reply_to"))
+                flags: list[str] = []
+                if item.get("is_top"):
+                    flags.append("置顶")
+                if likes > 0:
+                    flags.append(f"{likes}赞")
+                if reply_to:
+                    flags.append(f"回复 {reply_to}")
+                suffix = f"（{' / '.join(flags)}）" if flags else ""
+                comment_lines.append(f"{index}. {author}{suffix}")
+                if content:
+                    comment_lines.append(content)
+                comment_lines.append("")
+        else:
+            comment_lines = [
+                "评论状态机已执行，但当前页面未提取到评论正文。",
+                f"请求数量：{comments_limit} 条；二级评论：{'开启' if include_sub_comments else '关闭'}。",
+            ]
     else:
         comment_lines = ["未抓取评论正文。"]
 
@@ -1002,37 +1710,169 @@ async def crawl_xhs_note_to_vault(
     include_comments: bool = False,
     include_sub_comments: bool = False,
     comments_limit: int = 20,
+    use_extension: bool = True,
+    extension_port: int = 9334,
+    dedicated_window_mode: bool = False,
     use_cdp: bool = True,
     cdp_port: int = 9222,
     subfolder: str | None = None,
+    seed_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """抓取单条小红书笔记并保存到 vault/xhs。"""
     normalized_url = normalize_note_url(url)
     note_id = _extract_note_id(normalized_url)
     warnings: list[str] = []
     used_cdp = False
+    used_extension = False
+    detail_strategy = ""
+    media_strategy = ""
+    comment_strategy = ""
 
-    try:
-        state = await _fetch_state_backend(normalized_url, cookie)
-        note_root = _extract_note_root(state, note_id)
-    except Exception as exc:
-        warnings.append(f"后端详情请求失败: {exc}")
-        note_root = None
+    note_root = None
+
+    extension_stop_error: Exception | None = None
+    cdp_stop_error: Exception | None = None
+
+    if use_extension:
+        try:
+            extension_payload = await _fetch_note_payload_via_extension(
+                normalized_url,
+                port=extension_port,
+                dedicated_window_mode=dedicated_window_mode,
+            )
+            state = extension_payload.get("state")
+            if not isinstance(state, dict):
+                raise RuntimeError("扩展未返回有效页面状态")
+            extension_note_root = _extract_note_root(state, note_id)
+            if extension_note_root:
+                candidate_detail_strategy = _safe_str(extension_payload.get("detail_strategy")) or "extension_note_detail_map"
+                candidate_media_strategy = _safe_str(extension_payload.get("media_strategy")) or "plugin_state_urls"
+                validation_issues = _note_root_validation_issues(
+                    extension_note_root,
+                    url=normalized_url,
+                    expected_note_id=note_id,
+                    source=candidate_detail_strategy,
+                )
+                if validation_issues:
+                    warnings.append(
+                        "扩展 bridge 已读取到页面，但详情属性疑似异常，已改走兜底链路: "
+                        + "；".join(validation_issues[:4])
+                    )
+                else:
+                    note_root = extension_note_root
+                    used_extension = True
+                    detail_strategy = candidate_detail_strategy
+                    media_strategy = candidate_media_strategy
+            else:
+                warnings.append("扩展 bridge 已打开详情页，但没有定位到完整 note 数据")
+        except Exception as exc:
+            warnings.append(f"扩展 bridge 读取失败: {exc}")
+            if _should_stop_xhs_task(exc):
+                extension_stop_error = exc
 
     if not note_root and use_cdp:
         try:
             state = await _fetch_state_via_cdp(normalized_url, cdp_port)
-            note_root = _extract_note_root(state, note_id)
-            used_cdp = True
+            cdp_note_root = _extract_note_root(state, note_id)
+            if cdp_note_root:
+                validation_issues = _note_root_validation_issues(
+                    cdp_note_root,
+                    url=normalized_url,
+                    expected_note_id=note_id,
+                    source="cdp_initial_state",
+                )
+                if validation_issues:
+                    warnings.append(
+                        "CDP 已读取到页面，但详情属性疑似异常，继续回退 HTML 链路: "
+                        + "；".join(validation_issues[:4])
+                    )
+                else:
+                    note_root = cdp_note_root
+                    used_cdp = True
+                    detail_strategy = "cdp_initial_state"
+                    media_strategy = "cdp_state_urls"
+            else:
+                warnings.append("CDP 已打开详情页，但没有定位到完整 note 数据")
         except Exception as exc:
             warnings.append(f"CDP 兜底失败: {exc}")
+            if _should_stop_xhs_task(exc):
+                cdp_stop_error = exc
+
+    if not note_root and not extension_stop_error and not cdp_stop_error:
+        try:
+            state = await _fetch_state_backend(normalized_url, cookie)
+            backend_note_root = _extract_note_root(state, note_id)
+            if backend_note_root:
+                validation_issues = _note_root_validation_issues(
+                    backend_note_root,
+                    url=normalized_url,
+                    expected_note_id=note_id,
+                    source="html_initial_state",
+                )
+                if validation_issues:
+                    warnings.append(
+                        "后端 Initial State 已返回，但详情属性仍异常，已停止保存: "
+                        + "；".join(validation_issues[:4])
+                    )
+                else:
+                    note_root = backend_note_root
+                    detail_strategy = "html_initial_state"
+                    media_strategy = "html_state_urls"
+            else:
+                warnings.append("后端详情已返回 Initial State，但没有定位到完整 note 数据")
+        except Exception as exc:
+            warnings.append(f"后端详情请求失败: {exc}")
+            if _should_stop_xhs_task(exc):
+                detail = "；".join(warnings)
+                raise RuntimeError(detail) from exc
 
     if not note_root:
+        if cdp_stop_error is not None:
+            detail = "；".join(warnings)
+            raise RuntimeError(detail) from cdp_stop_error
+        if extension_stop_error is not None:
+            detail = "；".join(warnings)
+            raise RuntimeError(detail) from extension_stop_error
         detail = "；".join(warnings) if warnings else "无更多错误信息"
         raise RuntimeError(f"没有提取到笔记详情数据：{detail}")
 
     note = _note_from_root(note_root, normalized_url, used_cdp=used_cdp)
+    note = _merge_seed_metadata(note, seed_data)
     note.warnings.extend(warnings)
+    if used_extension:
+        note.warnings.insert(0, "详情通过扩展 bridge 读取")
+
+    if include_comments:
+        try:
+            from abo.tools.xiaohongshu import xiaohongshu_fetch_comments
+
+            comments_result = await xiaohongshu_fetch_comments(
+                note_id=note.id,
+                note_url=normalized_url,
+                max_comments=max(1, comments_limit),
+                sort_by="likes",
+                cookie=cookie,
+                use_extension=use_extension,
+                extension_port=extension_port,
+                dedicated_window_mode=dedicated_window_mode,
+                load_all_comments=True,
+                click_more_replies=include_sub_comments,
+                max_replies_threshold=10,
+            )
+            comments = comments_result.get("comments") if isinstance(comments_result, dict) else None
+            note.comments = comments if isinstance(comments, list) else []
+            comment_strategy = _safe_str(comments_result.get("strategy")) if isinstance(comments_result, dict) else ""
+            if note.comments:
+                if comment_strategy == "extension_state_machine":
+                    note.warnings.insert(0, f"评论通过扩展状态机读取 {len(note.comments)} 条")
+                else:
+                    note.warnings.insert(0, f"评论通过后端状态读取 {len(note.comments)} 条")
+            else:
+                note.warnings.append("评论状态机执行完成，但未提取到评论正文")
+        except Exception as exc:
+            note.warnings.append(f"评论抓取失败: {exc}")
+            if _should_stop_xhs_task(exc):
+                raise RuntimeError(str(exc)) from exc
 
     root_xhs_dir = _vault_xhs_dir(vault_path)
     xhs_dir = root_xhs_dir / _safe_folder_name(subfolder, "未命名专辑") if subfolder else root_xhs_dir
@@ -1070,7 +1910,11 @@ async def crawl_xhs_note_to_vault(
         "markdown_path": str(md_path),
         "xhs_dir": str(xhs_dir),
         "xhs_root_dir": str(root_xhs_dir),
+        "used_extension": used_extension,
         "used_cdp": note.used_cdp,
+        "detail_strategy": detail_strategy or ("cdp_initial_state" if note.used_cdp else "html_initial_state"),
+        "media_strategy": media_strategy or ("cdp_state_urls" if note.used_cdp else "html_state_urls"),
+        "comment_strategy": comment_strategy or None,
         "warnings": note.warnings,
         "remote_resources": {
             "images": [image.get("remote_default") for image in note.images if image.get("remote_default")],
@@ -1144,6 +1988,31 @@ def _save_album_progress(vault_path: str | Path | None, progress: dict[str, Any]
     path.parent.mkdir(parents=True, exist_ok=True)
     progress["last_run_at"] = datetime.now().astimezone().isoformat()
     path.write_text(json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _resolve_album_seen_ids(progress: dict[str, Any], album_state: dict[str, Any]) -> tuple[list[str], list[str]]:
+    note_states = progress.get("notes", {}) if isinstance(progress.get("notes"), dict) else {}
+    raw_seen_ids = album_state.get("seen_note_ids", [])
+    if not isinstance(raw_seen_ids, list):
+        raw_seen_ids = []
+
+    valid: list[str] = []
+    pruned: list[str] = []
+    seen: set[str] = set()
+    for item in raw_seen_ids:
+        note_id = _safe_str(item)
+        if not note_id or note_id in seen:
+            continue
+        seen.add(note_id)
+        note_state = note_states.get(note_id)
+        file_path = ""
+        if isinstance(note_state, dict):
+            file_path = _safe_str(note_state.get("file"))
+        if file_path and Path(file_path).expanduser().exists():
+            valid.append(note_id)
+        else:
+            pruned.append(note_id)
+    return sorted(valid), pruned
 
 
 ALBUM_EXTRACT_JS = r"""
@@ -1224,6 +2093,142 @@ async def _list_albums_headless(cookie: str | None, progress_callback: Any | Non
             await browser.close()
 
 
+async def _list_albums_via_extension(
+    *,
+    extension_port: int = 9334,
+    progress_callback: Any | None = None,
+    dedicated_window_mode: bool = False,
+) -> list[dict[str, Any]]:
+    def report(stage: str, current_step: int = 0, total_steps: int = 6) -> None:
+        if progress_callback:
+            progress_callback({"stage": stage, "current_step": current_step, "total_steps": total_steps})
+
+    extract_expression = f"({ALBUM_EXTRACT_JS})()"
+
+    async with XHSExtensionBridge(port=extension_port) as bridge:
+        await bridge.wait_until_ready(timeout=20.0)
+        navigate_background = _extension_should_navigate_background(dedicated_window_mode)
+
+        if dedicated_window_mode:
+            try:
+                state = await bridge.call(
+                    "ensure_dedicated_xhs_tab",
+                    {"url": "https://www.xiaohongshu.com/explore"},
+                    timeout=60.0,
+                )
+                report("绑定小红书专用窗口", 0, 6)
+                if progress_callback and isinstance(state, dict):
+                    progress_callback({"stage": "专用窗口已绑定", **state})
+            except Exception:
+                # 兼容尚未重新加载的新扩展版本；旧扩展仍可走普通 navigate。
+                pass
+
+        report("进入小红书首页", 1)
+        await bridge.call(
+            "navigate",
+            {"url": "https://www.xiaohongshu.com/explore", "background": navigate_background},
+            timeout=45.0,
+        )
+        await bridge.call(
+            "wait_for_load",
+            {"timeout": 45000, "background": navigate_background},
+            timeout=45.0,
+        )
+        await bridge.call("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+
+        async def click_text(text: str) -> bool:
+            expression = (
+                "(() => {"
+                f"const targetText = {json.dumps(text)};"
+                "const nodes = [...document.querySelectorAll('a,button,[role=\"button\"],div,span')];"
+                "const score = (el) => {"
+                "  const text = ((el.innerText || el.textContent || '').trim());"
+                "  if (text !== targetText) return -1;"
+                "  if (el.matches('a[href],button,[role=\"button\"]')) return 3;"
+                "  if (el.closest('a[href],button,[role=\"button\"]')) return 2;"
+                "  return 1;"
+                "};"
+                "const hit = nodes.map((el) => [score(el), el]).filter(([value]) => value > 0).sort((a, b) => b[0] - a[0])[0]?.[1];"
+                "if (!hit) return false;"
+                "const clickable = hit.closest('a[href],button,[role=\"button\"],.reds-tab-item,.tab,.tabs-item') || hit;"
+                "clickable.scrollIntoView({block:'center', inline:'center'});"
+                "if (clickable.href) { clickable.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); return true; }"
+                "clickable.click();"
+                "return true;"
+                "})()"
+            )
+            try:
+                return bool(await bridge.call("evaluate", {"expression": expression}, timeout=12.0))
+            except Exception:
+                return False
+
+        async def open_me_profile() -> bool:
+            profile_expr = (
+                "(() => {"
+                "const links = [...document.querySelectorAll('a[href*=\"/user/profile/\"]')];"
+                "const me = links.find((a) => ((a.innerText || a.textContent || '').trim() === '我')) || links[0];"
+                "if (!me) return false;"
+                "me.scrollIntoView({block:'center'});"
+                "me.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));"
+                "return true;"
+                "})()"
+            )
+            try:
+                opened = bool(await bridge.call("evaluate", {"expression": profile_expr}, timeout=12.0))
+            except Exception:
+                opened = False
+            if not opened:
+                return False
+            await asyncio.sleep(3.0)
+            try:
+                await bridge.call("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+            except Exception:
+                pass
+            return True
+
+        report("打开个人主页", 2)
+        current_url = _safe_str(await bridge.call("get_url", {}, timeout=10.0))
+        if "/user/profile/" not in current_url:
+            opened_profile = await open_me_profile()
+            if not opened_profile:
+                opened_profile = await click_text("我")
+            if not opened_profile:
+                return []
+
+        report("打开收藏页", 3)
+        if not await click_text("收藏"):
+            return []
+        await asyncio.sleep(2.0)
+        await bridge.call("wait_dom_stable", {"timeout": 10000, "interval": 500}, timeout=12.0)
+
+        report("打开专辑页", 4)
+        opened_albums = await click_text("专辑")
+        if not opened_albums:
+            albums_expr = (
+                "(() => {"
+                "const hit = [...document.querySelectorAll('a,button,div,span')].find((el) => {"
+                "  const text = (el.innerText || el.textContent || '').trim();"
+                "  return /^专辑[・·]\\d+$/.test(text) || text === '专辑';"
+                "});"
+                "if (!hit) return false;"
+                "const clickable = hit.closest('a,button,[role=\"button\"],.reds-tab-item,.tab,.tabs-item') || hit;"
+                "clickable.scrollIntoView({block:'center'});"
+                "clickable.click();"
+                "return true;"
+                "})()"
+            )
+            opened_albums = bool(await bridge.call("evaluate", {"expression": albums_expr}, timeout=12.0))
+        if not opened_albums:
+            return []
+        await asyncio.sleep(3.0)
+        await bridge.call("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+
+        report("读取专辑列表", 5)
+        albums = await bridge.call("evaluate", {"expression": extract_expression}, timeout=20.0)
+        report("专辑列表读取完成", 6)
+        return albums if isinstance(albums, list) else []
+
+
 async def list_xhs_album_previews(
     *,
     cookie: str | None = None,
@@ -1232,6 +2237,9 @@ async def list_xhs_album_previews(
     background: bool = True,
     allow_cdp_fallback: bool = False,
     progress_callback: Any | None = None,
+    use_extension: bool = True,
+    extension_port: int = 9334,
+    dedicated_window_mode: bool = False,
 ) -> dict[str, Any]:
     """从已打开的小红书收藏/专辑页面提取专辑预览。"""
     expression = r"""
@@ -1275,11 +2283,25 @@ async def list_xhs_album_previews(
                 collected.append(album)
         return collected
 
+    extension_error = ""
+    albums: list[dict[str, Any]] = []
+    if use_extension:
+        try:
+            albums = await _list_albums_via_extension(
+                extension_port=extension_port,
+                progress_callback=progress_callback,
+                dedicated_window_mode=dedicated_window_mode,
+            )
+        except Exception as exc:
+            extension_error = str(exc)
+
     headless_error = ""
     try:
-        albums = await _list_albums_headless(cookie, progress_callback=progress_callback)
+        if not albums and (not use_extension or allow_cdp_fallback):
+            albums = await _list_albums_headless(cookie, progress_callback=progress_callback)
     except Exception as exc:
-        albums = []
+        if not albums:
+            albums = []
         headless_error = str(exc)
     auto_message = "headless"
 
@@ -1289,7 +2311,8 @@ async def list_xhs_album_previews(
             progress = _load_album_progress(vault_path)
             for album in cached:
                 state = progress.get("albums", {}).get(str(album.get("board_id") or ""), {})
-                album["seen_count"] = len(state.get("seen_note_ids", []))
+                valid_seen_ids, _ = _resolve_album_seen_ids(progress, state if isinstance(state, dict) else {})
+                album["seen_count"] = len(valid_seen_ids)
                 album["new_estimate"] = None
                 if isinstance(album.get("count"), int):
                     album["new_estimate"] = max(int(album["count"]) - album["seen_count"], 0)
@@ -1298,17 +2321,17 @@ async def list_xhs_album_previews(
                 "albums": cached,
                 "total": len(cached),
                 "progress_path": str(_albums_progress_path(vault_path)),
-                "message": f"后台读取失败，已恢复本地缓存的 {len(cached)} 个专辑",
+                "message": f"插件链路未读取到专辑，已恢复本地缓存的 {len(cached)} 个专辑",
                 "from_cache": True,
-                "warning": headless_error,
+                "warning": extension_error or headless_error,
             }
         return {
             "success": True,
             "albums": [],
             "total": 0,
             "progress_path": str(_albums_progress_path(vault_path)),
-            "message": "无界面浏览器没有读取到收藏专辑。请先点一键获取 Cookie，或确认 Cookie 仍有效。",
-            "warning": headless_error,
+            "message": "插件链路没有读取到收藏专辑。请确认扩展已重载、Edge 保持登录，且当前小红书窗口可访问收藏专辑页。",
+            "warning": extension_error or headless_error,
         }
 
     if not albums:
@@ -1400,7 +2423,8 @@ async def list_xhs_album_previews(
     progress = _load_album_progress(vault_path)
     for album in albums:
         state = progress.get("albums", {}).get(album["board_id"], {})
-        album["seen_count"] = len(state.get("seen_note_ids", []))
+        valid_seen_ids, _ = _resolve_album_seen_ids(progress, state if isinstance(state, dict) else {})
+        album["seen_count"] = len(valid_seen_ids)
         album["new_estimate"] = None
         if isinstance(album.get("count"), int):
             album["new_estimate"] = max(int(album["count"]) - album["seen_count"], 0)
@@ -1443,111 +2467,888 @@ def _board_notes_extract_expression(board_id: str) -> str:
     )
 
 
+def _board_notes_extract_object_expression(board_id: str) -> str:
+    return (
+        "(() => {"
+        "const state = window.__INITIAL_STATE__ || {};"
+        "const unwrap = (value) => {"
+        "  let current = value;"
+        "  const seen = new Set();"
+        "  while (current && typeof current === 'object' && !seen.has(current)) {"
+        "    seen.add(current);"
+        "    if (Array.isArray(current)) return current;"
+        "    if ('_value' in current) { current = current._value; continue; }"
+        "    if ('value' in current) { current = current.value; continue; }"
+        "    break;"
+        "  }"
+        "  return current;"
+        "};"
+        "const boardId = " + json.dumps(board_id) + ";"
+        "const feedMapRaw = state.board?.boardFeedsMap || {};"
+        "const feedMap = unwrap(feedMapRaw) || {};"
+        "const notes = feedMap?.[boardId]?.notes || [];"
+        "const out = new Map();"
+        "for (const n of (Array.isArray(notes) ? notes : [])) {"
+        "  const id = n.noteId || n.note_id || n.id || '';"
+        "  if (!id) continue;"
+        "  out.set(String(id), {"
+        "    note_id: id,"
+        "    xsec_token: n.xsecToken || n.xsec_token || '',"
+        "    title: n.displayTitle || n.title || '',"
+        "    type: n.type || '',"
+        "    time: n.time || n.publishTime || n.publish_time || 0,"
+        "    cover: n.cover?.url || n.cover?.urlPre || n.cover?.urlDefault || n.image || '',"
+        "    author: n.user?.nickName || n.user?.nickname || '',"
+        "    likes: n.interactInfo?.likedCount || n.interact_info?.liked_count || 0"
+        "  });"
+        "}"
+        "for (const a of document.querySelectorAll('a[href*=\"/explore/\"]')) {"
+        "  const href = a.getAttribute('href') || '';"
+        "  const match = href.match(/\\/explore\\/([^?/#]+)/);"
+        "  if (!match) continue;"
+        "  const noteId = match[1];"
+        "  const xsec = (href.match(/[?&]xsec_token=([^&#]+)/) || [null, ''])[1];"
+        "  const card = a.closest('section, article, div') || a;"
+        "  const title = (a.getAttribute('title') || a.innerText || card.innerText || '').trim().split(/\\n+/)[0] || '';"
+        "  const img = a.querySelector('img') || card.querySelector('img');"
+        "  const cover = img?.getAttribute('src') || img?.getAttribute('data-src') || '';"
+        "  const existing = out.get(noteId) || {};"
+        "  out.set(noteId, {"
+        "    note_id: noteId,"
+        "    xsec_token: existing.xsec_token || decodeURIComponent(xsec || ''),"
+        "    title: existing.title || title,"
+        "    type: existing.type || '',"
+        "    time: existing.time || 0,"
+        "    cover: existing.cover || cover,"
+        "    author: existing.author || '',"
+        "    likes: existing.likes || 0"
+        "  });"
+        "}"
+        "return {"
+        "  href: location.href,"
+        "  title: document.title || '',"
+        "  total: out.size,"
+        "  notes: Array.from(out.values())"
+        "};"
+        "})()"
+    )
+
+
+def _board_notes_status_expression(board_id: str) -> str:
+    return (
+        "(() => {"
+        "const classify = (text) => {"
+        "  const rules = ["
+        "    ['risk_limited','访问频繁','命中小红书访问频繁限制'],"
+        "    ['risk_limited','安全限制','命中小红书安全限制'],"
+        "    ['risk_limited','安全访问','命中小红书安全访问限制'],"
+        "    ['risk_limited','请稍后再试','小红书要求稍后重试'],"
+        "    ['manual_required','扫码','页面要求扫码验证'],"
+        "    ['auth_invalid','请先登录','当前浏览器未登录小红书'],"
+        "    ['auth_invalid','登录后查看更多内容','当前页面要求登录后查看'],"
+        "    ['not_found','300031','当前页面暂时无法浏览'],"
+        "    ['not_found','页面不见了','页面已不可访问'],"
+        "    ['not_found','内容无法展示','页面内容不可展示'],"
+        "    ['not_found','笔记不存在','笔记不存在或已删除']"
+        "  ];"
+        "  for (const [code, marker, message] of rules) if (String(text || '').includes(marker)) return {code, marker, message};"
+        "  return null;"
+        "};"
+        "const state = window.__INITIAL_STATE__ || {};"
+        "const unwrap = (value) => {"
+        "  let current = value;"
+        "  const seen = new Set();"
+        "  while (current && typeof current === 'object' && !seen.has(current)) {"
+        "    seen.add(current);"
+        "    if (Array.isArray(current)) return current;"
+        "    if ('_value' in current) { current = current._value; continue; }"
+        "    if ('value' in current) { current = current.value; continue; }"
+        "    break;"
+        "  }"
+        "  return current;"
+        "};"
+        "const boardId = " + json.dumps(board_id) + ";"
+        "const feedMap = unwrap(state.board?.boardFeedsMap || {}) || {};"
+        "const notes = feedMap?.[boardId]?.notes || [];"
+        "const noteAnchors = Array.from(document.querySelectorAll('a[href*=\"/explore/\"]')).length;"
+        "const textPool = Array.from(document.querySelectorAll('button,div,span,p')).map((el) => (el.innerText || el.textContent || '').trim()).filter(Boolean);"
+        "const loadingTexts = textPool.filter((text) => /加载中|正在加载|稍后再试|查看更多|展开更多/.test(text)).slice(0, 20);"
+        "const bodyText = document.body?.innerText || '';"
+        "const risk = classify(`${document.title || ''}\\n${location.href}\\n${bodyText.slice(0, 2500)}`);"
+        "const scroller = document.scrollingElement || document.documentElement;"
+        "const scrollTop = scroller ? scroller.scrollTop : 0;"
+        "const scrollHeight = scroller ? scroller.scrollHeight : 0;"
+        "const viewportHeight = window.innerHeight || 0;"
+        "const atBottom = scrollHeight > 0 && viewportHeight > 0 && scrollTop + viewportHeight >= scrollHeight - 260;"
+        "return {"
+        "  href: location.href,"
+        "  title: document.title || '',"
+        "  note_count: Array.isArray(notes) ? notes.length : 0,"
+        "  anchor_count: noteAnchors,"
+        "  scroll_top: scrollTop,"
+        "  scroll_height: scrollHeight,"
+        "  viewport_height: viewportHeight,"
+        "  at_bottom: atBottom,"
+        "  loading_texts: loadingTexts,"
+        "  risk"
+        "};"
+        "})()"
+    )
+
+
 async def _fetch_board_notes_headless(
     board_id: str,
     url: str,
     cookie: str | None,
     expected_total: int | None = None,
     progress_callback: Any | None = None,
+    page: Any | None = None,
 ) -> list[dict[str, Any]]:
     if not cookie:
         return []
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError:
-        return []
+    stop_no_growth_threshold = 3
 
     board_url = url or f"https://www.xiaohongshu.com/board/{board_id}?source=web_user_page"
-    cookies = _cookie_to_playwright(cookie)
-    if not cookies:
-        return []
-
     expression = _board_notes_extract_expression(board_id)
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-            ),
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
-            viewport={"width": 1440, "height": 900},
-        )
+    if page is None:
         try:
-            await context.add_cookies(cookies)
-            page = await context.new_page()
-            seen: dict[str, dict[str, Any]] = {}
-            await page.goto(board_url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(5000)
-            if progress_callback:
-                progress_callback({"stage": "读取专辑笔记列表", "pages_loaded": 1, "total_notes": 0})
-            data = await page.evaluate(expression)
-            notes = json.loads(data) if isinstance(data, str) else data
-            notes = notes if isinstance(notes, list) else []
-            seen = {
-                str(item.get("note_id") or index): item for index, item in enumerate(notes) if isinstance(item, dict)
-            }
-            no_growth_rounds = 0
-            pages_loaded = 1
-            if progress_callback:
-                progress_callback(
-                    {
-                        "stage": "读取专辑笔记列表",
-                        "pages_loaded": pages_loaded,
-                        "total_notes": len(seen),
-                        "expected_total": expected_total,
-                    }
+            from playwright.async_api import async_playwright
+        except ImportError:
+            return []
+        cookies = _cookie_to_playwright(cookie)
+        if not cookies:
+            return []
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                ),
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+                viewport={"width": 1440, "height": 900},
+            )
+            try:
+                await context.add_cookies(cookies)
+                isolated_page = await context.new_page()
+                return await _fetch_board_notes_headless(
+                    board_id,
+                    url,
+                    cookie,
+                    expected_total=expected_total,
+                    progress_callback=progress_callback,
+                    page=isolated_page,
                 )
-            target_total = max(int(expected_total or 0), 0)
-            max_scroll_rounds = 240 if target_total > 120 else 100
-            while pages_loaded < max_scroll_rounds:
-                before_count = len(seen)
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(1200)
-                await page.mouse.wheel(0, 3200)
-                await page.keyboard.press("End")
-                pages_loaded += 1
-                await page.wait_for_timeout(3200)
-                data = await page.evaluate(expression)
-                page_notes = json.loads(data) if isinstance(data, str) else data
-                if isinstance(page_notes, list):
-                    for index, item in enumerate(page_notes):
-                        if isinstance(item, dict):
-                            seen[str(item.get("note_id") or f"{pages_loaded}-{index}")] = item
-                if len(seen) <= before_count:
-                    no_growth_rounds += 1
-                else:
-                    no_growth_rounds = 0
-                if progress_callback:
-                    progress_callback(
+            finally:
+                await browser.close()
+
+    seen: dict[str, dict[str, Any]] = {}
+
+    def merge_notes(items: Any) -> int:
+        before = len(seen)
+        if isinstance(items, list):
+            for index, item in enumerate(items):
+                if isinstance(item, dict):
+                    seen[str(item.get("note_id") or item.get("noteId") or item.get("id") or f"item-{index}")] = item
+        return len(seen) - before
+
+    async def try_capture_response(response: Any) -> None:
+        try:
+            url_text = str(response.url or "")
+            if "/api/sns/web/v1/board/note" not in url_text:
+                return
+            payload = await response.json()
+            notes = payload.get("data", {}).get("notes", []) if isinstance(payload, dict) else []
+            if isinstance(notes, list):
+                normalized = []
+                for item in notes:
+                    if not isinstance(item, dict):
+                        continue
+                    normalized.append(
                         {
-                            "stage": "专辑列表翻页",
-                            "pages_loaded": pages_loaded,
-                            "total_notes": len(seen),
-                            "no_growth_rounds": no_growth_rounds,
-                            "expected_total": expected_total,
+                            "note_id": item.get("noteId") or item.get("note_id") or item.get("id"),
+                            "xsec_token": item.get("xsecToken") or item.get("xsec_token") or "",
+                            "title": item.get("displayTitle") or item.get("title") or "",
+                            "type": item.get("type") or "",
+                            "time": item.get("time") or item.get("publishTime") or item.get("publish_time") or 0,
+                            "cover": (
+                                (item.get("cover") or {}).get("url")
+                                if isinstance(item.get("cover"), dict)
+                                else item.get("cover") or ""
+                            ),
+                            "author": (
+                                (item.get("user") or {}).get("nickName")
+                                if isinstance(item.get("user"), dict)
+                                else ""
+                            ) or ((item.get("user") or {}).get("nickname") if isinstance(item.get("user"), dict) else ""),
+                            "likes": (
+                                (item.get("interactInfo") or {}).get("likedCount")
+                                if isinstance(item.get("interactInfo"), dict)
+                                else 0
+                            ),
                         }
                     )
-                if target_total and len(seen) >= target_total:
-                    break
-                if target_total:
-                    if no_growth_rounds >= 10 and pages_loaded >= 20 and len(seen) >= max(int(target_total * 0.92), target_total - 8):
-                        break
-                elif no_growth_rounds >= 8 and pages_loaded >= 12:
-                    break
-            if progress_callback:
-                progress_callback(
-                    {
-                        "stage": "专辑笔记列表读取完成",
-                        "pages_loaded": pages_loaded,
-                        "total_notes": len(seen),
-                        "expected_total": expected_total,
-                    }
+                merge_notes(normalized)
+        except Exception:
+            return
+
+    page.on("response", lambda response: asyncio.create_task(try_capture_response(response)))
+    await page.goto(board_url, wait_until="domcontentloaded", timeout=30000)
+    await page.wait_for_timeout(5000)
+    if progress_callback:
+        progress_callback({"stage": "读取专辑笔记列表", "pages_loaded": 1, "total_notes": 0})
+    data = await page.evaluate(expression)
+    notes = json.loads(data) if isinstance(data, str) else data
+    notes = notes if isinstance(notes, list) else []
+    merge_notes(notes)
+    no_growth_rounds = 0
+    pages_loaded = 1
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "读取专辑笔记列表",
+                "pages_loaded": pages_loaded,
+                "total_notes": len(seen),
+                "expected_total": expected_total,
+            }
+        )
+    target_total = max(int(expected_total or 0), 0)
+    if target_total:
+        max_scroll_rounds = max(12, math.ceil(target_total / 30) * 3)
+    else:
+        max_scroll_rounds = 100
+    while pages_loaded < max_scroll_rounds:
+        before_count = len(seen)
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1200)
+        await page.mouse.wheel(0, 3200)
+        await page.keyboard.press("End")
+        pages_loaded += 1
+        await page.wait_for_timeout(3200)
+        data = await page.evaluate(expression)
+        page_notes = json.loads(data) if isinstance(data, str) else data
+        if isinstance(page_notes, list):
+            merge_notes(page_notes)
+        if len(seen) <= before_count:
+            no_growth_rounds += 1
+        else:
+            no_growth_rounds = 0
+        if progress_callback:
+            progress_callback(
+                {
+                    "stage": "专辑列表翻页",
+                    "pages_loaded": pages_loaded,
+                    "total_notes": len(seen),
+                    "no_growth_rounds": no_growth_rounds,
+                    "expected_total": expected_total,
+                }
+            )
+        if target_total and len(seen) >= target_total:
+            break
+        if no_growth_rounds >= stop_no_growth_threshold:
+            break
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "专辑笔记列表读取完成",
+                "pages_loaded": pages_loaded,
+                "total_notes": len(seen),
+                "expected_total": expected_total,
+            }
+        )
+    return list(seen.values())
+
+
+async def _fetch_board_notes_via_extension(
+    board_id: str,
+    url: str,
+    expected_total: int | None = None,
+    extension_port: int = 9334,
+    progress_callback: Any | None = None,
+    dedicated_window_mode: bool = False,
+    allow_foreground_assist: bool = False,
+) -> list[dict[str, Any]]:
+    board_url = url or f"https://www.xiaohongshu.com/board/{board_id}?source=web_user_page"
+    stop_no_growth_threshold = 3
+    expression = _board_notes_extract_object_expression(board_id)
+    fallback_expression = _board_notes_extract_expression(board_id)
+    status_expression = _board_notes_status_expression(board_id)
+    seen: dict[str, dict[str, Any]] = {}
+
+    def report(stage: str, **extra: Any) -> None:
+        if progress_callback:
+            progress_callback({"stage": stage, **extra})
+
+    async with XHSExtensionBridge(port=extension_port) as bridge:
+        await bridge.wait_until_ready(timeout=20.0)
+        tab_pulse_used = False
+        foreground_assist_used = False
+        foreground_restore_app = ""
+
+        if dedicated_window_mode:
+            try:
+                state = await bridge.call(
+                    "ensure_dedicated_xhs_tab",
+                    {"url": board_url},
+                    timeout=60.0,
                 )
-            return list(seen.values())
-        finally:
-            await browser.close()
+                report("专用窗口已绑定", **state if isinstance(state, dict) else {})
+            except Exception:
+                pass
+
+        def is_transient_frame_error(error: Exception) -> bool:
+            text = _safe_str(error)
+            markers = [
+                "Frame with ID 0 was removed",
+                "No frame with given id found",
+                "Cannot access contents of url",
+                "The frame was removed",
+                "Extension context invalidated",
+                "扩展命令超时",
+            ]
+            return any(marker in text for marker in markers)
+
+        async def bridge_call_retry(
+            method: str,
+            params: dict[str, Any] | None = None,
+            *,
+            timeout: float = 10.0,
+            retries: int = 2,
+        ) -> Any:
+            for attempt in range(retries + 1):
+                try:
+                    return await bridge.call(method, params or {}, timeout=timeout)
+                except Exception as exc:
+                    if attempt >= retries or not is_transient_frame_error(exc):
+                        raise
+                    await asyncio.sleep(1.0 + attempt * 0.8)
+                    try:
+                        await bridge.call(
+                            "wait_for_load",
+                            {
+                                "timeout": 45000,
+                                "background": _extension_should_navigate_background(dedicated_window_mode),
+                            },
+                            timeout=45.0,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await bridge.call(
+                            "wait_dom_stable",
+                            {"timeout": 12000, "interval": 500},
+                            timeout=15.0,
+                        )
+                    except Exception:
+                        pass
+
+        async def dismiss_page_hints() -> None:
+            try:
+                await bridge_call_retry(
+                    "evaluate",
+                    {
+                        "expression": (
+                            "(() => {"
+                            "const hit = [...document.querySelectorAll('button,span,div')].find((el) => ((el.innerText || el.textContent || '').trim() === '我知道了'));"
+                            "if (hit) { hit.click(); return true; }"
+                            "return false;"
+                            "})()"
+                        )
+                    },
+                    timeout=8.0,
+                )
+            except Exception:
+                pass
+
+        async def human_pause(min_seconds: float = 0.8, max_seconds: float = 1.8) -> None:
+            await asyncio.sleep(random.uniform(min_seconds, max_seconds))
+
+        async def pulse_tab() -> None:
+            bridge_state: dict[str, Any] = {}
+            try:
+                result = await bridge_call_retry("pulse_tab", {}, timeout=10.0)
+                if isinstance(result, dict):
+                    bridge_state = result
+                await asyncio.sleep(random.uniform(0.6, 1.2))
+            except Exception:
+                bridge_state = {}
+            os_pulse = await _macos_real_browser_tab_pulse()
+            report("标签脉冲", bridge=bridge_state, os_pulse=os_pulse)
+
+        async def enable_foreground_assist(reason: str) -> None:
+            nonlocal foreground_assist_used, foreground_restore_app
+            if foreground_assist_used:
+                return
+            foreground_assist_used = True
+            foreground_restore_app = await _macos_frontmost_app_name()
+            await bridge_call_retry("activate_tab", {}, timeout=10.0)
+            await asyncio.sleep(random.uniform(0.6, 1.0))
+            await pulse_tab()
+            try:
+                await bridge.call(
+                    "navigate",
+                    {"url": board_url, "background": False},
+                    timeout=45.0,
+                )
+                await bridge.call(
+                    "wait_for_load",
+                    {"timeout": 45000, "background": False},
+                    timeout=45.0,
+                )
+                await bridge.call(
+                    "wait_dom_stable",
+                    {"timeout": 12000, "interval": 500},
+                    timeout=15.0,
+                )
+            except Exception:
+                pass
+            report("前台辅助: 独立窗口滚动解锁", reason=reason, restore_app=foreground_restore_app)
+
+        async def restore_foreground_assist() -> None:
+            if foreground_restore_app and foreground_restore_app != "Microsoft Edge":
+                restore_result = await _macos_activate_app(foreground_restore_app)
+                report("恢复前台应用", app=foreground_restore_app, restore=restore_result)
+
+        # 2026-04-14 shared-tab experiment, see docs/xhs/xhs-update.md §11.3/§11.4.
+        # 这段旧 helper 对应“共享当前浏览器标签页模式”下的泛化激活逻辑，
+        # 后续改动中已被更明确的 `activate_board_tab_once()` 取代，当前主链路不再调用。
+        #
+        # async def settle_active_xhs_tab(reason: str, *, pulse: bool = False, heavy: bool = False) -> None:
+        #     nonlocal tab_pulse_used
+        #     should_pulse = pulse and not tab_pulse_used
+        #     if should_pulse:
+        #         await bridge.call("activate_tab", {}, timeout=10.0)
+        #         await asyncio.sleep(random.uniform(0.4, 0.9))
+        #         await pulse_tab()
+        #         tab_pulse_used = True
+        #     await human_pause(0.8, 1.6 if should_pulse and heavy else 1.2)
+        #     if should_pulse:
+        #         report(f"标签激活: {reason}")
+
+        async def activate_board_tab_once() -> None:
+            nonlocal tab_pulse_used
+            if tab_pulse_used:
+                return
+            board_page_pattern = re.compile(r"/board/[^/?#]+\?source=web_user_page(?:[&#].*)?$")
+            matched_url = ""
+            for _ in range(30):
+                current_url = _safe_str(await bridge.call("get_url", {}, timeout=10.0))
+                if board_page_pattern.search(current_url):
+                    matched_url = current_url
+                    break
+                await asyncio.sleep(0.35)
+
+            if matched_url:
+                try:
+                    await bridge_call_retry("wait_for_load", {"timeout": 45000}, timeout=45.0)
+                except Exception:
+                    pass
+                try:
+                    await bridge_call_retry("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+                except Exception:
+                    pass
+
+            previous_app = ""
+            if dedicated_window_mode:
+                previous_app = await _macos_frontmost_app_name()
+
+            await bridge_call_retry("activate_tab", {}, timeout=10.0)
+            await asyncio.sleep(random.uniform(0.6, 1.0))
+            await pulse_tab()
+            if dedicated_window_mode and previous_app and previous_app != "Microsoft Edge":
+                await asyncio.sleep(0.25)
+                restore_result = await _macos_activate_app(previous_app)
+                report("恢复前台应用", app=previous_app, restore=restore_result)
+            tab_pulse_used = True
+            await human_pause(1.0, 1.6)
+            report("标签激活: 进入具体专辑", url=matched_url, dedicated_window=dedicated_window_mode)
+
+        async def click_text_target(text: str, timeout: float = 12.0) -> bool:
+            expression = (
+                "(() => {"
+                f"const targetText = {json.dumps(text)};"
+                "const nodes = [...document.querySelectorAll('a,button,[role=\"button\"],div,span')];"
+                "const score = (el) => {"
+                "  const text = ((el.innerText || el.textContent || '').trim());"
+                "  if (text !== targetText) return -1;"
+                "  if (el.matches('a[href],button,[role=\"button\"]')) return 3;"
+                "  if (el.closest('a[href],button,[role=\"button\"]')) return 2;"
+                "  return 1;"
+                "};"
+                "const hit = nodes.map((el) => [score(el), el]).filter(([value]) => value > 0).sort((a, b) => b[0] - a[0])[0]?.[1];"
+                "if (!hit) return false;"
+                "const clickable = hit.closest('a[href],button,[role=\"button\"],.reds-tab-item,.tab,.tabs-item') || hit;"
+                "clickable.scrollIntoView({block:'center', inline:'center'});"
+                "if (clickable.href) { clickable.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window})); return true; }"
+                "clickable.click();"
+                "return true;"
+                "})()"
+            )
+            try:
+                return bool(await bridge.call("evaluate", {"expression": expression}, timeout=timeout))
+            except Exception:
+                return False
+
+        async def open_me_profile() -> bool:
+            profile_expr = (
+                "(() => {"
+                "const links = [...document.querySelectorAll('a[href*=\"/user/profile/\"]')];"
+                "const me = links.find((a) => ((a.innerText || a.textContent || '').trim() === '我')) || links[0];"
+                "if (!me) return false;"
+                "me.scrollIntoView({block:'center'});"
+                "me.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));"
+                "return true;"
+                "})()"
+            )
+            try:
+                opened = bool(await bridge.call("evaluate", {"expression": profile_expr}, timeout=12.0))
+            except Exception:
+                opened = False
+            if not opened:
+                return False
+            await human_pause(2.0, 3.5)
+            try:
+                await bridge.call("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+            except Exception:
+                pass
+            return True
+
+        async def click_album_card() -> bool:
+            expression = (
+                "(() => {"
+                f"const boardId = {json.dumps(board_id)};"
+                "const anchors = [...document.querySelectorAll('a[href*=\"/board/\"]')];"
+                "const hit = anchors.find((a) => (a.getAttribute('href') || '').includes(`/board/${boardId}`));"
+                "if (!hit) return false;"
+                "hit.scrollIntoView({block:'center', inline:'center'});"
+                "hit.click();"
+                "return true;"
+                "})()"
+            )
+            try:
+                return bool(await bridge.call("evaluate", {"expression": expression}, timeout=12.0))
+            except Exception:
+                return False
+
+        async def open_board_via_ui() -> bool:
+            # 先回到发现页，尽量从稳定入口开始。
+            navigate_background = _extension_should_navigate_background(dedicated_window_mode)
+            await bridge_call_retry(
+                "navigate",
+                {"url": "https://www.xiaohongshu.com/explore", "background": navigate_background},
+                timeout=45.0,
+            )
+            await bridge_call_retry(
+                "wait_for_load",
+                {"timeout": 45000, "background": navigate_background},
+                timeout=45.0,
+            )
+            await bridge_call_retry("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+            await dismiss_page_hints()
+
+            current_url = _safe_str(await bridge_call_retry("get_url", {}, timeout=10.0))
+            if "/user/profile/" not in current_url:
+                opened_profile = await open_me_profile()
+                if not opened_profile:
+                    opened_profile = await click_text_target("我")
+                if not opened_profile:
+                    return False
+
+            opened_favorites = await click_text_target("收藏")
+            if not opened_favorites:
+                return False
+            await human_pause(1.6, 3.0)
+            await bridge_call_retry("wait_dom_stable", {"timeout": 10000, "interval": 500}, timeout=12.0)
+
+            opened_albums = False
+            for label in ["专辑", f"专辑・{expected_total}" if expected_total else "专辑"]:
+                opened_albums = await click_text_target(label)
+                if opened_albums:
+                    break
+            if not opened_albums:
+                albums_expr = (
+                    "(() => {"
+                    "const hit = [...document.querySelectorAll('a,button,div,span')].find((el) => {"
+                    "  const text = (el.innerText || el.textContent || '').trim();"
+                    "  return /^专辑[・·]\\d+$/.test(text) || text === '专辑';"
+                    "});"
+                    "if (!hit) return false;"
+                    "const clickable = hit.closest('a,button,[role=\"button\"],.reds-tab-item,.tab,.tabs-item') || hit;"
+                    "clickable.scrollIntoView({block:'center'});"
+                    "clickable.click();"
+                    "return true;"
+                    "})()"
+                )
+                opened_albums = bool(await bridge.call("evaluate", {"expression": albums_expr}, timeout=12.0))
+            if not opened_albums:
+                return False
+            await human_pause(2.0, 3.5)
+            await bridge_call_retry("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+            await dismiss_page_hints()
+
+            # 专辑卡片可能不在首屏，先小步滚几次再找。
+            for _ in range(6):
+                if await click_album_card():
+                    await activate_board_tab_once()
+                    await human_pause(2.0, 3.2)
+                    await bridge.call("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+                    return True
+                await bridge_call_retry("scroll_by", {"x": 0, "y": 900}, timeout=10.0)
+                await human_pause(1.0, 1.8)
+
+            return False
+
+        async def fetch_payload() -> dict[str, Any]:
+            try:
+                payload = await bridge_call_retry("evaluate", {"expression": expression}, timeout=20.0)
+                if isinstance(payload, dict):
+                    return payload
+            except Exception:
+                pass
+
+            fallback_payload = await bridge_call_retry("evaluate", {"expression": fallback_expression}, timeout=12.0)
+            if isinstance(fallback_payload, str):
+                try:
+                    notes = json.loads(fallback_payload)
+                except Exception:
+                    notes = []
+                if isinstance(notes, list):
+                    return {"notes": notes, "total": len(notes)}
+            if isinstance(fallback_payload, list):
+                return {"notes": fallback_payload, "total": len(fallback_payload)}
+            return {"notes": [], "total": 0}
+
+        async def fetch_status() -> dict[str, Any]:
+            try:
+                status = await bridge_call_retry("evaluate", {"expression": status_expression}, timeout=20.0)
+            except Exception:
+                return {}
+            if not isinstance(status, dict):
+                return {}
+            _raise_for_xhs_snapshot(status)
+            return status
+
+        async def merge_from_page() -> tuple[int, dict[str, Any]]:
+            payload = await fetch_payload()
+            notes = payload.get("notes", []) if isinstance(payload, dict) else []
+            before = len(seen)
+            if isinstance(notes, list):
+                for idx, item in enumerate(notes):
+                    if isinstance(item, dict):
+                        seen[str(item.get("note_id") or f"seed-{idx}")] = item
+            growth = len(seen) - before
+            status = await fetch_status()
+            return growth, status
+
+        async def human_scroll_pattern(round_index: int, status: dict[str, Any]) -> None:
+            scroll_height = int(status.get("scroll_height") or 0)
+            viewport_height = int(status.get("viewport_height") or 0)
+            scroll_top = int(status.get("scroll_top") or 0)
+            near_bottom = scroll_height > 0 and viewport_height > 0 and scroll_top + viewport_height >= scroll_height - 160
+
+            # 交替使用几种滚动方式，避免固定模式。
+            pattern = round_index % 4
+            if pattern == 0:
+                await bridge_call_retry("scroll_by", {"x": 0, "y": 720}, timeout=10.0)
+                await asyncio.sleep(random.uniform(1.0, 1.8))
+                await bridge_call_retry("dispatch_wheel_event", {"deltaY": 900}, timeout=10.0)
+            elif pattern == 1:
+                await bridge_call_retry("dispatch_wheel_event", {"deltaY": 1400}, timeout=10.0)
+                await asyncio.sleep(random.uniform(0.8, 1.5))
+                await bridge_call_retry("scroll_by", {"x": 0, "y": 480}, timeout=10.0)
+            elif pattern == 2:
+                await bridge_call_retry("scroll_to_bottom", {}, timeout=10.0)
+                await asyncio.sleep(random.uniform(1.0, 1.8))
+                await bridge_call_retry("scroll_by", {"x": 0, "y": -480}, timeout=10.0)
+                await asyncio.sleep(random.uniform(0.6, 1.2))
+                await bridge_call_retry("dispatch_wheel_event", {"deltaY": 1200}, timeout=10.0)
+            else:
+                target_y = scroll_top + max(600, int(viewport_height * 0.8) if viewport_height else 800)
+                await bridge_call_retry("scroll_to", {"x": 0, "y": target_y}, timeout=10.0)
+                await asyncio.sleep(random.uniform(0.9, 1.6))
+                await bridge_call_retry("dispatch_wheel_event", {"deltaY": 1000}, timeout=10.0)
+
+            if near_bottom:
+                await asyncio.sleep(random.uniform(1.0, 2.0))
+                await bridge_call_retry("scroll_by", {"x": 0, "y": -320}, timeout=10.0)
+                await asyncio.sleep(random.uniform(0.8, 1.4))
+                await bridge_call_retry("dispatch_wheel_event", {"deltaY": 1100}, timeout=10.0)
+
+        async def wait_for_growth(previous_count: int, max_wait_rounds: int = 4) -> tuple[int, dict[str, Any]]:
+            growth = 0
+            last_status: dict[str, Any] = {}
+            for _ in range(max_wait_rounds):
+                await asyncio.sleep(random.uniform(1.2, 2.4))
+                try:
+                    growth, last_status = await merge_from_page()
+                except Exception as exc:
+                    report("页面状态重试", error=_safe_str(exc), total_notes=len(seen))
+                    last_status = {}
+                    continue
+                if len(seen) > previous_count:
+                    return growth, last_status
+                loading_texts = last_status.get("loading_texts") or []
+                if loading_texts:
+                    continue
+            return growth, last_status
+
+        opened_via_ui = False if dedicated_window_mode else await open_board_via_ui()
+        if not opened_via_ui:
+            current_url = _safe_str(await bridge_call_retry("get_url", {}, timeout=10.0))
+            if current_url.startswith(board_url):
+                navigate_background = _extension_should_navigate_background(dedicated_window_mode)
+                await bridge_call_retry(
+                    "navigate",
+                    {"url": "https://www.xiaohongshu.com/explore", "background": navigate_background},
+                    timeout=45.0,
+                )
+                await bridge_call_retry(
+                    "wait_for_load",
+                    {"timeout": 45000, "background": navigate_background},
+                    timeout=45.0,
+                )
+                await asyncio.sleep(random.uniform(1.0, 2.0))
+            navigate_background = _extension_should_navigate_background(dedicated_window_mode)
+            await bridge_call_retry(
+                "navigate",
+                {"url": board_url, "background": navigate_background},
+                timeout=45.0,
+            )
+            await bridge_call_retry(
+                "wait_for_load",
+                {"timeout": 45000, "background": navigate_background},
+                timeout=45.0,
+            )
+            await bridge_call_retry("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+            # 观察页面状态 -> 确认专辑 notes state 出现 -> 再开始滚动。
+            # 这是 bridge 方案的核心：在 MAIN world 等页面已渲染状态，而不是抓接口。
+            await _wait_xhs_state_via_bridge(
+                bridge,
+                kind="board",
+                board_id=board_id,
+                timeout_ms=18000,
+                interval_ms=500,
+                command_timeout=22.0,
+            )
+            await dismiss_page_hints()
+
+        target_total = max(int(expected_total or 0), 0)
+        no_growth_rounds = 0
+        hard_stall_rounds = 0
+        consecutive_no_new_pages = 0
+
+        initial_growth, initial_status = await merge_from_page()
+        report(
+            "扩展读取专辑笔记列表",
+            pages_loaded=1,
+            total_notes=len(seen),
+            expected_total=expected_total,
+            no_growth_rounds=no_growth_rounds,
+            scroll_top=initial_status.get("scroll_top"),
+            scroll_height=initial_status.get("scroll_height"),
+            anchor_count=initial_status.get("anchor_count"),
+        )
+
+        round_index = 0
+        while True:
+            round_index += 1
+            status = await fetch_status()
+            report(
+                "扩展读取专辑笔记列表",
+                pages_loaded=round_index,
+                total_notes=len(seen),
+                expected_total=expected_total,
+                no_growth_rounds=no_growth_rounds,
+                scroll_top=status.get("scroll_top"),
+                scroll_height=status.get("scroll_height"),
+                anchor_count=status.get("anchor_count"),
+            )
+
+            await dismiss_page_hints()
+            previous_count = len(seen)
+            await human_scroll_pattern(round_index, status)
+            growth, after_status = await wait_for_growth(previous_count)
+
+            if len(seen) > previous_count:
+                no_growth_rounds = 0
+                hard_stall_rounds = 0
+                consecutive_no_new_pages = 0
+            else:
+                no_growth_rounds += 1
+                consecutive_no_new_pages += 1
+                loading_texts = after_status.get("loading_texts") or []
+                if not loading_texts:
+                    hard_stall_rounds += 1
+                else:
+                    hard_stall_rounds = 0
+
+            if (
+                dedicated_window_mode
+                and allow_foreground_assist
+                and no_growth_rounds >= 2
+                and not foreground_assist_used
+            ):
+                await enable_foreground_assist("后台滚动连续无增长")
+                no_growth_rounds = 0
+                hard_stall_rounds = 0
+                continue
+
+            if (
+                dedicated_window_mode
+                and foreground_assist_used
+                and no_growth_rounds >= 2
+            ):
+                raise RuntimeError(
+                    "[browser_visibility] 独立窗口后台滚动受浏览器可见性限制，前台辅助后仍未继续加载；"
+                    "已停止扩展链路并准备交给 CDP 兜底"
+                )
+
+            if consecutive_no_new_pages >= stop_no_growth_threshold:
+                report(
+                    "连续翻页无新增，停止翻页并开始抓取已加载笔记",
+                    pages_loaded=round_index,
+                    total_notes=len(seen),
+                    expected_total=expected_total,
+                    no_growth_rounds=consecutive_no_new_pages,
+                    hard_stall_rounds=hard_stall_rounds,
+                )
+                break
+
+            # 卡住时额外做一次“回拉 -> 再触底”组合，给页面第二次机会。
+            # 只在还未达到停止阈值时尝试，避免已经连续无新增很多轮还继续拖延。
+            if (
+                no_growth_rounds >= 2
+                and consecutive_no_new_pages < stop_no_growth_threshold
+                and hard_stall_rounds < stop_no_growth_threshold
+            ):
+                await bridge_call_retry("scroll_by", {"x": 0, "y": -900}, timeout=10.0)
+                await asyncio.sleep(random.uniform(1.0, 1.8))
+                await bridge_call_retry("scroll_to_bottom", {}, timeout=10.0)
+                retry_previous_count = len(seen)
+                _, _after_retry_status = await wait_for_growth(retry_previous_count, max_wait_rounds=3)
+                if len(seen) > retry_previous_count:
+                    no_growth_rounds = 0
+                    hard_stall_rounds = 0
+                    consecutive_no_new_pages = 0
+
+            if (
+                consecutive_no_new_pages >= stop_no_growth_threshold
+                or hard_stall_rounds >= stop_no_growth_threshold
+            ):
+                report(
+                    "连续翻页无新增，停止翻页并开始抓取已加载笔记",
+                    pages_loaded=round_index,
+                    total_notes=len(seen),
+                    expected_total=expected_total,
+                    no_growth_rounds=consecutive_no_new_pages,
+                    hard_stall_rounds=hard_stall_rounds,
+                )
+                break
+
+        await restore_foreground_assist()
+
+    return list(seen.values())
 
 
 async def _fetch_board_notes(
@@ -1557,22 +3358,48 @@ async def _fetch_board_notes(
     cookie: str | None = None,
     expected_total: int | None = None,
     progress_callback: Any | None = None,
+    page: Any | None = None,
+    use_extension: bool = True,
+    extension_port: int = 9334,
+    dedicated_window_mode: bool = False,
 ) -> list[dict[str, Any]]:
     board_url = url or f"https://www.xiaohongshu.com/board/{board_id}?source=web_user_page"
     expression = _board_notes_extract_expression(board_id)
+    extension_error: Exception | None = None
+    extension_attempted = False
+    if use_extension:
+        extension_attempted = True
+        try:
+            notes = await _fetch_board_notes_via_extension(
+                board_id,
+                board_url,
+                expected_total=expected_total,
+                extension_port=extension_port,
+                progress_callback=progress_callback,
+                dedicated_window_mode=dedicated_window_mode,
+                allow_foreground_assist=False,
+            )
+            if notes:
+                return notes
+            extension_error = RuntimeError("扩展 bridge 未读取到专辑笔记列表")
+        except Exception as exc:
+            extension_error = exc
+
     headless_error: Exception | None = None
-    try:
-        notes = await _fetch_board_notes_headless(
-            board_id,
-            url,
-            cookie,
-            expected_total=expected_total,
-            progress_callback=progress_callback,
-        )
-        if notes:
-            return notes
-    except Exception as exc:
-        headless_error = exc
+    if not (extension_attempted and dedicated_window_mode):
+        try:
+            notes = await _fetch_board_notes_headless(
+                board_id,
+                url,
+                cookie,
+                expected_total=expected_total,
+                progress_callback=progress_callback,
+                page=page,
+            )
+            if notes:
+                return notes
+        except Exception as exc:
+            headless_error = exc
 
     try:
         if progress_callback:
@@ -1590,6 +3417,8 @@ async def _fetch_board_notes(
             )
         return notes
     except Exception:
+        if extension_error:
+            raise extension_error
         if headless_error:
             raise headless_error
         raise
@@ -1611,8 +3440,14 @@ async def crawl_xhs_albums_incremental(
     before_date: str | None = None,
     recent_days: int | None = None,
     crawl_mode: str = "incremental",
-    crawl_delay_seconds: float = 8.0,
+    crawl_delay_seconds: float = 12.0,
+    batch_size: int | None = None,
+    batch_pause_seconds: float = 0.0,
     progress_callback: Any | None = None,
+    target_total_notes_per_album: int | None = None,
+    use_extension: bool = True,
+    extension_port: int = 9334,
+    dedicated_window_mode: bool = False,
 ) -> dict[str, Any]:
     """按选中的收藏专辑抓取。incremental 跳过已记录笔记，full 处理专辑内全部已加载笔记。"""
     if not albums:
@@ -1637,6 +3472,14 @@ async def crawl_xhs_albums_incremental(
             cutoff_dt = datetime.strptime(before_date, "%Y-%m-%d").date()
         except Exception:
             cutoff_dt = None
+    try:
+        batch_size_value = max(0, int(batch_size or 0))
+    except Exception:
+        batch_size_value = 0
+    try:
+        batch_pause_value = max(0.0, float(batch_pause_seconds or 0.0))
+    except Exception:
+        batch_pause_value = 0.0
 
     def report(stage: str, **extra: Any) -> None:
         if progress_callback:
@@ -1651,169 +3494,316 @@ async def crawl_xhs_albums_incremental(
                 }
             )
 
-    for album_index, album in enumerate(albums, 1):
-        board_id = str(album.get("board_id") or album.get("boardId") or "")
-        name = str(album.get("name") or "未命名专辑")
-        url = str(album.get("url") or "")
-        report("读取专辑", current_album=name, current_album_index=album_index)
-        if not board_id:
-            failed += 1
-            results.append({"success": False, "album": name, "error": "缺少 board_id"})
-            report("专辑失败", current_album=name, current_album_index=album_index)
-            continue
+    shared_page = None
 
-        album_state = progress["albums"].setdefault(
-            board_id,
-            {"name": name, "count": album.get("count"), "seen_note_ids": [], "last_cursor": "", "done": False},
-        )
-        seen_ids = set(album_state.get("seen_note_ids", []))
-        try:
-            def report_board_progress(payload: dict[str, Any]) -> None:
-                stage = str(payload.pop("stage", "读取专辑笔记列表"))
-                report(stage, current_album=name, current_album_index=album_index, **payload)
+    try:
+        for album_index, album in enumerate(albums, 1):
+            board_id = str(album.get("board_id") or album.get("boardId") or "")
+            name = str(album.get("name") or "未命名专辑")
+            url = str(album.get("url") or "")
+            report("读取专辑", current_album=name, current_album_index=album_index)
+            if not board_id:
+                failed += 1
+                results.append({"success": False, "album": name, "error": "缺少 board_id"})
+                report("专辑失败", current_album=name, current_album_index=album_index)
+                continue
 
-            notes = await _fetch_board_notes(
+            album_state = progress["albums"].setdefault(
                 board_id,
-                url,
-                cdp_port,
-                cookie=cookie,
-                expected_total=album.get("count"),
-                progress_callback=report_board_progress,
+                {"name": name, "count": album.get("count"), "seen_note_ids": [], "last_cursor": "", "done": False},
             )
-        except Exception as exc:
-            failed += 1
-            results.append({"success": False, "album": name, "board_id": board_id, "error": str(exc)})
-            report("专辑失败", current_album=name, current_album_index=album_index)
-            continue
-
-        album_saved = 0
-        album_skipped = 0
-        notes_to_process = notes if max_notes_per_album is None else notes[:max(1, int(max_notes_per_album))]
-        processed_note_count = len(notes_to_process)
-        for note_index, item in enumerate(notes_to_process, 1):
-            note_id = str(item.get("note_id") or "")
-            if not note_id:
-                continue
-            note_date = _extract_datetime(item.get("time"))
-            if since_dt and note_date and note_date.date() < since_dt:
-                album_skipped += 1
-                skipped += 1
+            raw_seen_ids = album_state.get("seen_note_ids", [])
+            raw_seen_count = len(raw_seen_ids) if isinstance(raw_seen_ids, list) else 0
+            resolved_seen_ids, pruned_seen_ids = _resolve_album_seen_ids(progress, album_state)
+            if pruned_seen_ids:
+                album_state["seen_note_ids"] = resolved_seen_ids
                 report(
-                    "跳过较旧笔记",
+                    "专辑进度已修正",
                     current_album=name,
                     current_album_index=album_index,
-                    current_note_index=note_index,
-                    total_notes=processed_note_count,
+                    pruned_seen_count=len(pruned_seen_ids),
+                    seen_count=len(resolved_seen_ids),
                 )
-                continue
-            if cutoff_dt and note_date and note_date.date() > cutoff_dt:
-                album_skipped += 1
-                skipped += 1
-                report(
-                    "跳过较新笔记",
-                    current_album=name,
-                    current_album_index=album_index,
-                    current_note_index=note_index,
-                    total_notes=processed_note_count,
-                )
-                continue
-            if mode == "incremental" and note_id in seen_ids:
-                album_skipped += 1
-                skipped += 1
-                report(
-                    "跳过已抓笔记",
-                    current_album=name,
-                    current_album_index=album_index,
-                    current_note_index=note_index,
-                    total_notes=processed_note_count,
-                )
-                continue
-            detail_url = (
-                f"https://www.xiaohongshu.com/explore/{note_id}"
-                f"?xsec_token={item.get('xsec_token', '')}&xsec_source=pc_collect_board"
-            )
-            try:
-                report(
-                    "抓取笔记详情",
-                    current_album=name,
-                    current_album_index=album_index,
-                    current_note_index=note_index,
-                    total_notes=processed_note_count,
-                )
-                note_result = await crawl_xhs_note_to_vault(
-                    detail_url,
-                    cookie=cookie,
-                    vault_path=vault_path,
-                    include_images=include_images,
-                    include_video=include_video,
-                    include_live_photo=include_live_photo,
-                    include_comments=include_comments,
-                    include_sub_comments=include_sub_comments,
-                    comments_limit=comments_limit,
-                    use_cdp=True,
-                    cdp_port=cdp_port,
-                    subfolder=name,
-                )
-                seen_ids.add(note_id)
-                album_state["seen_note_ids"] = sorted(seen_ids)
-                progress["notes"].setdefault(
-                    note_id,
-                    {"file": note_result.get("markdown_path"), "albums": [], "last_seen_at": ""},
-                )
-                note_state = progress["notes"][note_id]
-                note_state["file"] = note_result.get("markdown_path")
-                note_state["last_seen_at"] = datetime.now().astimezone().isoformat()
-                note_state.setdefault("albums", [])
-                if name not in note_state["albums"]:
-                    note_state["albums"].append(name)
                 _save_album_progress(vault_path, progress)
-                album_saved += 1
-                saved += 1
+            seen_ids = set(resolved_seen_ids)
+            album_mode = mode
+            if mode == "incremental" and not seen_ids:
+                album_mode = "full"
                 report(
-                    "已保存笔记",
+                    "专辑自动切换为全量",
                     current_album=name,
                     current_album_index=album_index,
-                    current_note_index=note_index,
-                    total_notes=processed_note_count,
+                    reason="本地已抓笔记数为 0",
+                )
+            try:
+                def report_board_progress(payload: dict[str, Any]) -> None:
+                    stage = str(payload.pop("stage", "读取专辑笔记列表"))
+                    report(stage, current_album=name, current_album_index=album_index, **payload)
+
+                notes = await _fetch_board_notes(
+                    board_id,
+                    url,
+                    cdp_port,
+                    cookie=cookie,
+                    expected_total=target_total_notes_per_album or album.get("count"),
+                    progress_callback=report_board_progress,
+                    page=shared_page,
+                    use_extension=use_extension,
+                    extension_port=extension_port,
+                    dedicated_window_mode=dedicated_window_mode,
                 )
             except Exception as exc:
                 failed += 1
-                results.append({"success": False, "album": name, "note_id": note_id, "error": str(exc)})
+                results.append({"success": False, "album": name, "board_id": board_id, "error": str(exc)})
+                if _is_xhs_risk_error(exc) or _should_stop_xhs_task(exc):
+                    report("风控中断", current_album=name, current_album_index=album_index)
+                    raise RuntimeError(f"小红书触发风控，任务已停止：{exc}") from exc
+                report("专辑失败", current_album=name, current_album_index=album_index)
+                continue
+
+            album_saved = 0
+            album_skipped = 0
+            skipped_existing_in_loaded = 0
+            skipped_older_in_loaded = 0
+            skipped_newer_in_loaded = 0
+            skipped_invalid_in_loaded = 0
+            candidate_notes = notes
+            if album_mode == "incremental":
+                candidate_notes = [
+                    item
+                    for item in notes
+                    if str(item.get("note_id") or "") and str(item.get("note_id") or "") not in seen_ids
+                ]
+                skipped_existing_in_loaded = len(notes) - len(candidate_notes)
+                if skipped_existing_in_loaded > 0:
+                    report(
+                        "已过滤已抓笔记",
+                        current_album=name,
+                        current_album_index=album_index,
+                        loaded_notes=len(notes),
+                        skipped_existing=skipped_existing_in_loaded,
+                        remaining_notes=len(candidate_notes),
+                    )
+            filtered_notes: list[dict[str, Any]] = []
+            for item in candidate_notes:
+                note_id = str(item.get("note_id") or "")
+                if not note_id:
+                    skipped_invalid_in_loaded += 1
+                    continue
+                note_date = _extract_datetime(item.get("time"))
+                if since_dt and note_date and note_date.date() < since_dt:
+                    skipped_older_in_loaded += 1
+                    continue
+                if cutoff_dt and note_date and note_date.date() > cutoff_dt:
+                    skipped_newer_in_loaded += 1
+                    continue
+                filtered_notes.append(item)
+
+            skipped_this_album = (
+                skipped_existing_in_loaded
+                + skipped_older_in_loaded
+                + skipped_newer_in_loaded
+                + skipped_invalid_in_loaded
+            )
+            if skipped_this_album > 0:
+                album_skipped += skipped_this_album
+                skipped += skipped_this_album
                 report(
-                    "单条失败",
+                    "专辑候选过滤完成",
                     current_album=name,
                     current_album_index=album_index,
-                    current_note_index=note_index,
-                    total_notes=processed_note_count,
+                    skipped_existing=skipped_existing_in_loaded,
+                    skipped_older=skipped_older_in_loaded,
+                    skipped_newer=skipped_newer_in_loaded,
+                    skipped_invalid=skipped_invalid_in_loaded,
+                    skip_breakdown={
+                        "already_seen": skipped_existing_in_loaded,
+                        "older_than_recent_days": skipped_older_in_loaded,
+                        "newer_than_before_date": skipped_newer_in_loaded,
+                        "invalid_note": skipped_invalid_in_loaded,
+                    },
+                    remaining_notes=len(filtered_notes),
                 )
-            finally:
-                if crawl_delay_seconds > 0 and note_index < processed_note_count:
-                    max_delay = min(max(3.0, float(crawl_delay_seconds)), 8.0)
-                    delay = random.uniform(3.0, max_delay)
+
+            notes_to_process = (
+                filtered_notes
+                if max_notes_per_album is None
+                else filtered_notes[: max(1, int(max_notes_per_album))]
+            )
+            processed_note_count = len(notes_to_process)
+            diagnostics = {
+                "loaded_notes": len(notes),
+                "raw_seen_count": raw_seen_count,
+                "valid_seen_count": len(seen_ids),
+                "pruned_seen_count": len(pruned_seen_ids),
+                "candidate_notes": len(candidate_notes),
+                "processable_notes": processed_note_count,
+                "recent_days": recent_days if mode != "full" else None,
+                "before_date": before_date if mode != "full" else None,
+                "skip_breakdown": {
+                    "already_seen": skipped_existing_in_loaded,
+                    "older_than_recent_days": skipped_older_in_loaded,
+                    "newer_than_before_date": skipped_newer_in_loaded,
+                    "invalid_note": skipped_invalid_in_loaded,
+                },
+            }
+            if processed_note_count == 0:
+                if album_mode == "incremental" and skipped_existing_in_loaded > 0 and skipped_existing_in_loaded == len(notes):
                     report(
-                        "等待限速",
+                        "当前已加载笔记均已抓取，专辑无需更新",
+                        current_album=name,
+                        current_album_index=album_index,
+                        **diagnostics,
+                    )
+                elif len(filtered_notes) == 0 and skipped_older_in_loaded > 0 and skipped_older_in_loaded == len(candidate_notes):
+                    report(
+                        "当前已加载笔记均早于增量时间范围",
+                        current_album=name,
+                        current_album_index=album_index,
+                        **diagnostics,
+                    )
+                else:
+                    report(
+                        "当前专辑没有可处理的新笔记",
+                        current_album=name,
+                        current_album_index=album_index,
+                        **diagnostics,
+                    )
+            for note_index, item in enumerate(notes_to_process, 1):
+                if target_total_notes_per_album is not None and len(seen_ids) >= int(target_total_notes_per_album):
+                    report(
+                        "达到专辑目标数量",
                         current_album=name,
                         current_album_index=album_index,
                         current_note_index=note_index,
                         total_notes=processed_note_count,
-                        delay_seconds=round(delay, 1),
+                        target_total_notes_per_album=int(target_total_notes_per_album),
                     )
-                    await asyncio.sleep(delay)
+                    break
+                note_id = str(item.get("note_id") or "")
+                if not note_id:
+                    continue
+                detail_url = (
+                    f"https://www.xiaohongshu.com/explore/{note_id}"
+                    f"?xsec_token={item.get('xsec_token', '')}&xsec_source=pc_collect_board"
+                )
+                try:
+                    report(
+                        "抓取笔记详情",
+                        current_album=name,
+                        current_album_index=album_index,
+                        current_note_index=note_index,
+                        total_notes=processed_note_count,
+                    )
+                    note_result = await crawl_xhs_note_to_vault(
+                        detail_url,
+                        cookie=cookie,
+                        vault_path=vault_path,
+                        include_images=include_images,
+                        include_video=include_video,
+                        include_live_photo=include_live_photo,
+                        include_comments=include_comments,
+                        include_sub_comments=include_sub_comments,
+                        comments_limit=comments_limit,
+                        use_extension=use_extension,
+                        extension_port=extension_port,
+                        dedicated_window_mode=dedicated_window_mode,
+                        use_cdp=True,
+                        cdp_port=cdp_port,
+                        subfolder=name,
+                        seed_data=item,
+                    )
+                    seen_ids.add(note_id)
+                    album_state["seen_note_ids"] = sorted(seen_ids)
+                    progress["notes"].setdefault(
+                        note_id,
+                        {"file": note_result.get("markdown_path"), "albums": [], "last_seen_at": ""},
+                    )
+                    note_state = progress["notes"][note_id]
+                    note_state["file"] = note_result.get("markdown_path")
+                    note_state["last_seen_at"] = datetime.now().astimezone().isoformat()
+                    note_state.setdefault("albums", [])
+                    if name not in note_state["albums"]:
+                        note_state["albums"].append(name)
+                    _save_album_progress(vault_path, progress)
+                    album_saved += 1
+                    saved += 1
+                    report(
+                        "已保存笔记",
+                        current_album=name,
+                        current_album_index=album_index,
+                        current_note_index=note_index,
+                        total_notes=processed_note_count,
+                    )
+                except Exception as exc:
+                    failed += 1
+                    results.append({"success": False, "album": name, "note_id": note_id, "error": str(exc)})
+                    if _is_xhs_risk_error(exc) or _should_stop_xhs_task(exc):
+                        report(
+                            "风控中断",
+                            current_album=name,
+                            current_album_index=album_index,
+                            current_note_index=note_index,
+                            total_notes=processed_note_count,
+                        )
+                        raise RuntimeError(f"小红书触发风控，任务已停止：{exc}") from exc
+                    report(
+                        "单条失败",
+                        current_album=name,
+                        current_album_index=album_index,
+                        current_note_index=note_index,
+                        total_notes=processed_note_count,
+                    )
+                finally:
+                    if batch_size_value > 0 and batch_pause_value > 0 and note_index < processed_note_count and note_index % batch_size_value == 0:
+                        report(
+                            "批次冷却",
+                            current_album=name,
+                            current_album_index=album_index,
+                            current_note_index=note_index,
+                            total_notes=processed_note_count,
+                            batch_size=batch_size_value,
+                            delay_seconds=round(batch_pause_value, 1),
+                        )
+                        await asyncio.sleep(batch_pause_value)
+                    if crawl_delay_seconds > 0 and note_index < processed_note_count:
+                        max_delay = min(max(8.0, float(crawl_delay_seconds)), 30.0)
+                        if max_delay >= 20.0:
+                            min_delay = max(14.0, max_delay - 8.0)
+                        elif max_delay >= 14.0:
+                            min_delay = max(10.0, max_delay - 5.0)
+                        else:
+                            min_delay = max(8.0, max_delay - 4.0)
+                        delay = random.uniform(min_delay, max_delay)
+                        report(
+                            "等待限速",
+                            current_album=name,
+                            current_album_index=album_index,
+                            current_note_index=note_index,
+                            total_notes=processed_note_count,
+                            delay_seconds=round(delay, 1),
+                        )
+                        await asyncio.sleep(delay)
 
-        album_state["name"] = name
-        album_state["count"] = album.get("count")
-        _save_album_progress(vault_path, progress)
-        results.append(
-            {
-                "success": True,
-                "album": name,
-                "board_id": board_id,
-                "found": len(notes),
-                "saved": album_saved,
-                "skipped": album_skipped,
-            }
-        )
-        report("专辑完成", current_album=name, current_album_index=album_index)
+            album_state["name"] = name
+            album_state["count"] = album.get("count")
+            _save_album_progress(vault_path, progress)
+            results.append(
+                {
+                    "success": True,
+                    "album": name,
+                    "board_id": board_id,
+                    "mode": album_mode,
+                    "found": len(notes),
+                    "saved": album_saved,
+                    "skipped": album_skipped,
+                    "diagnostics": diagnostics,
+                }
+            )
+            report("专辑完成", current_album=name, current_album_index=album_index)
+    finally:
+        if shared_page is not None:
+            await shared_page.close()
 
     return {
         "success": True,

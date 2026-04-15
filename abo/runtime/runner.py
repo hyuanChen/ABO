@@ -7,17 +7,20 @@ from ..sdk.base import Module
 from ..sdk.types import Card
 from ..preferences.engine import PreferenceEngine
 from ..store.cards import CardStore
+from ..store.papers import PaperStore
 from .broadcaster import Broadcaster
 from .. import config as cfg
 
 
 class ModuleRunner:
     def __init__(self, store: CardStore, prefs: PreferenceEngine,
-                 broadcaster: Broadcaster, vault_path: Path | None = None):
+                 broadcaster: Broadcaster, vault_path: Path | None = None,
+                 paper_store: PaperStore | None = None):
         self._store = store
         self._prefs = prefs
         self._broadcaster = broadcaster
         self._vault = vault_path or cfg.get_vault_path()
+        self._paper_store = paper_store
 
     async def run(self, module: Module) -> int:
         prefs = self._prefs.get_prefs_for_module(module.id)
@@ -40,6 +43,8 @@ class ModuleRunner:
                 self._write_vault(card)
 
             self._store.save(card)
+            if self._paper_store:
+                self._paper_store.upsert_from_card(card)
 
             if "ui" in output:
                 await self._broadcaster.send_card(card)
