@@ -2,27 +2,21 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import {
   BookOpen,
   RefreshCw,
-  ExternalLink,
-  Star,
-  Save,
   Search,
-  Calendar,
-  User,
   FileText,
-  Download,
-  ChevronDown,
-  ChevronUp,
-  Check,
   Cpu,
   GitBranch,
   Square,
-  Image as ImageIcon,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState } from "../../components/Layout";
 import { api } from "../../core/api";
+import { isActionEnterKey } from "../../core/keyboard";
+import { withLocationSuffix } from "../../core/pathDisplay";
 import { useToast } from "../../components/Toast";
 import { useStore } from "../../core/store";
 import PaperMonitorPanel from "./PaperMonitorPanel";
+import SharedPaperTrackingCard from "./PaperTrackingCard";
+import { ArxivCategorySelector, type ArxivCategory } from "./ArxivCategorySelector";
 
 type PaperFigureAsset = {
   url?: string;
@@ -33,8 +27,6 @@ type PaperFigureAsset = {
   filename?: string;
 };
 
-const API_BASE = "http://127.0.0.1:8765";
-
 interface ArxivPaper {
   id: string;
   title: string;
@@ -42,49 +34,68 @@ interface ArxivPaper {
   score: number;
   tags: string[];
   source_url: string;
-  metadata: {
-    authors?: string[];
-    published?: string;
-    "pdf-url"?: string;
-    contribution?: string;
-    abstract?: string;
-    keywords?: string[];
-    figures?: PaperFigureAsset[];
-    figures_dir?: string;
-    local_figures?: PaperFigureAsset[];
-  };
+  metadata: TrackedPaperMetadata;
 }
 
-interface SemanticScholarPaper {
+interface TrackedPaperMetadata extends Record<string, unknown> {
+  authors?: string[];
+  published?: string;
+  updated?: string;
+  year?: number;
+  venue?: string;
+  citation_count?: number;
+  reference_count?: number;
+  contribution?: string;
+  abstract?: string;
+  introduction?: string;
+  "formatted-digest"?: string;
+  keywords?: string[];
+  figures?: PaperFigureAsset[];
+  figures_dir?: string;
+  local_figures?: PaperFigureAsset[];
+  paper_id?: string;
+  s2_url?: string;
+  arxiv_id?: string;
+  "arxiv-id"?: string;
+  arxiv_url?: string;
+  "pdf-url"?: string;
+  pdf_url?: string;
+  "html-url"?: string;
+  html_url?: string;
+  relationship?: string;
+  relationship_label?: string;
+  source_arxiv_id?: string;
+  source_paper_title?: string;
+  source_paper?: Record<string, unknown>;
+  paper_tracking_type?: string;
+  paper_tracking_role?: string;
+  paper_tracking_label?: string;
+  paper_tracking_labels?: string[];
+  paper_tracking_matches?: Array<Record<string, unknown>>;
+  saved_to_literature?: boolean;
+  literature_path?: string;
+  source_paper_path?: string;
+  primary_category?: string;
+  primary_category_name?: string;
+  categories?: string[];
+  all_categories?: string[];
+  comments?: string;
+  journal_ref?: string;
+  doi?: string;
+  fields_of_study?: string[];
+}
+
+interface TrackedPaper {
   id: string;
   title: string;
   summary: string;
   score: number;
   tags: string[];
   source_url: string;
-  metadata: {
-    authors?: string[];
-    year?: number;
-    citation_count?: number;
-    contribution?: string;
-    abstract?: string;
-    keywords?: string[];
-    paper_id?: string;
-    s2_url?: string;
-    arxiv_id?: string;
-    arxiv_url?: string;
-    "pdf-url"?: string;
-    "html-url"?: string;
-    relationship?: string;
-    relationship_label?: string;
-    source_arxiv_id?: string;
-    source_paper_title?: string;
-    published?: string;
-    venue?: string;
-    figures?: PaperFigureAsset[];
-    local_figures?: PaperFigureAsset[];
-  };
+  metadata: TrackedPaperMetadata;
 }
+
+type SemanticScholarPaper = TrackedPaper;
 
 interface CrawlProgress {
   current: number;
@@ -94,173 +105,8 @@ interface CrawlProgress {
   currentPaperTitle?: string;
 }
 
-function normalizePaperFigures(figures: PaperFigureAsset[] | undefined): PaperFigureAsset[] {
-  if (!figures?.length) return [];
-
-  const seen = new Set<string>();
-  return figures.flatMap((figure, index) => {
-    const key = figure.local_path || figure.url || figure.original_url || figure.filename || `figure-${index}`;
-    if (!key || seen.has(key)) return [];
-    seen.add(key);
-    return [
-      {
-        ...figure,
-        caption: figure.caption || `Figure ${index + 1}`,
-      },
-    ];
-  });
-}
-
-function normalizeArxivFigureUrl(url: string): string {
-  if (!url.startsWith("http")) return url;
-
-  try {
-    const parsed = new URL(url);
-    if (parsed.hostname !== "arxiv.org") return url;
-
-    const parts = parsed.pathname.split("/").filter(Boolean);
-    if (parts[0] !== "html" || parts.length < 3) return url;
-
-    const docId = parts[1];
-    const nested = parts[2];
-    if (nested === docId || nested.startsWith(`${docId}v`)) {
-      parsed.pathname = `/html/${parts.slice(2).join("/")}`;
-      return parsed.toString();
-    }
-  } catch {
-    return url;
-  }
-
-  return url;
-}
-
-function getPaperFigureRemoteUrl(figure: PaperFigureAsset): string {
-  const remoteUrl = figure.original_url || figure.url || "";
-  return normalizeArxivFigureUrl(remoteUrl);
-}
-
-function getPaperFigureImageUrl(figure: PaperFigureAsset): string {
-  if (figure.local_path) {
-    return `${API_BASE}/api/literature/file?path=${encodeURIComponent(figure.local_path)}`;
-  }
-
-  const remoteUrl = getPaperFigureRemoteUrl(figure);
-  if (!remoteUrl) return "";
-  if (remoteUrl.startsWith("data:image/")) return remoteUrl;
-  if (remoteUrl.startsWith(`${API_BASE}/api/proxy/image?url=`)) return remoteUrl;
-  return `${API_BASE}/api/proxy/image?url=${encodeURIComponent(remoteUrl)}`;
-}
-
-function getPaperFigureTargetUrl(figure: PaperFigureAsset, fallbackUrl: string): string {
-  const remoteUrl = getPaperFigureRemoteUrl(figure);
-  if (remoteUrl.startsWith("data:image/")) return fallbackUrl;
-  return remoteUrl || getPaperFigureImageUrl(figure) || fallbackUrl;
-}
-
-function PaperFigureStrip({
-  figures,
-  fallbackUrl,
-}: {
-  figures: PaperFigureAsset[];
-  fallbackUrl: string;
-}) {
-  if (!figures.length) return null;
-
-  return (
-    <div style={{ marginBottom: "16px" }}>
-      <div
-        style={{
-          display: "flex",
-          gap: "16px",
-          overflowX: "auto",
-          paddingBottom: "12px",
-          scrollbarWidth: "thin",
-        }}
-      >
-        {figures.map((figure, index) => {
-          const imageUrl = getPaperFigureImageUrl(figure);
-          const targetUrl = getPaperFigureTargetUrl(figure, fallbackUrl);
-          return (
-            <div
-              key={`${targetUrl}-${index}`}
-              style={{
-                flexShrink: 0,
-                width: "480px",
-                borderRadius: "var(--radius-md)",
-                overflow: "hidden",
-                border: "1px solid var(--border-light)",
-                background: "var(--bg-card)",
-              }}
-            >
-              {imageUrl ? (
-                <img
-                  src={imageUrl}
-                  alt={figure.caption}
-                  style={{
-                    width: "100%",
-                    height: "280px",
-                    objectFit: "contain",
-                    background: "var(--bg-hover)",
-                    cursor: "pointer",
-                  }}
-                  onClick={() => window.open(targetUrl, "_blank")}
-                  loading="lazy"
-                />
-              ) : (
-                <a
-                  href={fallbackUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    width: "100%",
-                    height: "280px",
-                    background: "var(--bg-hover)",
-                    color: "var(--text-muted)",
-                    textDecoration: "none",
-                    fontSize: "0.875rem",
-                    fontWeight: 600,
-                  }}
-                >
-                  查看论文图片
-                </a>
-              )}
-              <div
-                style={{
-                  padding: "10px 12px",
-                  fontSize: "0.8125rem",
-                  color: "var(--text-muted)",
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  background: "var(--bg-card)",
-                }}
-              >
-                {figure.caption}
-                {figure.is_method && (
-                  <span
-                    style={{
-                      marginLeft: "8px",
-                      padding: "3px 8px",
-                      borderRadius: "4px",
-                      background: "var(--color-primary)",
-                      color: "white",
-                      fontSize: "0.6875rem",
-                      fontWeight: 600,
-                    }}
-                  >
-                    架构图
-                  </span>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
+interface CategoriesResponse {
+  categories: ArxivCategory[];
 }
 
 function getSemanticScholarTimestamp(paper: SemanticScholarPaper): number {
@@ -276,6 +122,40 @@ function getSemanticScholarTimestamp(paper: SemanticScholarPaper): number {
   }
 
   return 0;
+}
+
+function extractArxivIdFromValue(value: string): string {
+  const match = String(value || "").match(/([a-z-]+\/\d{7}|\d{4}\.\d{4,5})(?:v\d+)?/i);
+  return match?.[1] || "";
+}
+
+function getTrackedPaperArxivId(paper: TrackedPaper): string {
+  const meta = paper.metadata || {};
+  return (
+    meta.arxiv_id
+    || meta["arxiv-id"]
+    || extractArxivIdFromValue(paper.id)
+    || extractArxivIdFromValue(paper.source_url)
+  );
+}
+
+function getTrackedPaperDisplayId(paper: TrackedPaper): string {
+  const meta = paper.metadata || {};
+  return (
+    getTrackedPaperArxivId(paper)
+    || meta.paper_id
+    || paper.id.replace(/^followup-monitor:/, "").replace(/^source-paper:/, "").replace(/^arxiv-monitor:/, "")
+  );
+}
+
+function parseOptionalPositiveInteger(input: string, maxValue: number): number | null {
+  const text = input.trim();
+  if (!text) return null;
+
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed)) return null;
+
+  return Math.min(maxValue, Math.max(1, Math.floor(parsed)));
 }
 
 export default function ArxivTracker() {
@@ -314,13 +194,19 @@ export default function ArxivTracker() {
   const [savingS2PaperId, setSavingS2PaperId] = useState<string | null>(null);
   const [autoSave, setAutoSave] = useState(false);
   const [csOnly, setCsOnly] = useState(true);
-  const [searchMaxResults, setSearchMaxResults] = useState(50);
-  const [searchDaysBack, setSearchDaysBack] = useState(180);
+  const [searchMaxResultsInput, setSearchMaxResultsInput] = useState("50");
+  const [searchDaysBackInput, setSearchDaysBackInput] = useState("180");
+  const [searchCategories, setSearchCategories] = useState<string[]>([]);
+  const [availableCategories, setAvailableCategories] = useState<ArxivCategory[]>([]);
+  const [expandedMainCategories, setExpandedMainCategories] = useState<Set<string>>(() => new Set(["cs"]));
 
   const toast = useToast();
   const wsRef = useRef<WebSocket | null>(null);
   const wsConnectedRef = useRef<boolean>(false);
   const saveSinglePaperRef = useRef<((paper: ArxivPaper) => Promise<void>) | null>(null);
+  const saveSingleS2PaperRef = useRef<((paper: SemanticScholarPaper) => Promise<void>) | null>(null);
+  const savedPapersRef = useRef<Set<string>>(new Set());
+  const savedS2PapersRef = useRef<Set<string>>(new Set());
 
   // WebSocket 连接 - 使用 ref 来避免依赖问题，确保事件处理始终可用
   const autoSaveRef = useRef(autoSave);
@@ -328,6 +214,38 @@ export default function ArxivTracker() {
   useEffect(() => {
     autoSaveRef.current = autoSave;
   }, [autoSave]);
+
+  useEffect(() => {
+    let isActive = true;
+
+    const loadCategories = async () => {
+      try {
+        const result = await api.get<CategoriesResponse>("/api/modules/arxiv-tracker/categories");
+        if (isActive) {
+          setAvailableCategories(result.categories);
+        }
+      } catch (err) {
+        console.error("Failed to load tracker arXiv categories:", err);
+        if (isActive) {
+          toast.error("加载 arXiv 分类失败");
+        }
+      }
+    };
+
+    void loadCategories();
+
+    return () => {
+      isActive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    savedPapersRef.current = savedPapers;
+  }, [savedPapers]);
+
+  useEffect(() => {
+    savedS2PapersRef.current = _savedS2Papers;
+  }, [_savedS2Papers]);
 
   // Track which mode is currently crawling using a crawling ID
   const crawlingIdRef = useRef<string | null>(null);
@@ -391,7 +309,9 @@ export default function ArxivTracker() {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          const store = useStore.getState();
           const shouldAutoSave = autoSaveRef.current;
+          const hasLiteraturePath = !!(store.config?.literature_path || store.config?.vault_path);
           const isSemanticScholarEvent = data.module === "semantic-scholar-tracker";
 
           console.log("[arXiv] WS message:", data.type, data);
@@ -402,6 +322,16 @@ export default function ArxivTracker() {
               setCrawlSessionId(data.session_id);
               crawlSessionIdRef.current = data.session_id;
             }
+          } else if (data.type === "crawl_cancelling" && !isSemanticScholarEvent) {
+            const store = useStore.getState();
+            const currentProgress = store.arxivAndProgress;
+            setArxivAndProgress({
+              current: currentProgress?.current ?? 0,
+              total: currentProgress?.total ?? 0,
+              phase: currentProgress?.phase ?? "fetching",
+              message: data.message || "正在取消爬取任务...",
+              currentPaperTitle: currentProgress?.currentPaperTitle,
+            });
           } else if (data.type === "crawl_cancelled" && !isSemanticScholarEvent) {
             toast.info("已取消", data.message || "爬取任务已取消");
             setArxivAndCrawling(false);
@@ -413,20 +343,27 @@ export default function ArxivTracker() {
           } else if (data.type === "crawl_progress" && !isSemanticScholarEvent) {
             const progress: CrawlProgress = {
               current: data.current || 0,
-              total: data.total || 20,
+              total: data.total ?? 0,
               phase: data.phase,
               message: data.message,
               currentPaperTitle: data.currentPaperTitle,
             };
             setArxivAndProgress(progress);
           } else if (data.type === "crawl_paper" && !isSemanticScholarEvent) {
-            const store = useStore.getState();
             console.log("[arXiv] Received paper:", data.paper?.id, "mode:", crawlingModeRef.current || crawlingIdRef.current);
             const exists = store.arxivAndPapers.find(p => p.id === data.paper.id);
             if (!exists) {
               console.log("[arXiv] Adding to search list");
               store.appendArxivAndPaper(data.paper);
-              if (shouldAutoSave && saveSinglePaperRef.current) {
+              if (data.paper?.metadata?.saved_to_literature) {
+                setSavedPapers((prev) => new Set(prev).add(data.paper.id));
+              }
+              if (
+                shouldAutoSave &&
+                hasLiteraturePath &&
+                saveSinglePaperRef.current &&
+                !savedPapersRef.current.has(data.paper.id)
+              ) {
                 saveSinglePaperRef.current(data.paper);
               }
             }
@@ -456,6 +393,9 @@ export default function ArxivTracker() {
             const store = useStore.getState();
             if (!store.semanticScholarPapers.find((p) => p.id === data.paper.id)) {
               store.appendSemanticScholarPaper(data.paper);
+              if (data.paper?.metadata?.saved_to_literature) {
+                _setSavedS2Papers((prev) => new Set(prev).add(data.paper.id));
+              }
             }
           } else if (data.type === "s2_complete") {
             setSemanticScholarCrawling(false);
@@ -475,9 +415,20 @@ export default function ArxivTracker() {
                 s2SessionIdRef.current = data.session_id;
               }
             } else if (data.type === "crawl_paper") {
-              const store = useStore.getState();
               if (!store.semanticScholarPapers.find((p) => p.id === data.paper.id)) {
                 store.appendSemanticScholarPaper(data.paper);
+                if (data.paper?.metadata?.saved_to_literature) {
+                  _setSavedS2Papers((prev) => new Set(prev).add(data.paper.id));
+                }
+                if (
+                  shouldAutoSave &&
+                  hasLiteraturePath &&
+                  saveSingleS2PaperRef.current &&
+                  !data.paper?.metadata?.saved_to_literature &&
+                  !savedS2PapersRef.current.has(data.paper.id)
+                ) {
+                  saveSingleS2PaperRef.current(data.paper);
+                }
               }
             } else if (data.type === "crawl_complete") {
               setSemanticScholarCrawling(false);
@@ -494,6 +445,15 @@ export default function ArxivTracker() {
               setSemanticScholarProgress(null);
               s2SessionIdRef.current = null;
               toast.info("已取消爬取");
+            } else if (data.type === "crawl_cancelling") {
+              const store = useStore.getState();
+              const currentProgress = store.semanticScholarProgress;
+              setSemanticScholarProgress({
+                current: currentProgress?.current || 0,
+                total: currentProgress?.total || 0,
+                phase: currentProgress?.phase || "fetching",
+                message: data.message || "正在取消爬取任务...",
+              });
             } else if (data.type === "crawl_progress") {
               setSemanticScholarProgress({
                 current: data.current || 0,
@@ -527,19 +487,23 @@ export default function ArxivTracker() {
         path: string;
         figures?: Array<{ filename: string; caption: string; local_path: string; original_url: string }>;
         pdf?: string;
+        introduction?: string;
+        formatted_digest?: string;
       }>("/api/modules/arxiv-tracker/save-to-literature", {
         paper,
         folder: "arxiv",
       });
       setSavedPapers(prev => new Set(prev).add(paper.id));
 
-      // Update paper with local figures info for immediate display
-      if (result.figures && result.figures.length > 0) {
+      // Update paper with fetched assets/text for immediate display
+      if ((result.figures && result.figures.length > 0) || result.introduction || result.formatted_digest) {
         const updatedPaper = {
           ...paper,
           metadata: {
             ...paper.metadata,
-            local_figures: result.figures,
+            local_figures: result.figures?.length ? result.figures : paper.metadata.local_figures,
+            introduction: result.introduction || paper.metadata.introduction,
+            "formatted-digest": result.formatted_digest || paper.metadata["formatted-digest"],
           },
         };
         const store = useStore.getState();
@@ -554,6 +518,46 @@ export default function ArxivTracker() {
   // Update ref whenever saveSinglePaper changes
   useEffect(() => {
     saveSinglePaperRef.current = saveSinglePaper;
+  }, []);
+
+  async function saveSingleS2Paper(paper: SemanticScholarPaper) {
+    try {
+      const result = await api.post<{
+        ok: boolean;
+        path: string;
+        figures: Array<{ filename: string; caption: string; local_path: string }>;
+        pdf: string | null;
+        folder: string;
+        introduction?: string;
+        formatted_digest?: string;
+      }>("/api/modules/semantic-scholar/save-to-literature", {
+        paper,
+        save_pdf: true,
+        max_figures: 5,
+      });
+
+      _setSavedS2Papers((prev) => new Set(prev).add(paper.id));
+
+      if ((result.figures && result.figures.length > 0) || result.introduction || result.formatted_digest) {
+        const updatedPaper = {
+          ...paper,
+          metadata: {
+            ...paper.metadata,
+            local_figures: result.figures?.length ? result.figures : paper.metadata.local_figures,
+            introduction: result.introduction || paper.metadata.introduction,
+            "formatted-digest": result.formatted_digest || paper.metadata["formatted-digest"],
+          },
+        };
+        const store = useStore.getState();
+        setSemanticScholarPapers(store.semanticScholarPapers.map((entry) => (entry.id === paper.id ? updatedPaper : entry)));
+      }
+    } catch (err) {
+      console.error(`Failed to auto-save follow-up paper ${paper.id}:`, err);
+    }
+  }
+
+  useEffect(() => {
+    saveSingleS2PaperRef.current = saveSingleS2Paper;
   }, []);
 
   async function runCrawl() {
@@ -571,23 +575,33 @@ export default function ArxivTracker() {
       return;
     }
 
+    const selectedCategories = csOnly ? [] : searchCategories;
+
     // Set crawling ID before starting - both in ref and state
     crawlingIdRef.current = mode;
     setCrawlingMode(mode);
 
     setArxivAndCrawling(true);
     setArxivAndPapers([]);
-    setArxivAndProgress({ current: 0, total: searchMaxResults, phase: "fetching", message: "正在获取论文列表..." });
+    setArxivAndProgress({
+      current: 0,
+      total: resolvedSearchMaxResults ?? 0,
+      phase: "fetching",
+      message: resolvedSearchMaxResults
+        ? `正在获取论文列表（最多 ${resolvedSearchMaxResults} 篇）...`
+        : "正在获取论文列表（不限篇数）...",
+    });
 
     try {
       // 启动爬取，结果会通过 WebSocket 推送
       console.log("[arXiv] Starting crawl API call with mode:", mode);
       await api.post("/api/modules/arxiv-tracker/crawl", {
         keywords: keywordList,
-        max_results: searchMaxResults,
+        max_results: resolvedSearchMaxResults,
         mode: mode,
         cs_only: csOnly,
-        days_back: searchDaysBack,
+        days_back: resolvedSearchDaysBack,
+        categories: selectedCategories,
       });
       console.log("[arXiv] Crawl API call completed");
     } catch (err) {
@@ -610,10 +624,14 @@ export default function ArxivTracker() {
 
     try {
       console.log("[arXiv] Cancelling crawl:", sessionId);
-      await api.post("/api/modules/arxiv-tracker/cancel", {
+      const result = await api.post<{ status: string; message?: string }>("/api/modules/arxiv-tracker/cancel", {
         session_id: sessionId,
       });
-      toast.info("正在取消", "已发送取消信号，等待当前论文处理完成...");
+      if (result.status !== "ok") {
+        toast.error("停止失败", result.message || "未找到正在进行的爬取任务");
+        return;
+      }
+      toast.info("正在取消", result.message || "已发送取消信号");
     } catch (err) {
       console.error("[arXiv] Cancel error:", err);
       toast.error("取消失败", err instanceof Error ? err.message : "请稍后重试");
@@ -622,19 +640,27 @@ export default function ArxivTracker() {
 
   async function saveToLiterature(paper: ArxivPaper) {
     try {
-      const result = await api.post<{ ok: boolean; path: string; figures?: Array<{ filename: string; caption: string; local_path: string; original_url: string }> }>("/api/modules/arxiv-tracker/save-to-literature", {
+      const result = await api.post<{
+        ok: boolean;
+        path: string;
+        figures?: Array<{ filename: string; caption: string; local_path: string; original_url: string }>;
+        introduction?: string;
+        formatted_digest?: string;
+      }>("/api/modules/arxiv-tracker/save-to-literature", {
         paper,
         folder: "arxiv",
       });
       setSavedPapers(prev => new Set(prev).add(paper.id));
 
-      // Update paper with local figures info
-      if (result.figures && result.figures.length > 0) {
+      // Update paper with fetched assets/text
+      if ((result.figures && result.figures.length > 0) || result.introduction || result.formatted_digest) {
         const updatedPaper = {
           ...paper,
           metadata: {
             ...paper.metadata,
-            local_figures: result.figures,
+            local_figures: result.figures?.length ? result.figures : paper.metadata.local_figures,
+            introduction: result.introduction || paper.metadata.introduction,
+            "formatted-digest": result.formatted_digest || paper.metadata["formatted-digest"],
           },
         };
         const store = useStore.getState();
@@ -642,7 +668,15 @@ export default function ArxivTracker() {
         setArxivAndPapers(newPapers);
       }
 
-      toast.success("保存成功", `已保存到文献库/arxiv/${paper.id}${result.figures ? ` (${result.figures.length} 张图片)` : ""}`);
+      toast.success(
+        "保存成功",
+        withLocationSuffix(
+          `论文已保存${result.figures ? ` (${result.figures.length} 张图片)` : ""}`,
+          result.path,
+          "literature",
+          config,
+        ),
+      );
     } catch (err) {
       toast.error("保存失败", err instanceof Error ? err.message : "请检查文献库路径");
     }
@@ -651,6 +685,12 @@ export default function ArxivTracker() {
   const displayedS2Papers = useMemo(() => {
     const papers = [...s2Papers];
     papers.sort((a, b) => {
+      const aIsSource = a.metadata?.paper_tracking_role === "source";
+      const bIsSource = b.metadata?.paper_tracking_role === "source";
+      if (aIsSource !== bIsSource) {
+        return aIsSource ? -1 : 1;
+      }
+
       if (semanticScholarSortBy === "citation_count") {
         const citationDiff = (b.metadata?.citation_count || 0) - (a.metadata?.citation_count || 0);
         if (citationDiff !== 0) return citationDiff;
@@ -684,6 +724,43 @@ export default function ArxivTracker() {
     : arxivTrackerActiveTab === "followups"
       ? semanticScholarProgress
       : null;
+  const resolvedSearchMaxResults = parseOptionalPositiveInteger(searchMaxResultsInput, 200);
+  const resolvedSearchDaysBack = parseOptionalPositiveInteger(searchDaysBackInput, 3650);
+
+  const toggleSearchCategory = (category: string) => {
+    setSearchCategories((prev) => (
+      prev.includes(category)
+        ? prev.filter((entry) => entry !== category)
+        : [...prev, category]
+    ));
+  };
+
+  const toggleSearchMainCategory = (main: string) => {
+    const subcategoryCodes = availableCategories
+      .filter((category) => (category.main || category.code.split(".")[0]) === main)
+      .map((category) => category.code);
+    if (subcategoryCodes.length === 0) return;
+
+    setSearchCategories((prev) => {
+      const selected = new Set(prev);
+      const allSelected = subcategoryCodes.every((code) => selected.has(code));
+      if (allSelected) {
+        subcategoryCodes.forEach((code) => selected.delete(code));
+      } else {
+        subcategoryCodes.forEach((code) => selected.add(code));
+      }
+      return Array.from(selected);
+    });
+  };
+
+  const toggleSearchMainCategoryExpanded = (main: string) => {
+    setExpandedMainCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(main)) next.delete(main);
+      else next.add(main);
+      return next;
+    });
+  };
 
   function clearCurrentResults() {
     if (isCrawling) return;
@@ -748,12 +825,17 @@ export default function ArxivTracker() {
   async function stopS2Crawl() {
     if (s2SessionIdRef.current) {
       try {
-        await api.post("/api/modules/semantic-scholar-tracker/cancel", {
+        const result = await api.post<{ status: string; message?: string }>("/api/modules/semantic-scholar-tracker/cancel", {
           session_id: s2SessionIdRef.current,
         });
-        toast.info("已停止爬取");
+        if (result.status !== "ok") {
+          toast.error("停止失败", result.message || "未找到正在进行的爬取任务");
+          return;
+        }
+        toast.info("正在取消", result.message || "已发送取消信号");
       } catch (e) {
         console.error("Cancel failed:", e);
+        toast.error("取消失败", e instanceof Error ? e.message : "请稍后重试");
       }
     }
   }
@@ -767,6 +849,8 @@ export default function ArxivTracker() {
         figures: Array<{ filename: string; caption: string; local_path: string }>;
         pdf: string | null;
         folder: string;
+        introduction?: string;
+        formatted_digest?: string;
       }>("/api/modules/semantic-scholar/save-to-literature", {
         paper,
         save_pdf: true,
@@ -775,21 +859,32 @@ export default function ArxivTracker() {
 
       _setSavedS2Papers(prev => new Set(prev).add(paper.id));
 
-      // Update paper with local figures for immediate display
-      if (result.figures && result.figures.length > 0) {
+      // Update paper with fetched assets/text for immediate display
+      if ((result.figures && result.figures.length > 0) || result.introduction || result.formatted_digest) {
         const updatedPaper = {
           ...paper,
           metadata: {
             ...paper.metadata,
-            local_figures: result.figures,
+            local_figures: result.figures?.length ? result.figures : paper.metadata.local_figures,
+            introduction: result.introduction || paper.metadata.introduction,
+            "formatted-digest": result.formatted_digest || paper.metadata["formatted-digest"],
           },
         };
-        setSemanticScholarPapers(s2Papers.map(p => p.id === paper.id ? updatedPaper : p));
+        const store = useStore.getState();
+        setSemanticScholarPapers(store.semanticScholarPapers.map((entry) => (entry.id === paper.id ? updatedPaper : entry)));
       }
 
       const figureMsg = result.figures?.length ? ` (${result.figures.length}张图)` : "";
       const pdfMsg = result.pdf ? " +PDF" : "";
-      toast.success("保存成功", `已保存到 ${result.folder}${figureMsg}${pdfMsg}`);
+      toast.success(
+        "保存成功",
+        withLocationSuffix(
+          `论文已保存${figureMsg}${pdfMsg}`,
+          result.folder,
+          "literature",
+          config,
+        ),
+      );
     } catch (err) {
       toast.error("保存失败", err instanceof Error ? err.message : "请检查文献库路径");
     } finally {
@@ -936,7 +1031,12 @@ export default function ArxivTracker() {
                     type="text"
                     value={semanticScholarQuery}
                     onChange={(e) => setSemanticScholarQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && !semanticScholarCrawling && fetchS2FollowUps()}
+                    onKeyDown={(e) => {
+                      if (isActionEnterKey(e) && !semanticScholarCrawling) {
+                        e.preventDefault();
+                        fetchS2FollowUps();
+                      }
+                    }}
                     placeholder="输入论文标题或 arXiv ID，如：VGGT 或 2501.12345"
                     disabled={semanticScholarCrawling}
                     style={{
@@ -1135,11 +1235,9 @@ export default function ArxivTracker() {
                       type="number"
                       min={1}
                       max={200}
-                      value={searchMaxResults}
-                      onChange={(e) => {
-                        const value = Number(e.target.value);
-                        setSearchMaxResults(Number.isFinite(value) ? Math.min(200, Math.max(1, value)) : 50);
-                      }}
+                      value={searchMaxResultsInput}
+                      onChange={(e) => setSearchMaxResultsInput(e.target.value)}
+                      placeholder="50"
                       disabled={isCrawling}
                       style={{
                         height: "38px",
@@ -1162,11 +1260,9 @@ export default function ArxivTracker() {
                       type="number"
                       min={1}
                       max={3650}
-                      value={searchDaysBack}
-                      onChange={(e) => {
-                        const value = Number(e.target.value);
-                        setSearchDaysBack(Number.isFinite(value) ? Math.min(3650, Math.max(1, value)) : 180);
-                      }}
+                      value={searchDaysBackInput}
+                      onChange={(e) => setSearchDaysBackInput(e.target.value)}
+                      placeholder="180"
                       disabled={isCrawling}
                       style={{
                         height: "38px",
@@ -1182,13 +1278,40 @@ export default function ArxivTracker() {
                   </label>
                 </div>
 
+                {!csOnly && (
+                  <div
+                    style={{
+                      padding: "14px 16px",
+                      borderRadius: "var(--radius-lg)",
+                      background: "var(--bg-hover)",
+                      border: "1px solid var(--border-light)",
+                    }}
+                  >
+                    <ArxivCategorySelector
+                      availableCategories={availableCategories}
+                      selectedCategories={searchCategories}
+                      expandedMainCategories={expandedMainCategories}
+                      onToggleCategory={toggleSearchCategory}
+                      onToggleMainCategory={toggleSearchMainCategory}
+                      onToggleMainCategoryExpanded={toggleSearchMainCategoryExpanded}
+                      disabled={isCrawling}
+                      label="领域筛选"
+                      helperText={searchCategories.length > 0
+                        ? "当前会只搜索你勾选的子类。点击大类按钮可一键全选或取消该大类。"
+                        : "未勾选任何子类时，将和 arXiv API 一样按全领域搜索；如果只想放开部分学科，请在这里激活对应子类。"}
+                      maxHeight="240px"
+                    />
+                  </div>
+                )}
+
                 <div style={{ display: "flex", gap: "12px", alignItems: "stretch" }}>
                   <input
                     type="text"
                     value={arxivAndKeywords}
                     onChange={(e) => setArxivAndKeywords(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter" && !isCrawling) {
+                      if (isActionEnterKey(e) && !isCrawling) {
+                        e.preventDefault();
                         runCrawl();
                       }
                     }}
@@ -1252,7 +1375,11 @@ export default function ArxivTracker() {
                       }}
                     >
                       <RefreshCw style={{ width: "16px", height: "16px", animation: isCrawling ? "spin 1s linear infinite" : "none" }} />
-                      {isCrawling ? "爬取中..." : `立即爬取 (${searchMaxResults}篇)`}
+                      {isCrawling
+                        ? "爬取中..."
+                        : resolvedSearchMaxResults
+                          ? `立即爬取 (${resolvedSearchMaxResults}篇)`
+                          : "立即爬取（不限篇数）"}
                     </button>
                   )}
                 </div>
@@ -1391,7 +1518,7 @@ export default function ArxivTracker() {
                         borderRadius: "var(--radius-full)",
                         fontWeight: 500
                       }}>
-                        {p.id}
+                        {getTrackedPaperDisplayId(p as TrackedPaper)}
                       </span>
                     ))}
                     <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginLeft: "auto" }}>
@@ -1413,7 +1540,7 @@ export default function ArxivTracker() {
                       style={{ width: "18px", height: "18px", cursor: "pointer" }}
                     />
                     <span style={{ fontSize: "0.875rem", color: "var(--text-secondary)" }}>
-                      自动保存到文献库/{arxivTrackerActiveTab === "followups" ? "FollowUps" : "arxiv"} 文件夹
+                      自动保存到文献库/{arxivTrackerActiveTab === "followups" ? "FollowUps/源论文/论文名" : "arxiv/追踪标签/论文名"}
                     </span>
                   </label>
                 </div>
@@ -1473,6 +1600,33 @@ export default function ArxivTracker() {
   );
 }
 
+function TrackedPaperCard({
+  paper,
+  isSaved,
+  isSaving = false,
+  onSave,
+  hasLiteraturePath,
+  onUpdatePaper,
+}: {
+  paper: TrackedPaper;
+  isSaved: boolean;
+  isSaving?: boolean;
+  onSave: () => void;
+  hasLiteraturePath: boolean;
+  onUpdatePaper: (updatedPaper: TrackedPaper) => void;
+}) {
+  return (
+    <SharedPaperTrackingCard
+      paper={paper}
+      isSaved={isSaved}
+      isSaving={isSaving}
+      onSave={onSave}
+      hasLiteraturePath={hasLiteraturePath}
+      onUpdatePaper={onUpdatePaper}
+    />
+  );
+}
+
 function PaperCard({
   paper,
   isSaved,
@@ -1484,339 +1638,22 @@ function PaperCard({
   onSave: () => void;
   hasLiteraturePath: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const meta = paper.metadata || {};
-  const authors = meta.authors || [];
-
-  const formatDate = (dateStr: string) => {
-    if (!dateStr) return "";
-    try {
-      const date = new Date(dateStr);
-      return date.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" });
-    } catch {
-      return dateStr;
-    }
-  };
+  const setArxivAndPapers = useStore((state) => state.setArxivAndPapers);
 
   return (
-    <Card noPadding>
-      <div style={{ padding: "20px 24px" }}>
-        {/* Header: Title + Actions */}
-        <div style={{ display: "flex", gap: "16px", marginBottom: "12px" }}>
-          {/* Title & Meta */}
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <a
-              href={paper.source_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{
-                fontSize: "1.0625rem",
-                fontWeight: 600,
-                color: "var(--text-main)",
-                textDecoration: "none",
-                display: "flex",
-                alignItems: "flex-start",
-                gap: "6px",
-                lineHeight: 1.5,
-              }}
-            >
-              <span style={{ flex: 1 }}>{paper.title}</span>
-              <ExternalLink style={{ width: "16px", height: "16px", flexShrink: 0, opacity: 0.5, marginTop: "4px" }} />
-            </a>
-
-            {/* Authors & Date */}
-            <div style={{ display: "flex", alignItems: "center", gap: "16px", marginTop: "8px", flexWrap: "wrap" }}>
-              {authors.length > 0 && (
-                <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "4px" }}>
-                  <User style={{ width: "12px", height: "12px" }} />
-                  {authors.slice(0, 3).join(", ")}
-                  {authors.length > 3 && ` +${authors.length - 3}`}
-                </span>
-              )}
-              {meta.published && (
-                <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "4px" }}>
-                  <Calendar style={{ width: "12px", height: "12px" }} />
-                  {formatDate(meta.published)}
-                </span>
-              )}
-              <span
-                style={{
-                  fontSize: "0.75rem",
-                  padding: "2px 8px",
-                  borderRadius: "var(--radius-full)",
-                  background: "var(--bg-hover)",
-                  color: "var(--text-muted)",
-                }}
-              >
-                {paper.id}
-              </span>
-            </div>
-          </div>
-
-          {/* Actions */}
-          <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
-            {meta["pdf-url"] && (
-              <a
-                href={meta["pdf-url"]}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  padding: "8px 14px",
-                  borderRadius: "var(--radius-full)",
-                  background: "var(--bg-hover)",
-                  border: "1px solid var(--border-light)",
-                  color: "var(--text-secondary)",
-                  fontSize: "0.8125rem",
-                  fontWeight: 600,
-                  textDecoration: "none",
-                  transition: "all 0.2s ease",
-                }}
-              >
-                <FileText style={{ width: "14px", height: "14px" }} />
-                PDF
-              </a>
-            )}
-            {hasLiteraturePath && (
-              <button
-                onClick={onSave}
-                disabled={isSaved}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  padding: "8px 14px",
-                  borderRadius: "var(--radius-full)",
-                  background: isSaved ? "rgba(16, 185, 129, 0.1)" : "var(--color-primary)",
-                  border: isSaved ? "1px solid #10B981" : "none",
-                  color: isSaved ? "#10B981" : "white",
-                  fontSize: "0.8125rem",
-                  fontWeight: 600,
-                  cursor: isSaved ? "default" : "pointer",
-                  transition: "all 0.2s ease",
-                }}
-              >
-                {isSaved ? (
-                  <>
-                    <Check style={{ width: "14px", height: "14px" }} />
-                    已保存
-                  </>
-                ) : (
-                  <>
-                    <Save style={{ width: "14px", height: "14px" }} />
-                    保存
-                  </>
-                )}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Tags */}
-        {paper.tags?.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "12px" }}>
-            {paper.tags.map((tag) => (
-              <span
-                key={tag}
-                style={{
-                  padding: "4px 10px",
-                  borderRadius: "var(--radius-full)",
-                  background: "var(--bg-hover)",
-                  fontSize: "0.75rem",
-                  color: "var(--text-secondary)",
-                  fontWeight: 500,
-                }}
-              >
-                {tag}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Contribution Highlight */}
-        {meta.contribution && (
-          <div
-            style={{
-              display: "flex",
-              gap: "10px",
-              marginBottom: "16px",
-              padding: "12px 16px",
-              background: "linear-gradient(135deg, rgba(188, 164, 227, 0.08), rgba(168, 230, 207, 0.05))",
-              borderRadius: "var(--radius-lg)",
-              border: "1px solid rgba(188, 164, 227, 0.2)",
-            }}
-          >
-            <Star style={{ width: "18px", height: "18px", color: "var(--color-primary)", flexShrink: 0, marginTop: "2px" }} />
-            <p style={{ fontSize: "0.9375rem", color: "var(--text-main)", lineHeight: 1.6, margin: 0 }}>
-              {meta.contribution}
-            </p>
-          </div>
-        )}
-
-        {/* Figures Gallery - Use local images if available, otherwise remote */}
-        {(meta.local_figures && meta.local_figures.length > 0) || (meta.figures && meta.figures.length > 0) ? (
-          <div style={{ marginBottom: "16px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px" }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ color: "var(--color-primary)" }}>
-                <rect x="3" y="3" width="18" height="18" rx="2" />
-                <circle cx="8.5" cy="8.5" r="1.5" />
-                <path d="M21 15l-5-5L5 21" />
-              </svg>
-              <span style={{ fontSize: "0.875rem", fontWeight: 600, color: "var(--text-main)" }}>
-                模型架构 / Pipeline
-              </span>
-              <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                ({meta.local_figures?.length || meta.figures?.length || 0} 张图)
-                {meta.local_figures && meta.local_figures.length > 0 && (
-                  <span style={{ color: "#10B981", marginLeft: "4px" }}>已下载</span>
-                )}
-              </span>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              {(meta.local_figures || meta.figures || []).map((fig, idx) => {
-                const imageUrl = getPaperFigureImageUrl(fig);
-
-                return (
-                  <div
-                    key={idx}
-                    style={{
-                      width: "100%",
-                      borderRadius: "var(--radius-lg)",
-                      overflow: "hidden",
-                      border: "1px solid var(--border-light)",
-                      background: "var(--bg-hover)",
-                    }}
-                  >
-                  <div style={{ position: "relative", paddingTop: "56.25%", background: "var(--bg-app)" }}>
-                    <a
-                      href={paper.source_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{
-                        position: "absolute",
-                        top: 0,
-                        left: 0,
-                        width: "100%",
-                        height: "100%",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                      }}
-                    >
-                      <img
-                        src={imageUrl}
-                        alt={fig.caption}
-                        style={{
-                          position: "absolute",
-                          top: 0,
-                          left: 0,
-                          width: "100%",
-                          height: "100%",
-                          objectFit: "contain",
-                        }}
-                        onError={(e) => {
-                          const img = e.target as HTMLImageElement;
-                          img.style.display = "none";
-                        }}
-                      />
-                      <div
-                        className="figure-fallback"
-                        style={{
-                          display: "none",
-                          flexDirection: "column",
-                          alignItems: "center",
-                          gap: "8px",
-                          color: "var(--text-secondary)",
-                          fontSize: "0.875rem",
-                          textAlign: "center",
-                          padding: "16px",
-                        }}
-                      >
-                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                          <rect x="3" y="3" width="18" height="18" rx="2" />
-                          <circle cx="8.5" cy="8.5" r="1.5" />
-                          <path d="M21 15l-5-5L5 21" />
-                        </svg>
-                        <span>查看论文图片</span>
-                      </div>
-                    </a>
-                    <style>{`
-                      .figure-fallback:has(~ img[style*="display: none"]) {
-                        display: flex !important;
-                      }
-                    `}</style>
-                  </div>
-                    {fig.caption && (
-                      <div style={{ padding: "8px 12px", fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.4 }}>
-                        {fig.caption}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        ) : null}
-
-        {/* Summary / Abstract */}
-        <div>
-          <p
-            style={{
-              fontSize: "0.9375rem",
-              color: "var(--text-secondary)",
-              lineHeight: 1.7,
-              margin: 0,
-              display: expanded ? "block" : "-webkit-box",
-              WebkitLineClamp: 2,
-              WebkitBoxOrient: "vertical",
-              overflow: "hidden",
-            }}
-          >
-            {expanded && meta.abstract ? meta.abstract : paper.summary}
-          </p>
-        </div>
-
-        {/* Expand/Collapse */}
-        {(meta.abstract || paper.summary.length > 100) && (
-          <button
-            onClick={() => setExpanded(!expanded)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "4px",
-              marginTop: "12px",
-              padding: "6px 12px",
-              borderRadius: "var(--radius-full)",
-              background: "transparent",
-              border: "1px solid var(--border-light)",
-              color: "var(--color-primary)",
-              fontSize: "0.8125rem",
-              fontWeight: 600,
-              cursor: "pointer",
-              transition: "all 0.2s ease",
-            }}
-          >
-            {expanded ? (
-              <>
-                <ChevronUp style={{ width: "14px", height: "14px" }} />
-                收起
-              </>
-            ) : (
-              <>
-                <ChevronDown style={{ width: "14px", height: "14px" }} />
-                展开完整摘要
-              </>
-            )}
-          </button>
-        )}
-      </div>
-    </Card>
+    <TrackedPaperCard
+      paper={paper}
+      isSaved={isSaved}
+      onSave={onSave}
+      hasLiteraturePath={hasLiteraturePath}
+      onUpdatePaper={(updatedPaper) => {
+        const store = useStore.getState();
+        setArxivAndPapers(store.arxivAndPapers.map((entry) => (entry.id === paper.id ? updatedPaper as ArxivPaper : entry)));
+      }}
+    />
   );
 }
 
-// S2 Paper Card Component
 function S2PaperCard({
   paper,
   isSaved,
@@ -1830,373 +1667,19 @@ function S2PaperCard({
   onSave: () => void;
   hasLiteraturePath: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const score = Math.round(paper.score * 10);
-  const meta = paper.metadata || {};
-  const authors = meta.authors || [];
-  const initialFigures = useMemo(
-    () => normalizePaperFigures(meta.local_figures?.length ? meta.local_figures : meta.figures),
-    [meta.local_figures, meta.figures],
-  );
-  const [figures, setFigures] = useState<PaperFigureAsset[]>(initialFigures);
-  const [loadingFigures, setLoadingFigures] = useState(false);
-  const [figureAttempted, setFigureAttempted] = useState(initialFigures.length > 0);
-
-  const scoreColor = score >= 8 ? "#10B981" : score >= 6 ? "#F59E0B" : "#94A3B8";
-  const scoreBg = score >= 8 ? "rgba(16, 185, 129, 0.1)" : score >= 6 ? "rgba(245, 158, 11, 0.1)" : "rgba(148, 163, 184, 0.1)";
-
-  const relationshipColor = meta.relationship === "citation" ? "#10B981" : "#6366F1";
-  const relationshipLabel = meta.relationship_label || (meta.relationship === "citation" ? "引用文献" : "参考文献");
-  const figureCount = figures.length;
-  const hasFigures = figureCount > 0;
-  const canLoadFigures = Boolean(meta.arxiv_id);
-  const paperLink = meta.arxiv_url || paper.source_url;
-
-  useEffect(() => {
-    setFigures(initialFigures);
-    setFigureAttempted(initialFigures.length > 0);
-  }, [paper.id, initialFigures]);
-
-  const loadFigures = async () => {
-    if (!meta.arxiv_id || loadingFigures) return;
-
-    setLoadingFigures(true);
-    setFigureAttempted(true);
-    try {
-      const result = await api.post<{ figures: PaperFigureAsset[] }>("/api/tools/arxiv/figures", {
-        arxiv_id: meta.arxiv_id,
-      });
-      setFigures(normalizePaperFigures(result.figures));
-    } catch (error) {
-      console.error("Failed to load follow-up paper figures:", error);
-    } finally {
-      setLoadingFigures(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!figureAttempted && canLoadFigures) {
-      void loadFigures();
-    }
-  }, [figureAttempted, canLoadFigures]);
-
-  const formatDate = (dateStr: string) => {
-    if (!dateStr) return "";
-    try {
-      const date = new Date(dateStr);
-      return date.toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric" });
-    } catch {
-      return dateStr;
-    }
-  };
+  const setSemanticScholarPapers = useStore((state) => state.setSemanticScholarPapers);
 
   return (
-    <Card noPadding>
-      <div style={{ padding: "20px 24px" }}>
-        <div style={{ display: "flex", gap: "16px", marginBottom: "12px" }}>
-          <div
-            style={{
-              width: "48px",
-              height: "48px",
-              borderRadius: "var(--radius-md)",
-              background: scoreBg,
-              border: `2px solid ${scoreColor}`,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              flexShrink: 0,
-            }}
-          >
-            <span style={{ fontSize: "1.25rem", fontWeight: 700, color: scoreColor, lineHeight: 1 }}>
-              {score}
-            </span>
-            <span style={{ fontSize: "0.625rem", color: scoreColor, opacity: 0.8 }}>分</span>
-          </div>
-
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <a
-              href={paper.source_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{
-                fontSize: "1.0625rem",
-                fontWeight: 600,
-                color: "var(--text-main)",
-                textDecoration: "none",
-                display: "flex",
-                alignItems: "flex-start",
-                gap: "6px",
-                lineHeight: 1.5,
-              }}
-            >
-              <span style={{ flex: 1 }}>{paper.title}</span>
-              <ExternalLink style={{ width: "16px", height: "16px", flexShrink: 0, opacity: 0.5, marginTop: "4px" }} />
-            </a>
-
-            {/* Authors & Year */}
-            <div style={{ display: "flex", alignItems: "center", gap: "16px", marginTop: "8px", flexWrap: "wrap" }}>
-              {authors.length > 0 && (
-                <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "4px" }}>
-                  <User style={{ width: "12px", height: "12px" }} />
-                  {authors.slice(0, 3).join(", ")}
-                  {authors.length > 3 && ` +${authors.length - 3}`}
-                </span>
-              )}
-              {meta.published ? (
-                <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "4px" }}>
-                  <Calendar style={{ width: "12px", height: "12px" }} />
-                  {formatDate(meta.published)}
-                </span>
-              ) : meta.year && (
-                <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "4px" }}>
-                  <Calendar style={{ width: "12px", height: "12px" }} />
-                  {meta.year}
-                </span>
-              )}
-              {meta.citation_count !== undefined && (
-                <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: "4px" }}>
-                  <Star style={{ width: "12px", height: "12px" }} />
-                  被引 {meta.citation_count} 次
-                </span>
-              )}
-              {/* Relationship Badge */}
-              <span
-                style={{
-                  fontSize: "0.75rem",
-                  padding: "2px 10px",
-                  borderRadius: "var(--radius-full)",
-                  background: `${relationshipColor}20`,
-                  color: relationshipColor,
-                  fontWeight: 600,
-                }}
-              >
-                {relationshipLabel}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {paper.tags?.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "12px" }}>
-            {paper.tags.map((tag) => (
-              <span
-                key={tag}
-                style={{
-                  padding: "4px 10px",
-                  borderRadius: "var(--radius-full)",
-                  background: "var(--bg-hover)",
-                  fontSize: "0.75rem",
-                  color: "var(--text-secondary)",
-                  fontWeight: 500,
-                }}
-              >
-                {tag}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {meta.contribution && (
-          <div
-            style={{
-              display: "flex",
-              gap: "10px",
-              marginBottom: "16px",
-              padding: "12px 16px",
-              background: "linear-gradient(135deg, rgba(188, 164, 227, 0.08), rgba(168, 230, 207, 0.05))",
-              borderRadius: "var(--radius-lg)",
-              border: "1px solid rgba(188, 164, 227, 0.2)",
-            }}
-          >
-            <Star style={{ width: "18px", height: "18px", color: "var(--color-primary)", flexShrink: 0, marginTop: "2px" }} />
-            <p style={{ fontSize: "0.9375rem", color: "var(--text-main)", lineHeight: 1.6, margin: 0 }}>
-              {meta.contribution}
-            </p>
-          </div>
-        )}
-
-        {hasFigures && <PaperFigureStrip figures={figures} fallbackUrl={paperLink} />}
-
-        {(meta["pdf-url"] || meta.arxiv_url || hasLiteraturePath || canLoadFigures) && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "12px",
-              flexWrap: "wrap",
-              marginBottom: "16px",
-            }}
-          >
-            {meta["pdf-url"] && (
-              <a
-                href={meta["pdf-url"]}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  padding: "8px 16px",
-                  borderRadius: "var(--radius-md)",
-                  background: "var(--color-primary)",
-                  color: "white",
-                  fontSize: "0.8125rem",
-                  fontWeight: 600,
-                  textDecoration: "none",
-                  transition: "all 0.2s ease",
-                }}
-              >
-                <Download style={{ width: "14px", height: "14px" }} />
-                PDF
-              </a>
-            )}
-            {meta.arxiv_url && (
-              <a
-                href={meta.arxiv_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  padding: "8px 16px",
-                  borderRadius: "var(--radius-md)",
-                  border: "1px solid var(--border-light)",
-                  background: "var(--bg-card)",
-                  color: "var(--text-main)",
-                  fontSize: "0.8125rem",
-                  fontWeight: 600,
-                  textDecoration: "none",
-                  transition: "all 0.2s ease",
-                }}
-              >
-                <ExternalLink style={{ width: "14px", height: "14px" }} />
-                arXiv
-              </a>
-            )}
-            {canLoadFigures && (
-              <button
-                onClick={() => void loadFigures()}
-                disabled={loadingFigures}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  padding: "8px 16px",
-                  borderRadius: "var(--radius-md)",
-                  border: "1px solid var(--border-light)",
-                  background: hasFigures ? "var(--bg-hover)" : "var(--bg-card)",
-                  color: hasFigures ? "var(--text-muted)" : "var(--text-main)",
-                  fontSize: "0.8125rem",
-                  fontWeight: 600,
-                  cursor: loadingFigures ? "not-allowed" : "pointer",
-                  transition: "all 0.2s ease",
-                }}
-              >
-                {loadingFigures ? (
-                  <>
-                    <span className="animate-spin">⟳</span>
-                    加载图片...
-                  </>
-                ) : (
-                  <>
-                    <ImageIcon style={{ width: "14px", height: "14px" }} />
-                    {hasFigures ? `已加载 ${figureCount} 张图` : "获取图片"}
-                  </>
-                )}
-              </button>
-            )}
-            {hasLiteraturePath && (
-              <button
-                onClick={onSave}
-                disabled={isSaved || isSaving}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px",
-                  padding: "8px 16px",
-                  borderRadius: "var(--radius-md)",
-                  border: "1px solid var(--border-light)",
-                  background: "var(--bg-card)",
-                  color: isSaved ? "#10B981" : "var(--color-primary)",
-                  fontSize: "0.8125rem",
-                  fontWeight: 600,
-                  cursor: isSaved || isSaving ? "not-allowed" : "pointer",
-                  transition: "all 0.2s ease",
-                }}
-              >
-                {isSaving ? (
-                  <>
-                    <span className="animate-spin">⟳</span>
-                    保存中...
-                  </>
-                ) : isSaved ? (
-                  <>
-                    <Check style={{ width: "14px", height: "14px" }} />
-                    已保存到文献库
-                  </>
-                ) : (
-                  <>
-                    <Save style={{ width: "14px", height: "14px" }} />
-                    保存到文献库
-                  </>
-                )}
-              </button>
-            )}
-          </div>
-        )}
-
-        <div>
-          <p
-            style={{
-              fontSize: "0.9375rem",
-              color: "var(--text-secondary)",
-              lineHeight: 1.7,
-              margin: 0,
-              display: expanded ? "block" : "-webkit-box",
-              WebkitLineClamp: 2,
-              WebkitBoxOrient: "vertical",
-              overflow: "hidden",
-            }}
-          >
-            {expanded && meta.abstract ? meta.abstract : paper.summary}
-          </p>
-        </div>
-
-        {(meta.abstract || paper.summary.length > 100) && (
-          <button
-            onClick={() => setExpanded(!expanded)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "4px",
-              marginTop: "12px",
-              padding: "6px 12px",
-              borderRadius: "var(--radius-full)",
-              background: "transparent",
-              border: "1px solid var(--border-light)",
-              color: "var(--color-primary)",
-              fontSize: "0.8125rem",
-              fontWeight: 600,
-              cursor: "pointer",
-              transition: "all 0.2s ease",
-            }}
-          >
-            {expanded ? (
-              <>
-                <ChevronUp style={{ width: "14px", height: "14px" }} />
-                收起
-              </>
-            ) : (
-              <>
-                <ChevronDown style={{ width: "14px", height: "14px" }} />
-                展开完整摘要
-              </>
-            )}
-          </button>
-        )}
-      </div>
-    </Card>
+    <TrackedPaperCard
+      paper={paper}
+      isSaved={isSaved}
+      isSaving={isSaving}
+      onSave={onSave}
+      hasLiteraturePath={hasLiteraturePath}
+      onUpdatePaper={(updatedPaper) => {
+        const store = useStore.getState();
+        setSemanticScholarPapers(store.semanticScholarPapers.map((entry) => (entry.id === paper.id ? updatedPaper as ArxivPaper : entry)));
+      }}
+    />
   );
 }

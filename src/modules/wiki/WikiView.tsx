@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
-import { Map as MapIcon, FileText, BookOpen } from "lucide-react";
+import { Map as MapIcon, FileText, BookOpen, Sparkles, ArrowRight } from "lucide-react";
 import { PageContainer, PageHeader, EmptyState } from "../../components/Layout";
 import { api } from "../../core/api";
+import { useToast } from "../../components/Toast";
 import WikiSidebar from "./WikiSidebar";
 import WikiPageView from "./WikiPageView";
 import type { WikiType, ViewMode } from "./Wiki";
@@ -16,6 +17,50 @@ interface Props {
   onSetViewMode: (mode: ViewMode) => void;
 }
 
+interface WikiControlData {
+  wiki_type: string;
+  wiki_title: string;
+  has_overview: boolean;
+  primary_action_label: string;
+  workflow_hint: string;
+  source_summary: {
+    total_sources: number;
+    total_discovered_sources?: number;
+    enabled_folder_count?: number;
+    disabled_folder_count?: number;
+    collections: Array<{ label: string; count: number }>;
+    top_tags: string[];
+    recent_sources: Array<{
+      title: string;
+      collection: string;
+      path: string;
+      excerpt: string;
+      updated: number;
+    }>;
+  };
+  source_folders: Array<{
+    id: string;
+    label: string;
+    relative_path: string;
+    folder_path: string;
+    note_count: number;
+    enabled: boolean;
+    page_slug: string;
+    has_page: boolean;
+    top_tags: string[];
+    highlights: string[];
+    updated: number;
+  }>;
+  scan_roots: string[];
+  source_config_updated: string;
+  reference_notes: Array<{
+    title: string;
+    path: string;
+    excerpt: string;
+    score: number;
+  }>;
+}
+
 export default function WikiView({
   wikiType,
   activePage,
@@ -25,25 +70,127 @@ export default function WikiView({
   onNavigateToPage,
   onSetViewMode,
 }: Props) {
-  const wikiTitle = wikiType === "intel" ? "情报库 Wiki" : "文献库 Wiki";
+  const toast = useToast();
+  const wikiTitle = wikiType === "intel" ? "Internet Wiki" : "Literature Wiki";
+  const [control, setControl] = useState<WikiControlData | null>(null);
+  const [controlLoading, setControlLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [sourceSavingId, setSourceSavingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchControl() {
+      setControlLoading(true);
+      try {
+        const data = await api.get<WikiControlData>(`/api/wiki/${wikiType}/control`);
+        if (!cancelled) setControl(data);
+      } catch {
+        if (!cancelled) setControl(null);
+      } finally {
+        if (!cancelled) setControlLoading(false);
+      }
+    }
+    fetchControl();
+    return () => { cancelled = true; };
+  }, [wikiType]);
+
+  useEffect(() => {
+    if (!activePage && viewMode === "pages" && control?.has_overview) {
+      onSelectPage("overview");
+    }
+  }, [activePage, control?.has_overview, onSelectPage, viewMode]);
+
+  async function refreshControl() {
+    try {
+      const data = await api.get<WikiControlData>(`/api/wiki/${wikiType}/control`);
+      setControl(data);
+    } catch {
+      // ignore refresh errors; the next full reload will retry
+    }
+  }
+
+  async function openInObsidian(slug?: string) {
+    try {
+      await api.post(`/api/wiki/${wikiType}/open`, slug ? { slug } : {});
+    } catch (error) {
+      toast.error("打开失败", error instanceof Error ? error.message : "请检查 Obsidian 路径");
+    }
+  }
+
+  async function bootstrapWiki() {
+    setActionLoading(true);
+    try {
+      const result = await api.post<{ pages_updated: number }>("/api/wiki/" + wikiType + "/bootstrap", {});
+      await refreshControl();
+      onSelectPage("overview");
+      toast.success(
+        wikiType === "intel" ? "Internet Wiki 已生成" : "Literature Wiki 已生成",
+        `已更新 ${result.pages_updated} 个起步页面`
+      );
+    } catch (error) {
+      toast.error("生成失败", error instanceof Error ? error.message : "请稍后重试");
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function updateSourceFolder(folderId: string, enabled: boolean) {
+    if (!control) return;
+    const nextStates = Object.fromEntries(
+      control.source_folders.map((item) => [item.id, item.id === folderId ? enabled : item.enabled])
+    );
+    setSourceSavingId(folderId);
+    try {
+      const result = await api.post<{ control: WikiControlData }>(`/api/wiki/${wikiType}/sources`, {
+        folder_states: nextStates,
+      });
+      setControl(result.control);
+      toast.success(
+        "来源文件夹已更新",
+        enabled ? "这个文件夹会参与下一次 Wiki 生成" : "这个文件夹会从下一次 Wiki 生成里排除"
+      );
+    } catch (error) {
+      toast.error("更新失败", error instanceof Error ? error.message : "请稍后重试");
+    } finally {
+      setSourceSavingId(null);
+    }
+  }
 
   return (
     <PageContainer>
-      {/* Header with view mode toggle */}
       <PageHeader
         title={wikiTitle}
-        subtitle={wikiType === "intel" ? "兴趣 · 技能 · 生活思考" : "论文 · 方法 · 研究方向"}
+        subtitle={wikiType === "intel" ? "先生成 Internet Wiki 总览，后续从今日情报一键补进去" : "先生成 Literature Wiki 总览，后续把新论文、follow up、旧笔记和指导串起来"}
         actions={
-          <div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
             <button
-              onClick={() => {
-                const vaultName = "obsidian";
-                const wikiDir = wikiType === "intel" ? "Wiki-Intel" : "Wiki-Lit";
-                window.location.href = `obsidian://open?vault=${vaultName}&file=${encodeURIComponent(wikiDir)}`;
-              }}
+              onClick={bootstrapWiki}
+              disabled={actionLoading}
               style={{
                 padding: "8px 14px",
-                borderRadius: "var(--radius-full)",
+                borderRadius: "8px",
+                background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+                color: "white",
+                border: "none",
+                cursor: actionLoading ? "wait" : "pointer",
+                transition: "all 0.2s ease",
+                fontSize: "0.8125rem",
+                fontWeight: 700,
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                boxShadow: "0 8px 24px rgba(188, 164, 227, 0.24)",
+                opacity: actionLoading ? 0.8 : 1,
+              }}
+            >
+              <Sparkles style={{ width: "14px", height: "14px" }} />
+              {actionLoading ? "生成中..." : (control?.primary_action_label ?? (wikiType === "intel" ? "生成 Internet Wiki 总览" : "生成 Literature Wiki 总览"))}
+            </button>
+            <button
+              onClick={() => openInObsidian(activePage ?? undefined)}
+              style={{
+                padding: "8px 14px",
+                borderRadius: "8px",
                 background: "var(--bg-card)",
                 color: "var(--text-secondary)",
                 border: "1px solid var(--border-light)",
@@ -72,7 +219,7 @@ export default function WikiView({
               onClick={() => onSetViewMode("pages")}
               style={{
                 padding: "8px 16px",
-                borderRadius: "var(--radius-full)",
+                borderRadius: "8px",
                 background: viewMode === "pages"
                   ? "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))"
                   : "var(--bg-card)",
@@ -94,7 +241,7 @@ export default function WikiView({
               onClick={() => onSetViewMode("mindmap")}
               style={{
                 padding: "8px 16px",
-                borderRadius: "var(--radius-full)",
+                borderRadius: "8px",
                 background: viewMode === "mindmap"
                   ? "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))"
                   : "var(--bg-card)",
@@ -151,15 +298,487 @@ export default function WikiView({
               onNavigateToPage={onNavigateToPage}
             />
           ) : (
-            <EmptyState
-              icon={FileText}
-              title="选择一个页面"
-              description="从左侧导航树中选择一个页面开始阅读"
+            <WikiControlPanel
+              wikiType={wikiType}
+              control={control}
+              loading={controlLoading}
+              actionLoading={actionLoading}
+              sourceSavingId={sourceSavingId}
+              onBootstrap={bootstrapWiki}
+              onOpenOverview={() => onSelectPage("overview")}
+              onOpenObsidian={() => openInObsidian()}
+              onOpenPage={onSelectPage}
+              onToggleSourceFolder={updateSourceFolder}
             />
           )}
         </div>
       </div>
     </PageContainer>
+  );
+}
+
+interface WikiControlPanelProps {
+  wikiType: WikiType;
+  control: WikiControlData | null;
+  loading: boolean;
+  actionLoading: boolean;
+  sourceSavingId: string | null;
+  onBootstrap: () => void;
+  onOpenOverview: () => void;
+  onOpenObsidian: () => void;
+  onOpenPage: (slug: string) => void;
+  onToggleSourceFolder: (folderId: string, enabled: boolean) => void;
+}
+
+function WikiControlPanel({
+  wikiType,
+  control,
+  loading,
+  actionLoading,
+  sourceSavingId,
+  onBootstrap,
+  onOpenOverview,
+  onOpenObsidian,
+  onOpenPage,
+  onToggleSourceFolder,
+}: WikiControlPanelProps) {
+  if (loading) {
+    return (
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--text-muted)",
+        }}
+      >
+        加载中...
+      </div>
+    );
+  }
+
+  if (!control) {
+    return (
+      <EmptyState
+        icon={FileText}
+        title="暂时拿不到 Wiki 状态"
+        description="请稍后再试，或先检查 Obsidian 路径是否可用"
+      />
+    );
+  }
+
+  const usageSteps = wikiType === "intel"
+    ? [
+        "先点“生成 Internet Wiki 总览”，让当前 Bilibili / 小红书收藏先长出一页总览。",
+        "以后在今日情报里看到值得留的内容，点“写入 Internet Wiki”就行。",
+        "回到总览页，只需要补重点，不用从零整理。",
+      ]
+    : [
+        "先点“生成 Literature Wiki 总览”，把现有论文、follow up 和旧 archive 长成一页总览。",
+        "以后新搜到或新看完的论文，点“保存到文献库”就会顺手补进 Literature Wiki。",
+        "总览里的内部页看主题脉络，想看关系就点上面的“脑图”，外部链接直接回具体 markdown。",
+      ];
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        overflowY: "auto",
+        padding: "clamp(24px, 3vw, 40px)",
+      }}
+    >
+      <div style={{ maxWidth: "860px", margin: "0 auto", display: "flex", flexDirection: "column", gap: "28px" }}>
+        <section
+          style={{
+            display: "grid",
+            gap: "18px",
+            padding: "24px",
+            borderRadius: "12px",
+            background: "linear-gradient(135deg, rgba(188, 164, 227, 0.14), rgba(168, 230, 207, 0.12))",
+            border: "1px solid rgba(188, 164, 227, 0.16)",
+          }}
+        >
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "12px", alignItems: "center", justifyContent: "space-between" }}>
+            <div>
+              <div style={{ display: "inline-flex", alignItems: "center", gap: "8px", marginBottom: "8px", color: "var(--color-primary-dark)", fontSize: "0.8125rem", fontWeight: 700 }}>
+                <Sparkles style={{ width: "14px", height: "14px" }} />
+                推荐起手动作
+              </div>
+              <h2 style={{ fontFamily: "'M PLUS Rounded 1c', sans-serif", fontSize: "1.5rem", fontWeight: 700, color: "var(--text-main)", lineHeight: 1.3 }}>
+                {wikiType === "intel" ? "先让收藏长出一页 Internet Wiki 总览" : "先让论文、follow up 和旧笔记长出一页 Literature Wiki 总览"}
+              </h2>
+              <p style={{ marginTop: "10px", fontSize: "0.9375rem", lineHeight: 1.7, color: "var(--text-secondary)", maxWidth: "640px" }}>
+                {control.workflow_hint}
+              </p>
+            </div>
+
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              <button
+                onClick={onBootstrap}
+                disabled={actionLoading}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  padding: "11px 16px",
+                  borderRadius: "8px",
+                  border: "none",
+                  cursor: actionLoading ? "wait" : "pointer",
+                  background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+                  color: "white",
+                  fontSize: "0.875rem",
+                  fontWeight: 700,
+                  boxShadow: "0 10px 24px rgba(188, 164, 227, 0.24)",
+                }}
+              >
+                <Sparkles style={{ width: "15px", height: "15px" }} />
+                {actionLoading ? "生成中..." : control.primary_action_label}
+              </button>
+
+              {control.has_overview && (
+                <button
+                  onClick={onOpenOverview}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "11px 16px",
+                    borderRadius: "8px",
+                    border: "1px solid var(--border-light)",
+                    cursor: "pointer",
+                    background: "var(--bg-card)",
+                    color: "var(--text-secondary)",
+                    fontSize: "0.875rem",
+                    fontWeight: 700,
+                  }}
+                >
+                  打开总览
+                  <ArrowRight style={{ width: "15px", height: "15px" }} />
+                </button>
+              )}
+
+              <button
+                onClick={onOpenObsidian}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  padding: "11px 16px",
+                  borderRadius: "8px",
+                  border: "1px solid var(--border-light)",
+                  cursor: "pointer",
+                  background: "var(--bg-card)",
+                  color: "var(--text-secondary)",
+                  fontSize: "0.875rem",
+                  fontWeight: 700,
+                }}
+              >
+                <BookOpen style={{ width: "15px", height: "15px" }} />
+                在 Obsidian 里看
+              </button>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "12px" }}>
+            <div style={{ padding: "14px 16px", borderRadius: "10px", background: "rgba(255,255,255,0.56)", border: "1px solid rgba(255,255,255,0.5)" }}>
+              <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-muted)", marginBottom: "6px" }}>当前来源数</div>
+              <div style={{ fontSize: "1.375rem", fontWeight: 700, color: "var(--text-main)" }}>
+                {control.source_summary.total_sources}
+              </div>
+            </div>
+            <div style={{ padding: "14px 16px", borderRadius: "10px", background: "rgba(255,255,255,0.56)", border: "1px solid rgba(255,255,255,0.5)" }}>
+              <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-muted)", marginBottom: "6px" }}>启用文件夹</div>
+              <div style={{ fontSize: "1.375rem", fontWeight: 700, color: "var(--text-main)" }}>
+                {control.source_summary.enabled_folder_count ?? control.source_folders.length}
+              </div>
+            </div>
+            <div style={{ padding: "14px 16px", borderRadius: "10px", background: "rgba(255,255,255,0.56)", border: "1px solid rgba(255,255,255,0.5)" }}>
+              <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-muted)", marginBottom: "6px" }}>排除文件夹</div>
+              <div style={{ fontSize: "1.375rem", fontWeight: 700, color: "var(--text-main)" }}>
+                {control.source_summary.disabled_folder_count ?? 0}
+              </div>
+            </div>
+            <div style={{ padding: "14px 16px", borderRadius: "10px", background: "rgba(255,255,255,0.56)", border: "1px solid rgba(255,255,255,0.5)" }}>
+              <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-muted)", marginBottom: "6px" }}>参考笔记</div>
+              <div style={{ fontSize: "1.375rem", fontWeight: 700, color: "var(--text-main)" }}>
+                {control.reference_notes.length}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section style={{ display: "grid", gap: "12px" }}>
+          <h3 style={{ fontFamily: "'M PLUS Rounded 1c', sans-serif", fontSize: "1rem", fontWeight: 700, color: "var(--text-main)" }}>
+            来源概览
+          </h3>
+          {control.scan_roots.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+              {control.scan_roots.map((root) => (
+                <span
+                  key={root}
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: "8px",
+                    background: "rgba(255,255,255,0.72)",
+                    border: "1px solid var(--border-light)",
+                    color: "var(--text-muted)",
+                    fontSize: "0.75rem",
+                    fontWeight: 600,
+                  }}
+                >
+                  {root}
+                </span>
+              ))}
+            </div>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "10px" }}>
+            {control.source_summary.collections.length > 0 ? control.source_summary.collections.map((item) => (
+              <div
+                key={item.label}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  padding: "10px 14px",
+                  borderRadius: "8px",
+                  background: "var(--bg-card)",
+                  border: "1px solid var(--border-light)",
+                  color: "var(--text-secondary)",
+                  fontSize: "0.875rem",
+                  fontWeight: 600,
+                }}
+              >
+                <span>{item.label}</span>
+                <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>{item.count}</span>
+              </div>
+            )) : (
+              <div style={{ color: "var(--text-muted)", fontSize: "0.9375rem" }}>还没扫到可用来源，先检查路径配置。</div>
+            )}
+          </div>
+          {control.source_summary.top_tags.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+              {control.source_summary.top_tags.map((tag) => (
+                <span
+                  key={tag}
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: "8px",
+                    background: "rgba(188, 164, 227, 0.1)",
+                    color: "var(--color-primary-dark)",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                  }}
+                >
+                  #{tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section style={{ display: "grid", gap: "12px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
+            <h3 style={{ fontFamily: "'M PLUS Rounded 1c', sans-serif", fontSize: "1rem", fontWeight: 700, color: "var(--text-main)" }}>
+              素材文件夹
+            </h3>
+            <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+              勾选决定下一次生成时哪些文件夹会参与整理
+            </div>
+          </div>
+
+          {control.source_folders.length > 0 ? (
+            <div style={{ display: "grid", gap: "10px" }}>
+              {control.source_folders.map((folder) => {
+                const isSaving = sourceSavingId === folder.id;
+                return (
+                  <div
+                    key={folder.id}
+                    style={{
+                      padding: "14px 16px",
+                      borderRadius: "10px",
+                      background: folder.enabled ? "var(--bg-card)" : "rgba(255, 183, 178, 0.08)",
+                      border: folder.enabled ? "1px solid var(--border-light)" : "1px solid rgba(255, 183, 178, 0.2)",
+                      display: "grid",
+                      gap: "10px",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
+                      <div style={{ display: "grid", gap: "4px" }}>
+                        <div style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)" }}>
+                          {folder.label}
+                        </div>
+                        <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+                          {folder.relative_path}
+                        </div>
+                      </div>
+
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                        <span
+                          style={{
+                            padding: "5px 9px",
+                            borderRadius: "999px",
+                            background: folder.enabled ? "rgba(168, 230, 207, 0.18)" : "rgba(255, 183, 178, 0.18)",
+                            color: folder.enabled ? "#2E7D68" : "#C76C65",
+                            fontSize: "0.75rem",
+                            fontWeight: 700,
+                          }}
+                        >
+                          {folder.enabled ? "已纳入" : "已排除"}
+                        </span>
+                        {folder.has_page && (
+                          <button
+                            onClick={() => onOpenPage(folder.page_slug)}
+                            style={{
+                              padding: "7px 10px",
+                              borderRadius: "8px",
+                              border: "1px solid var(--border-light)",
+                              background: "var(--bg-card)",
+                              cursor: "pointer",
+                              color: "var(--text-secondary)",
+                              fontSize: "0.75rem",
+                              fontWeight: 700,
+                            }}
+                          >
+                            打开 VKI
+                          </button>
+                        )}
+                        <button
+                          onClick={() => onToggleSourceFolder(folder.id, !folder.enabled)}
+                          disabled={isSaving}
+                          style={{
+                            padding: "7px 10px",
+                            borderRadius: "8px",
+                            border: "none",
+                            background: folder.enabled
+                              ? "rgba(255, 183, 178, 0.18)"
+                              : "rgba(168, 230, 207, 0.22)",
+                            cursor: isSaving ? "wait" : "pointer",
+                            color: folder.enabled ? "#C76C65" : "#2E7D68",
+                            fontSize: "0.75rem",
+                            fontWeight: 700,
+                            opacity: isSaving ? 0.75 : 1,
+                          }}
+                        >
+                          {isSaving ? "保存中..." : folder.enabled ? "排除" : "纳入"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                      <span style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", fontWeight: 600 }}>
+                        {folder.note_count} 条素材
+                      </span>
+                      {folder.top_tags.slice(0, 4).map((tag) => (
+                        <span
+                          key={`${folder.id}-${tag}`}
+                          style={{
+                            padding: "4px 8px",
+                            borderRadius: "8px",
+                            background: "rgba(188, 164, 227, 0.1)",
+                            color: "var(--color-primary-dark)",
+                            fontSize: "0.75rem",
+                            fontWeight: 600,
+                          }}
+                        >
+                          #{tag}
+                        </span>
+                      ))}
+                    </div>
+
+                    {folder.highlights.length > 0 && (
+                      <div style={{ fontSize: "0.8125rem", lineHeight: 1.7, color: "var(--text-secondary)" }}>
+                        {folder.highlights.slice(0, 2).join(" / ")}
+                      </div>
+                    )}
+
+                    <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                      {folder.folder_path}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={{ color: "var(--text-muted)", fontSize: "0.9375rem" }}>
+              还没扫到可管理的素材文件夹。
+            </div>
+          )}
+        </section>
+
+        <section style={{ display: "grid", gap: "12px" }}>
+          <h3 style={{ fontFamily: "'M PLUS Rounded 1c', sans-serif", fontSize: "1rem", fontWeight: 700, color: "var(--text-main)" }}>
+            就这么用
+          </h3>
+          <div style={{ display: "grid", gap: "10px" }}>
+            {usageSteps.map((step, index) => (
+              <div
+                key={step}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "28px 1fr",
+                  gap: "12px",
+                  alignItems: "start",
+                  padding: "12px 14px",
+                  borderRadius: "10px",
+                  background: "var(--bg-card)",
+                  border: "1px solid var(--border-light)",
+                }}
+              >
+                <div
+                  style={{
+                    width: "28px",
+                    height: "28px",
+                    borderRadius: "8px",
+                    background: "rgba(188, 164, 227, 0.12)",
+                    color: "var(--color-primary-dark)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "0.8125rem",
+                    fontWeight: 700,
+                  }}
+                >
+                  {index + 1}
+                </div>
+                <div style={{ fontSize: "0.9375rem", lineHeight: 1.7, color: "var(--text-secondary)" }}>{step}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {control.reference_notes.length > 0 && (
+          <section style={{ display: "grid", gap: "12px" }}>
+            <h3 style={{ fontFamily: "'M PLUS Rounded 1c', sans-serif", fontSize: "1rem", fontWeight: 700, color: "var(--text-main)" }}>
+              参考到的已有笔记
+            </h3>
+            <div style={{ display: "grid", gap: "10px" }}>
+              {control.reference_notes.map((note) => (
+                <div
+                  key={note.path}
+                  style={{
+                    padding: "12px 14px",
+                    borderRadius: "10px",
+                    background: "var(--bg-card)",
+                    border: "1px solid var(--border-light)",
+                  }}
+                >
+                  <div style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)", marginBottom: "6px" }}>
+                    {note.title}
+                  </div>
+                  <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", marginBottom: "8px" }}>
+                    {note.path}
+                  </div>
+                  <div style={{ fontSize: "0.875rem", lineHeight: 1.6, color: "var(--text-secondary)" }}>
+                    {note.excerpt || "已作为参考样本纳入初版生成。"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -184,6 +803,7 @@ interface GraphData {
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
+  collection: "#8FC1FF",
   entity: "#BCA4E3",
   concept: "#A8E6CF",
   paper: "#C4B5FD",
@@ -288,6 +908,19 @@ function WikiMindMapPlaceholder({ wikiType, onSelectPage }: MindMapPlaceholderPr
         position: "relative",
       }}
     >
+      <div
+        style={{
+          marginBottom: "16px",
+          padding: "10px 12px",
+          borderBottom: "1px solid var(--border-light)",
+          color: "var(--text-secondary)",
+          fontSize: "0.875rem",
+          lineHeight: 1.6,
+        }}
+      >
+        点圆点回到对应 wiki 页面。页面里的外部链接还是原始 markdown，脑图只负责看内部脉络。
+      </div>
+
       {/* Legend */}
       <div
         style={{
@@ -308,7 +941,17 @@ function WikiMindMapPlaceholder({ wikiType, onSelectPage }: MindMapPlaceholderPr
               }}
             />
             <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontWeight: 500 }}>
-              {cat === "entity" ? "实体" : cat === "concept" ? "概念" : cat === "paper" ? "论文" : cat === "topic" ? "主题" : "概览"}
+              {cat === "collection"
+                ? "文件夹"
+                : cat === "entity"
+                  ? "实体"
+                  : cat === "concept"
+                    ? "概念"
+                    : cat === "paper"
+                      ? "论文"
+                      : cat === "topic"
+                        ? "主题"
+                        : "概览"}
             </span>
           </div>
         ))}

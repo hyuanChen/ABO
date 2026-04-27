@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """简化版 WebSocket 测试"""
 import asyncio
-import websockets
 import json
+import pytest
+import websockets
+
+pytestmark = pytest.mark.skip(reason="manual websocket smoke script, not part of automated pytest suite")
 
 async def test():
     uri = "ws://127.0.0.1:8765/api/chat/ws/claude/test-session-123"

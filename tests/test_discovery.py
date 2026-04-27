@@ -70,6 +70,16 @@ class TestBuiltinModuleLoading:
             assert hasattr(module, "enabled"), f"Module {module.id} missing enabled"
             assert hasattr(module, "output"), f"Module {module.id} missing output"
 
+    def test_semantic_scholar_tracker_uses_current_builtin_package(self):
+        """Test that discovery loads the maintained Semantic Scholar tracker implementation."""
+        registry = ModuleRegistry()
+        registry.load_all()
+
+        module = registry.get("semantic-scholar-tracker")
+
+        assert module is not None
+        assert module.__class__.__module__ == "abo_module_semantic_scholar_tracker"
+
 
 class TestModuleOrdering:
     """Test 1.2: Module ordering."""

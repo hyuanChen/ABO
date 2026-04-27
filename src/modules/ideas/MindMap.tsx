@@ -23,6 +23,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { api } from "../../core/api";
+import { isActionEnterKey, isComposingKeyboardEvent } from "../../core/keyboard";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -88,7 +89,8 @@ function IdeaNode({ id, data, selected }: { id: string; data: Record<string, unk
           onChange={(e) => setDraft(e.target.value)}
           onBlur={commit}
           onKeyDown={(e) => {
-            if (e.key === "Enter") { e.preventDefault(); commit(); }
+            if (isComposingKeyboardEvent(e)) return;
+            if (isActionEnterKey(e)) { e.preventDefault(); commit(); }
             if (e.key === "Escape") { setDraft(label); setEditing(false); }
           }}
           onClick={(e) => e.stopPropagation()}
@@ -263,7 +265,8 @@ function CanvasSelector({
               placeholder="新画布名称…"
               className="flex-1 px-2 py-1.5 rounded-lg text-xs border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               onKeyDown={(e) => {
-                if (e.key === "Enter" && newName.trim()) {
+                if (isActionEnterKey(e) && newName.trim()) {
+                  e.preventDefault();
                   onCreate(newName.trim());
                   setNewName(""); setOpen(false);
                 }

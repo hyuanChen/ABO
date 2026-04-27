@@ -13,12 +13,12 @@ from abo.sdk import Module, Item, Card
 
 
 KNOWN_SCHEDULES = {
-    "arxiv-tracker": "0 8 * * *",
-    "semantic-scholar-tracker": "0 10 * * *",
-    "xiaohongshu-tracker": "0 10 * * *",
-    "bilibili-tracker": "0 11 * * *",
-    "xiaoyuzhou-tracker": "0 10 * * *",
-    "zhihu-tracker": "0 13 * * *",
+    "arxiv-tracker": "0 9 * * *",
+    "semantic-scholar-tracker": "0 9 * * *",
+    "xiaohongshu-tracker": "30 8 * * *",
+    "bilibili-tracker": "30 8 * * *",
+    "xiaoyuzhou-tracker": "0 9 * * *",
+    "zhihu-tracker": "0 9 * * *",
     "folder-monitor": "*/5 * * * *",
 }
 

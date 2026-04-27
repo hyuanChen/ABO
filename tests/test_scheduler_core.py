@@ -22,6 +22,7 @@ class FakeRunner:
 
     async def run(self, module):
         self.runs.append(module.id)
+        return 1
 
 
 @pytest.mark.anyio

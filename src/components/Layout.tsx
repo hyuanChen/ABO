@@ -1,5 +1,5 @@
-import { ReactNode } from "react";
-import { LucideIcon } from "lucide-react";
+import { KeyboardEvent, ReactNode, useState } from "react";
+import { ChevronDown, ChevronRight, LucideIcon } from "lucide-react";
 import { useStore } from "../core/store";
 
 interface PageContainerProps {
@@ -188,12 +188,52 @@ interface CardProps {
   icon?: ReactNode;
   actions?: ReactNode;
   noPadding?: boolean;
+  collapsible?: boolean;
+  defaultExpanded?: boolean;
+  lazyMount?: boolean;
+  summary?: ReactNode;
   style?: React.CSSProperties;
 }
 
 /** 统一卡片组件 */
-export function Card({ children, className = "", title, icon, actions, noPadding = false, style }: CardProps) {
+export function Card({
+  children,
+  className = "",
+  title,
+  icon,
+  actions,
+  noPadding = false,
+  collapsible = false,
+  defaultExpanded = true,
+  lazyMount = false,
+  summary,
+  style,
+}: CardProps) {
   const showcaseMode = useStore((s) => s.showcaseMode);
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const [hasExpandedOnce, setHasExpandedOnce] = useState(defaultExpanded || !lazyMount || !collapsible);
+  const isExpanded = collapsible ? expanded : true;
+  const shouldRenderChildren = !lazyMount || !collapsible || isExpanded || hasExpandedOnce;
+
+  function toggleExpanded() {
+    if (!collapsible) return;
+    setExpanded((current) => {
+      const next = !current;
+      if (next) {
+        setHasExpandedOnce(true);
+      }
+      return next;
+    });
+  }
+
+  function handleHeaderKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (!collapsible) return;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggleExpanded();
+    }
+  }
+
   return (
     <div
       className={`${className}`}
@@ -220,34 +260,86 @@ export function Card({ children, className = "", title, icon, actions, noPadding
     >
       {(title || actions) && (
         <div
+          role={collapsible ? "button" : undefined}
+          tabIndex={collapsible ? 0 : undefined}
+          aria-expanded={collapsible ? isExpanded : undefined}
+          onClick={collapsible ? toggleExpanded : undefined}
+          onKeyDown={handleHeaderKeyDown}
           style={{
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
             padding: "clamp(16px, 2vw, 20px) clamp(20px, 2.5vw, 24px)",
-            borderBottom: "1px solid var(--border-light)",
+            borderBottom: isExpanded ? "1px solid var(--border-light)" : "none",
             background: "var(--bg-hover)",
+            cursor: collapsible ? "pointer" : "default",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
             {icon}
-            {title && (
-              <h2
-                style={{
-                  fontFamily: "'M PLUS Rounded 1c', sans-serif",
-                  fontSize: "clamp(0.9375rem, 1.5vw, 1.125rem)",
-                  fontWeight: 700,
-                  color: "var(--text-main)",
-                }}
-              >
-                {title}
-              </h2>
+            <div style={{ minWidth: 0 }}>
+              {title && (
+                <h2
+                  style={{
+                    fontFamily: "'M PLUS Rounded 1c', sans-serif",
+                    fontSize: "clamp(0.9375rem, 1.5vw, 1.125rem)",
+                    fontWeight: 700,
+                    color: "var(--text-main)",
+                  }}
+                >
+                  {title}
+                </h2>
+              )}
+              {summary && (
+                <div
+                  style={{
+                    marginTop: "4px",
+                    fontSize: "0.75rem",
+                    color: "var(--text-muted)",
+                    lineHeight: 1.5,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {summary}
+                </div>
+              )}
+            </div>
+          </div>
+          <div
+            style={{ display: "flex", alignItems: "center", gap: "12px", flexShrink: 0 }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            {actions}
+            {collapsible && (
+              isExpanded
+                ? <ChevronDown style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
+                : <ChevronRight style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
             )}
           </div>
-          {actions}
         </div>
       )}
-      <div style={{ padding: noPadding ? 0 : "clamp(16px, 2vw, 24px)" }}>{children}</div>
+      <div
+        style={collapsible ? {
+          display: "grid",
+          gridTemplateRows: isExpanded ? "1fr" : "0fr",
+          transition: "grid-template-rows 240ms cubic-bezier(0.22, 1, 0.36, 1)",
+        } : undefined}
+      >
+        <div style={collapsible ? { overflow: "hidden" } : undefined}>
+          <div
+            style={{
+              padding: noPadding ? 0 : "clamp(16px, 2vw, 24px)",
+              opacity: isExpanded ? 1 : 0,
+              transition: collapsible ? "opacity 160ms ease" : undefined,
+              pointerEvents: isExpanded ? "auto" : "none",
+            }}
+          >
+            {shouldRenderChildren ? children : null}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

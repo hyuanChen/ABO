@@ -146,6 +146,7 @@ async def fetch_bilibili_video_metadata(
         "description": extract_video_description(view_data),
         "cover": str(view_data.get("pic") or "").strip(),
         "author": str((view_data.get("owner") or {}).get("name") or "").strip(),
+        "author_id": str((view_data.get("owner") or {}).get("mid") or "").strip(),
         "published_at_ts": int(view_data.get("pubdate") or 0) or None,
         "url": f"https://www.bilibili.com/video/{bvid}",
         "tags": tags,

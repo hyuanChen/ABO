@@ -8,6 +8,8 @@ from typing import Literal
 
 import httpx
 
+from abo.config import is_paper_ai_scoring_enabled
+from abo.paper_paths import sanitize_paper_title_for_path
 from abo.paper_tracking import load_module_preferences, normalize_followup_monitors
 from abo.sdk import Module, Item, Card, agent_json
 from abo.store.papers import PaperStore
@@ -16,7 +18,7 @@ from abo.store.papers import PaperStore
 class SemanticScholarTracker(Module):
     id       = "semantic-scholar-tracker"
     name     = "Semantic Scholar 后续论文"
-    schedule = "0 10 * * *"  # 每天早上10点
+    schedule = "0 9 * * *"  # 每天早上9点
     icon     = "git-branch"
     output   = ["obsidian", "ui"]
 
@@ -110,7 +112,7 @@ class SemanticScholarTracker(Module):
         url = f"{self.BASE_URL}/paper/search"
         params = {
             "query": title,
-            "fields": "paperId,title,authors,year,citationCount,referenceCount,abstract,fieldsOfStudy,publicationDate",
+            "fields": "paperId,title,authors,year,citationCount,referenceCount,abstract,fieldsOfStudy,publicationDate,venue,externalIds,url",
             "limit": 5
         }
 
@@ -138,7 +140,7 @@ class SemanticScholarTracker(Module):
         url = f"{self.BASE_URL}/paper/search"
         params = {
             "query": f"arxiv:{arxiv_id_clean}",
-            "fields": "paperId,title,authors,year,citationCount,referenceCount,abstract,fieldsOfStudy,publicationDate,externalIds",
+            "fields": "paperId,title,authors,year,citationCount,referenceCount,abstract,fieldsOfStudy,publicationDate,venue,externalIds,url",
             "limit": 3
         }
 
@@ -172,6 +174,18 @@ class SemanticScholarTracker(Module):
             print(f"[s2] Fallback to arxiv title search failed: {e}")
 
         return None
+
+    async def _resolve_source_paper_with_client(self, client: httpx.AsyncClient, query: str) -> dict | None:
+        if query.startswith("arxiv") or ":" in query or "/" in query:
+            arxiv_id = query.replace("arxiv:", "").replace("arxiv.org/abs/", "").strip("/")
+            return await self.search_paper_by_arxiv_id(client, arxiv_id)
+        if len(query) < 15 and (query[0:4].isdigit() or "." in query):
+            return await self.search_paper_by_arxiv_id(client, query)
+        return await self.search_paper_by_title(client, query)
+
+    async def resolve_source_paper(self, query: str) -> dict | None:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            return await self._resolve_source_paper_with_client(client, query)
 
     def _parse_publication_datetime(self, paper: dict) -> datetime | None:
         """Parse publication date with a year-only fallback."""
@@ -208,7 +222,56 @@ class SemanticScholarTracker(Module):
                 int(paper.get("citationCount") or 0),
                 paper.get("title", "").lower(),
             ),
-            reverse=True,
+                reverse=True,
+            )
+
+    def _normalize_source_paper(self, paper: dict) -> dict:
+        """Normalize source-paper metadata so it can be persisted alongside follow-ups."""
+        authors = []
+        for author in paper.get("authors", []):
+            if isinstance(author, dict):
+                name = author.get("name", "")
+            else:
+                name = str(author or "")
+            if name:
+                authors.append(name)
+
+        paper_id = paper.get("paperId", "") or paper.get("paper_id", "")
+        external_ids = paper.get("externalIds", {}) or paper.get("external_ids", {}) or {}
+        arxiv_id = external_ids.get("ArXiv", "") or paper.get("arxiv_id", "")
+        s2_url = paper.get("url", "") or (f"https://www.semanticscholar.org/paper/{paper_id}" if paper_id else "")
+        arxiv_url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else ""
+
+        return {
+            "title": paper.get("title", "Unknown"),
+            "abstract": paper.get("abstract", ""),
+            "authors": authors,
+            "year": paper.get("year"),
+            "venue": paper.get("venue", ""),
+            "citation_count": paper.get("citationCount", paper.get("citation_count", 0)),
+            "reference_count": paper.get("referenceCount", paper.get("reference_count", 0)),
+            "fields_of_study": paper.get("fieldsOfStudy", paper.get("fields_of_study", [])) or [],
+            "published": paper.get("publicationDate", paper.get("published", "")),
+            "paper_id": paper_id,
+            "arxiv_id": arxiv_id,
+            "external_ids": external_ids,
+            "s2_url": s2_url,
+            "arxiv_url": arxiv_url,
+            "url": arxiv_url or s2_url,
+        }
+
+    def source_paper_to_item(self, source_paper: dict) -> Item:
+        normalized = self._normalize_source_paper(source_paper)
+        item_id = normalized["arxiv_id"] or (f"s2_{normalized['paper_id']}" if normalized["paper_id"] else normalized["title"])
+        return Item(
+            id=item_id,
+            raw={
+                **normalized,
+                "author_count": len(normalized["authors"]),
+                "paper_tracking_role": "source",
+                "source_paper_title": normalized["title"],
+                "source_paper": normalized,
+            },
         )
 
     async def get_citing_papers(
@@ -268,6 +331,7 @@ class SemanticScholarTracker(Module):
         days_back: int | None = None,
         existing_ids: set[str] | None = None,
         sort_by: Literal["recency", "citation_count"] = "recency",
+        source_paper: dict | None = None,
     ) -> list[Item]:
         """
         查找某篇论文的后续研究（引用该论文的论文）
@@ -282,16 +346,7 @@ class SemanticScholarTracker(Module):
 
         async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             # Step 1: 找到源论文
-            if query.startswith("arxiv") or ":" in query or "/" in query:
-                # 提取 arXiv ID
-                arxiv_id = query.replace("arxiv:", "").replace("arxiv.org/abs/", "").strip("/")
-                source_paper = await self.search_paper_by_arxiv_id(client, arxiv_id)
-            elif len(query) < 15 and (query[0:4].isdigit() or "." in query):
-                # 看起来像是 arXiv ID 格式
-                source_paper = await self.search_paper_by_arxiv_id(client, query)
-            else:
-                # 按标题搜索
-                source_paper = await self.search_paper_by_title(client, query)
+            source_paper = source_paper or await self._resolve_source_paper_with_client(client, query)
 
             if not source_paper:
                 print(f"[s2] Source paper not found: {query}")
@@ -299,6 +354,7 @@ class SemanticScholarTracker(Module):
 
             paper_id = source_paper.get("paperId")
             paper_title = source_paper.get("title", "Unknown")
+            normalized_source_paper = self._normalize_source_paper(source_paper)
             print(f"[s2] Found source paper: {paper_title} (ID: {paper_id})")
 
             # Step 2: 获取引用该论文的论文
@@ -339,7 +395,7 @@ class SemanticScholarTracker(Module):
                 sorted_papers = sorted_papers[:normalized_max_results]
 
             for paper in sorted_papers:
-                item = self._paper_to_item(paper, source_paper_title=paper_title)
+                item = self._paper_to_item(paper, source_paper=normalized_source_paper)
                 if item.id in seen_item_ids:
                     continue
                 seen_item_ids.add(item.id)
@@ -351,11 +407,13 @@ class SemanticScholarTracker(Module):
             )
             return items
 
-    def _paper_to_item(self, paper: dict, source_paper_title: str = "") -> Item:
+    def _paper_to_item(self, paper: dict, source_paper: dict | None = None) -> Item:
         """将 Semantic Scholar 论文转换为 Item"""
         paper_id = paper.get("paperId", "")
         title = paper.get("title", "Untitled")
         abstract = paper.get("abstract", "")
+        source_paper = source_paper or {}
+        source_paper_title = source_paper.get("title", "")
 
         authors = []
         for author in paper.get("authors", []):
@@ -400,6 +458,7 @@ class SemanticScholarTracker(Module):
                 "paper_id": paper_id,
                 "arxiv_id": arxiv_id,
                 "source_paper_title": source_paper_title,  # 被引用的源论文
+                "source_paper": source_paper,
                 "s2_url": s2_url,
                 "arxiv_url": arxiv_url,
                 "url": arxiv_url if arxiv_url else s2_url,
@@ -463,11 +522,14 @@ class SemanticScholarTracker(Module):
 
         cards = []
         arxiv_api = ArxivAPITool()
+        ai_scoring_enabled = is_paper_ai_scoring_enabled()
 
         for item in items:
             p = item.raw
             arxiv_id = p.get("arxiv_id", "")
+            paper_role = p.get("paper_tracking_role", "followup")
             figures: list[dict] = []
+            introduction = ""
             monitor_matches = p.get("monitor_matches", [])
             monitor_labels = [match.get("label", "") for match in monitor_matches if match.get("label")]
 
@@ -478,36 +540,60 @@ class SemanticScholarTracker(Module):
                     print(f"[s2] arXiv figure fetch timeout for {arxiv_id}")
                 except Exception as e:
                     print(f"[s2] arXiv figure fetch error for {arxiv_id}: {e}")
+                try:
+                    introduction = await asyncio.wait_for(arxiv_api.fetch_introduction(arxiv_id), timeout=20)
+                except asyncio.TimeoutError:
+                    print(f"[s2] arXiv introduction fetch timeout for {arxiv_id}")
+                except Exception as e:
+                    print(f"[s2] arXiv introduction fetch error for {arxiv_id}: {e}")
 
             # Build prompt for follow-up papers (强调这是后续研究)
-            source_title = p.get("source_paper_title", "")
-            fields_str = ", ".join(p.get("fields_of_study", [])[:3])
-            citation_info = f"被引用 {p['citation_count']} 次" if p.get("citation_count") else ""
+            source_title = p.get("source_paper_title", p.get("title", ""))
+            result = {}
+            if ai_scoring_enabled:
+                fields_str = ", ".join(p.get("fields_of_study", [])[:3])
+                citation_info = f"被引用 {p['citation_count']} 次" if p.get("citation_count") else ""
 
-            prompt = (
-                f'分析以下后续研究论文（引用了 "{source_title}"），返回 JSON（不要有其他文字）：\n'
-                f'{{"score":<1-10整数>,"summary":"<50字以内中文摘要>",'
-                f'"tags":["<tag1>","<tag2>","<tag3>"],"contribution":"<一句话核心创新>"}}\n\n'
-                f"标题：{p['title']}\n"
-                f"领域：{fields_str}\n"
-                f"{citation_info}\n"
-                f"摘要：{p['abstract'][:800] if p.get('abstract') else 'No abstract available'}"
-            )
+                if paper_role == "source":
+                    prompt = (
+                        f'分析以下源论文，返回 JSON（不要有其他文字）：\n'
+                        f'{{"score":<1-10整数>,"summary":"<50字以内中文摘要>",'
+                        f'"tags":["<tag1>","<tag2>","<tag3>"],"contribution":"<一句话核心创新>"}}\n\n'
+                        f"标题：{p['title']}\n"
+                        f"领域：{fields_str}\n"
+                        f"{citation_info}\n"
+                        f"摘要：{p['abstract'][:800] if p.get('abstract') else 'No abstract available'}"
+                    )
+                else:
+                    prompt = (
+                        f'分析以下后续研究论文（引用了 "{source_title}"），返回 JSON（不要有其他文字）：\n'
+                        f'{{"score":<1-10整数>,"summary":"<50字以内中文摘要>",'
+                        f'"tags":["<tag1>","<tag2>","<tag3>"],"contribution":"<一句话核心创新>"}}\n\n'
+                        f"标题：{p['title']}\n"
+                        f"领域：{fields_str}\n"
+                        f"{citation_info}\n"
+                        f"摘要：{p['abstract'][:800] if p.get('abstract') else 'No abstract available'}"
+                    )
 
-            try:
-                result = await asyncio.wait_for(agent_json(prompt, prefs=prefs), timeout=30)
-            except asyncio.TimeoutError:
-                print(f"[s2] Agent timeout for {item.id}, using fallback")
-                result = {}
-            except Exception as e:
-                print(f"[s2] Agent error for {item.id}: {e}")
-                result = {}
+                try:
+                    result = await asyncio.wait_for(agent_json(prompt, prefs=prefs), timeout=30)
+                except asyncio.TimeoutError:
+                    print(f"[s2] Agent timeout for {item.id}, using fallback")
+                except Exception as e:
+                    print(f"[s2] Agent error for {item.id}: {e}")
 
             # Build metadata
-            first_author = p["authors"][0].split()[-1] if p["authors"] else "Unknown"
+            note_name = sanitize_paper_title_for_path(
+                p["title"],
+                fallback=item.id,
+                max_length=120,
+            )
             year = p.get("year", datetime.now().year)
-            slug = p["title"][:40].replace(" ", "-").replace("/", "-")
-            source_slug = source_title[:20].replace(" ", "-").replace("/", "-") if source_title else "unknown"
+            source_folder = sanitize_paper_title_for_path(
+                source_title,
+                fallback="Unknown",
+                max_length=80,
+            )
 
             metadata = {
                 "abo-type": "semantic-scholar-paper",
@@ -522,34 +608,43 @@ class SemanticScholarTracker(Module):
                 "reference_count": p.get("reference_count", 0),
                 "fields_of_study": p.get("fields_of_study", []),
                 "source_paper_title": source_title,
+                "source_paper": p.get("source_paper", {}),
                 "contribution": result.get("contribution", ""),
                 "abstract": p.get("abstract", ""),
+                "introduction": introduction,
                 "keywords": result.get("tags", []),
                 "s2_url": p.get("s2_url", ""),
                 "arxiv_url": p.get("arxiv_url", ""),
                 "pdf-url": f"https://arxiv.org/pdf/{arxiv_id}.pdf" if arxiv_id else "",
                 "html-url": f"https://arxiv.org/html/{arxiv_id}" if arxiv_id else "",
                 "figures": figures,
-                "paper_tracking_type": "followup",
-                "paper_tracking_label": monitor_labels[0] if monitor_labels else source_title,
+                "paper_tracking_type": "source" if paper_role == "source" else "followup",
+                "paper_tracking_role": paper_role,
+                "paper_tracking_label": p["title"] if paper_role == "source" else (monitor_labels[0] if monitor_labels else source_title),
                 "paper_tracking_labels": monitor_labels,
                 "paper_tracking_matches": monitor_matches,
-                "relationship_label": "Follow Up 追踪",
+                "relationship_label": "源论文" if paper_role == "source" else "Follow Up 追踪",
             }
 
-            card_tags = list(
-                dict.fromkeys(
-                    [*result.get("tags", []), "follow-up", *(p.get("fields_of_study", [])[:1]), *monitor_labels[:2]]
-                )
-            )
+            role_tags = ["source-paper"] if paper_role == "source" else ["follow-up"]
+            card_tags = list(dict.fromkeys([
+                *result.get("tags", []),
+                *role_tags,
+                *(p.get("fields_of_study", [])[:1]),
+                *monitor_labels[:2],
+            ]))
             cards.append(Card(
-                id=f"followup-monitor:{item.id}",
+                id=f"{'source-paper' if paper_role == 'source' else 'followup-monitor'}:{item.id}",
                 title=p["title"],
                 summary=result.get("summary", p.get("abstract", "")[:150]),
                 score=min(result.get("score", 5), 10) / 10,
                 tags=card_tags,
                 source_url=p.get("url", p.get("s2_url", "")),
-                obsidian_path=f"Literature/FollowUps/{source_slug}/{first_author}{year}-{slug}.md",
+                obsidian_path=(
+                    f"Literature/FollowUps/{source_folder}/{note_name}.md"
+                    if paper_role == "source"
+                    else f"Literature/FollowUps/{source_folder}/{note_name}/{note_name}.md"
+                ),
                 metadata=metadata,
             ))
 

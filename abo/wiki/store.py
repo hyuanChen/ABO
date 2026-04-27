@@ -2,6 +2,7 @@
 Wiki 知识库存储层 — 读写 Obsidian Vault 中的 Markdown Wiki 页面。
 维护 index.md、log.md，解析 [[wikilinks]] 构建反向链接图。
 """
+import json
 import os
 import re
 from datetime import date, datetime
@@ -14,22 +15,34 @@ import frontmatter
 # ── 常量 ──────────────────────────────────────────────────────────
 
 _WIKI_DIRS: dict[str, str] = {
-    "intel": "Intel",
-    "lit": "Lit",
+    "intel": "Internet",
+    "lit": "Literature",
 }
 
 _CATEGORY_DIRS: dict[str, dict[str, str]] = {
     "intel": {
+        "collection": "collections",
         "entity": "entities",
         "concept": "concepts",
     },
     "lit": {
+        "collection": "collections",
         "paper": "papers",
         "topic": "topics",
     },
 }
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+_SOURCE_CONFIG_FILE = "sources.json"
+
+
+def _wikilink_target_slug(raw_link: str) -> str:
+    target_raw = raw_link.split("|")[0].split("#")[0].strip()
+    if not target_raw:
+        return ""
+    last_segment = target_raw.split("/")[-1].strip().lower()
+    last_segment = re.sub(r"\s+", "-", last_segment)
+    return re.sub(r"[^a-z0-9_\-\u4e00-\u9fff]", "", last_segment)
 
 
 def _wiki_root(vault_path: Path, wiki_type: str) -> Path:
@@ -37,6 +50,8 @@ def _wiki_root(vault_path: Path, wiki_type: str) -> Path:
 
 
 def _category_dir(vault_path: Path, wiki_type: str, category: str) -> Path:
+    if category == "overview":
+        return _wiki_root(vault_path, wiki_type)
     subdir = _CATEGORY_DIRS[wiki_type].get(category, category)
     return _wiki_root(vault_path, wiki_type) / subdir
 
@@ -63,8 +78,29 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def _load_post(path: Path):
+    try:
+        return frontmatter.load(str(path))
+    except Exception:
+        return None
+
+
 class WikiStore:
     """Wiki 知识库存储层，无状态静态方法集合。"""
+
+    @staticmethod
+    def get_wiki_root(vault_path: Path, wiki_type: str) -> Path:
+        """Return the filesystem root for a wiki type."""
+        return _wiki_root(vault_path, wiki_type)
+
+    @staticmethod
+    def get_page_path(vault_path: Path, wiki_type: str, slug: str) -> Optional[Path]:
+        """Return the full filesystem path for a page slug when it exists."""
+        return _page_path(vault_path, wiki_type, slug)
+
+    @staticmethod
+    def get_source_config_path(vault_path: Path, wiki_type: str) -> Path:
+        return _wiki_root(vault_path, wiki_type) / _SOURCE_CONFIG_FILE
 
     # ── 初始化结构 ─────────────────────────────────────────────────
 
@@ -79,15 +115,15 @@ class WikiStore:
 
         index_path = root / "index.md"
         if not index_path.exists():
-            wiki_label = "情报库" if wiki_type == "intel" else "文献库"
+            wiki_label = "Internet Wiki" if wiki_type == "intel" else "Literature Wiki"
             _atomic_write(
                 index_path,
                 f"---\nabo_type: wiki\nwiki: {wiki_type}\ncategory: overview\n"
-                f"title: \"{wiki_label} Wiki 目录\"\n"
+                f"title: \"{wiki_label} 目录\"\n"
                 f"created: {date.today().isoformat()}\n"
                 f"updated: {date.today().isoformat()}\n"
                 f"tags: []\nsources: []\n---\n\n"
-                f"# {wiki_label} Wiki 目录\n\n"
+                f"# {wiki_label} 目录\n\n"
                 f"暂无页面，从摘录开始构建你的知识库。\n",
             )
 
@@ -97,6 +133,57 @@ class WikiStore:
                 log_path,
                 "# Wiki 操作日志\n\n| 时间 | 操作 | 详情 |\n|------|------|------|\n",
             )
+
+    @staticmethod
+    def load_source_config(vault_path: Path, wiki_type: str) -> dict:
+        """读取来源文件夹配置。"""
+        path = WikiStore.get_source_config_path(vault_path, wiki_type)
+        default = {
+            "folder_states": {},
+            "updated": "",
+        }
+        if not path.exists():
+            return default
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return default
+        folder_states = data.get("folder_states", {})
+        if not isinstance(folder_states, dict):
+            folder_states = {}
+        return {
+            "folder_states": {
+                str(key): bool(value)
+                for key, value in folder_states.items()
+                if str(key).strip()
+            },
+            "updated": str(data.get("updated", "")),
+        }
+
+    @staticmethod
+    def save_source_config(vault_path: Path, wiki_type: str, folder_states: dict[str, bool]) -> dict:
+        """保存来源文件夹配置。"""
+        WikiStore.ensure_structure(vault_path, wiki_type)
+        normalized = {
+            str(key): bool(value)
+            for key, value in folder_states.items()
+            if str(key).strip()
+        }
+        payload = {
+            "folder_states": normalized,
+            "updated": datetime.now().isoformat(timespec="minutes"),
+        }
+        _atomic_write(
+            WikiStore.get_source_config_path(vault_path, wiki_type),
+            json.dumps(payload, indent=2, ensure_ascii=False),
+        )
+        WikiStore.append_log(
+            vault_path,
+            wiki_type,
+            "更新来源配置",
+            f"记录 {len(normalized)} 个文件夹状态",
+        )
+        return payload
 
     # ── 列举页面 ───────────────────────────────────────────────────
 
@@ -112,18 +199,49 @@ class WikiStore:
             return []
 
         search_dirs: list[Path] = []
+        include_root_pages = False
         if category:
-            subdir = _CATEGORY_DIRS[wiki_type].get(category, category)
-            d = root / subdir
-            if d.exists():
-                search_dirs.append(d)
+            if category == "overview":
+                include_root_pages = True
+            else:
+                subdir = _CATEGORY_DIRS[wiki_type].get(category, category)
+                d = root / subdir
+                if d.exists():
+                    search_dirs.append(d)
         else:
+            include_root_pages = True
             for subdir in _CATEGORY_DIRS[wiki_type].values():
                 d = root / subdir
                 if d.exists():
                     search_dirs.append(d)
 
         pages: list[dict] = []
+        root_files: list[Path] = []
+        if include_root_pages:
+            root_files = [
+                md_file
+                for md_file in sorted(root.glob("*.md"))
+                if md_file.name not in {"index.md", "log.md"}
+            ]
+
+        for md_file in root_files:
+            try:
+                post = frontmatter.load(str(md_file))
+                slug = md_file.stem
+                pages.append({
+                    "slug": slug,
+                    "title": post.metadata.get("title", slug),
+                    "category": post.metadata.get("category", "overview"),
+                    "wiki": wiki_type,
+                    "tags": post.metadata.get("tags", []),
+                    "sources": post.metadata.get("sources", []),
+                    "created": str(post.metadata.get("created", "")),
+                    "updated": str(post.metadata.get("updated", "")),
+                    "summary": post.content[:120].strip() if post.content else "",
+                })
+            except Exception:
+                continue
+
         for d in search_dirs:
             for md_file in sorted(d.glob("*.md")):
                 try:
@@ -153,7 +271,9 @@ class WikiStore:
         if path is None:
             return None
         try:
-            post = frontmatter.load(str(path))
+            post = _load_post(path)
+            if post is None:
+                return None
             return {
                 "slug": slug,
                 "title": post.metadata.get("title", slug),
@@ -162,7 +282,7 @@ class WikiStore:
                 "content": post.content,
                 "tags": post.metadata.get("tags", []),
                 "sources": post.metadata.get("sources", []),
-                "backlinks": post.metadata.get("backlinks", []),
+                "backlinks": WikiStore.get_backlinks(vault_path, wiki_type, slug),
                 "created": str(post.metadata.get("created", "")),
                 "updated": str(post.metadata.get("updated", "")),
             }
@@ -183,10 +303,15 @@ class WikiStore:
         sources: list[str],
     ) -> dict:
         """创建或更新 Wiki 页面，写入 frontmatter，更新 index.md。"""
-        subdir = _CATEGORY_DIRS[wiki_type].get(category, category)
-        cat_dir = _wiki_root(vault_path, wiki_type) / subdir
-        cat_dir.mkdir(parents=True, exist_ok=True)
-        path = cat_dir / f"{slug}.md"
+        if category == "overview":
+            path = _wiki_root(vault_path, wiki_type) / f"{slug}.md"
+            subdir = ""
+            path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            subdir = _CATEGORY_DIRS[wiki_type].get(category, category)
+            cat_dir = _wiki_root(vault_path, wiki_type) / subdir
+            cat_dir.mkdir(parents=True, exist_ok=True)
+            path = cat_dir / f"{slug}.md"
 
         now = date.today().isoformat()
         created = now
@@ -218,7 +343,7 @@ class WikiStore:
         WikiStore.append_log(
             vault_path, wiki_type,
             "保存页面",
-            f"[[{subdir}/{slug}]] — {title}",
+            f"[[{f'{subdir}/' if subdir else ''}{slug}]] — {title}",
         )
 
         return {
@@ -287,8 +412,9 @@ class WikiStore:
         seen_edges: set[tuple[str, str]] = set()
 
         for page in pages:
-            full = WikiStore.get_page(vault_path, wiki_type, page["slug"])
-            content = full.get("content", "") if full else ""
+            path = _page_path(vault_path, wiki_type, page["slug"])
+            post = _load_post(path) if path else None
+            content = post.content if post else ""
             links = _WIKILINK_RE.findall(content)
             link_count = len(links)
 
@@ -300,8 +426,7 @@ class WikiStore:
             })
 
             for raw_link in links:
-                target_raw = raw_link.split("|")[0].strip()
-                target_slug = target_raw.split("/")[-1].strip()
+                target_slug = _wikilink_target_slug(raw_link)
                 if not target_slug:
                     continue
                 if target_slug in slug_set and target_slug != page["slug"]:
@@ -324,13 +449,13 @@ class WikiStore:
         for page in WikiStore.list_pages(vault_path, wiki_type):
             if page["slug"] == slug:
                 continue
-            full = WikiStore.get_page(vault_path, wiki_type, page["slug"])
-            if not full:
+            path = _page_path(vault_path, wiki_type, page["slug"])
+            post = _load_post(path) if path else None
+            if not post:
                 continue
-            content = full.get("content", "")
+            content = post.content
             for raw_link in _WIKILINK_RE.findall(content):
-                target_raw = raw_link.split("|")[0].strip()
-                target_slug = target_raw.split("/")[-1].strip()
+                target_slug = _wikilink_target_slug(raw_link)
                 if target_slug == slug:
                     backlinks.append({
                         "slug": page["slug"],
@@ -373,13 +498,16 @@ class WikiStore:
 
         wiki_label = "情报库" if wiki_type == "intel" else "文献库"
         category_labels: dict[str, str] = {
+            "overview": "总览",
+            "collection": "文件夹 VKI",
             "entity": "实体",
             "concept": "概念",
             "paper": "论文",
             "topic": "主题",
         }
 
-        by_category: dict[str, list[dict]] = {k: [] for k in _CATEGORY_DIRS[wiki_type]}
+        by_category: dict[str, list[dict]] = {"overview": []}
+        by_category.update({k: [] for k in _CATEGORY_DIRS[wiki_type]})
         for page in WikiStore.list_pages(vault_path, wiki_type):
             cat = page.get("category", "")
             if cat in by_category:
@@ -406,14 +534,15 @@ class WikiStore:
 
         for cat_key, cat_pages in by_category.items():
             label = category_labels.get(cat_key, cat_key)
-            subdir = _CATEGORY_DIRS[wiki_type][cat_key]
+            subdir = "" if cat_key == "overview" else _CATEGORY_DIRS[wiki_type][cat_key]
             lines.append(f"## {label}（{len(cat_pages)}）")
             lines.append("")
             if cat_pages:
                 for p in sorted(cat_pages, key=lambda x: x["title"]):
                     tags_str = " ".join(f"`{t}`" for t in p.get("tags", [])[:3])
                     summary = p.get("summary", "")[:60]
-                    lines.append(f"- [[{subdir}/{p['slug']}|{p['title']}]] {tags_str}")
+                    link_target = f"{subdir}/{p['slug']}" if subdir else p["slug"]
+                    lines.append(f"- [[{link_target}|{p['title']}]] {tags_str}")
                     if summary:
                         lines.append(f"  {summary}")
             else:
@@ -434,7 +563,24 @@ class WikiStore:
             count = len(WikiStore.list_pages(vault_path, wiki_type, category=cat_key))
             stats[cat_key] = count
             total += count
-        return {"total": total, "by_category": stats, "wiki_type": wiki_type}
+        overview_count = len(WikiStore.list_pages(vault_path, wiki_type, category="overview"))
+        if overview_count:
+            stats["overview"] = overview_count
+            total += overview_count
+
+        pages = WikiStore.list_pages(vault_path, wiki_type)
+        recent_pages = sorted(
+            pages,
+            key=lambda page: page.get("updated") or page.get("created") or "",
+            reverse=True,
+        )[:5]
+
+        return {
+            "total": total,
+            "by_category": stats,
+            "wiki_type": wiki_type,
+            "recent_pages": recent_pages,
+        }
 
     # ── 读取 index 内容 ────────────────────────────────────────────
 

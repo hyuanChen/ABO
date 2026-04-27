@@ -6,6 +6,7 @@ import { Clock, RefreshCw, Hash, Settings, AlertCircle } from "lucide-react";
 import { api } from "../core/api";
 import { filterModulesForManagement } from "../core/moduleVisibility";
 import { useStore } from "../core/store";
+import LazyKeywordPreferencesSection from "./LazyKeywordPreferencesSection";
 import ToggleSwitch from "./ToggleSwitch";
 import { ModuleDetailModal } from "../modules/modules/ModuleDetailModal";
 import { EMPTY_MODULE_USAGE_METRICS } from "../modules/modules/moduleManagementShared";
@@ -29,13 +30,15 @@ const STATUS_DOT: Record<string, string> = {
 };
 
 function scheduleLabel(schedule: string): string {
-  if (schedule === "0 8 * * *") return "每天 8:00";
-  if (schedule === "0 9 * * *") return "每天 9:00";
-  if (schedule === "0 10 * * *") return "每天 10:00";
-  if (schedule === "0 11 * * *") return "每天 11:00";
-  if (schedule === "0 12 * * *") return "每天 12:00";
-  if (schedule === "0 13 * * *") return "每天 13:00";
   if (schedule.startsWith("*/5")) return "每5分钟";
+  const cronMatch = /^(\d{1,2}) (\d{1,2}) \* \* \*$/.exec(schedule.trim());
+  if (cronMatch) {
+    const minute = Number(cronMatch[1]);
+    const hour = Number(cronMatch[2]);
+    if (minute >= 0 && minute <= 59 && hour >= 0 && hour <= 23) {
+      return `每天 ${hour}:${minute.toString().padStart(2, "0")}`;
+    }
+  }
   return schedule;
 }
 
@@ -43,7 +46,7 @@ export default function ModuleConfigPanel() {
   const [modules, setModules] = useState<ModuleConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedModule, setSelectedModule] = useState<ModuleConfig | null>(null);
-  const { addToast } = useStore();
+  const { addToast, setActiveTab, setModuleToConfigure } = useStore();
 
   useEffect(() => { loadModules(); }, []);
 
@@ -59,7 +62,7 @@ export default function ModuleConfigPanel() {
         setModules(data.modules.map((m: any) => ({
           id: m.id, name: m.name, description: "",
           icon: m.icon || "", status: m.enabled ? "active" as const : "paused" as const,
-          schedule: m.schedule || "0 10 * * *",
+          schedule: m.schedule || "0 9 * * *",
           lastRun: null, nextRun: m.next_run || null,
           stats: { totalCards: 0, thisWeek: 0, successRate: 100, errorCount: 0 },
           config: { keywords: [], maxResults: 50 },
@@ -92,6 +95,11 @@ export default function ModuleConfigPanel() {
     setModules(prev => prev.map(m => m.id === updatedModule.id ? updatedModule : m));
     setSelectedModule(null);
     loadModules();
+  }
+
+  function openModuleConfig(moduleId: string) {
+    setActiveTab("modules");
+    setModuleToConfigure(moduleId);
   }
 
   if (loading) {
@@ -142,7 +150,7 @@ export default function ModuleConfigPanel() {
           return (
             <div
               key={mod.id}
-              onClick={() => setSelectedModule(mod)}
+              onClick={() => openModuleConfig(mod.id)}
               style={{
                 display: "flex", alignItems: "center", gap: "10px",
                 padding: "10px 12px", borderRadius: "10px",
@@ -214,13 +222,41 @@ export default function ModuleConfigPanel() {
                   size="sm"
                 />
               </div>
-              <Settings style={{
-                width: "13px", height: "13px", color: "var(--text-light)",
-                flexShrink: 0,
-              }} />
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openModuleConfig(mod.id);
+                }}
+                title="打开详细配置"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: "24px",
+                  height: "24px",
+                  borderRadius: "999px",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-app)",
+                  color: "var(--text-light)",
+                  flexShrink: 0,
+                  cursor: "pointer",
+                }}
+              >
+                <Settings style={{
+                  width: "13px", height: "13px",
+                  flexShrink: 0,
+                }} />
+              </button>
             </div>
           );
         })}
+
+        <LazyKeywordPreferencesSection
+          title="偏好学习"
+          description="这里是偏好数据入口。点击后才会真正加载偏好关键词和排序信息。"
+          style={{ marginTop: "14px" }}
+        />
       </div>
 
       {/* Detail Modal */}
@@ -231,7 +267,7 @@ export default function ModuleConfigPanel() {
           initialTab="overview"
           onClose={() => setSelectedModule(null)}
           onUpdate={handleUpdateModule}
-          onOpenTool={() => setSelectedModule(null)}
+          onOpenTool={() => openModuleConfig(selectedModule.id)}
           onRun={() => { void api.post(`/api/modules/${selectedModule.id}/run`, {}).catch(() => {}); }}
           onToggle={() => { void toggleModule(selectedModule.id); }}
         />

@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
 import { api } from "../../core/api";
+import { isActionEnterKey } from "../../core/keyboard";
 import { useToast } from "../../components/Toast";
 import { Search as SearchIcon } from "lucide-react";
 import { CookieGuide } from "../../components/ConfigHelp";
@@ -222,7 +223,12 @@ export function ZhihuTool() {
                 type="text"
                 value={keyword}
                 onChange={(e) => setKeyword(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                onKeyDown={(e) => {
+                  if (isActionEnterKey(e)) {
+                    e.preventDefault();
+                    handleSearch();
+                  }
+                }}
                 placeholder="输入关键词搜索知乎..."
                 className="w-full px-4 py-3 pl-11 bg-slate-800/50 border border-slate-700 rounded-lg text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
               />

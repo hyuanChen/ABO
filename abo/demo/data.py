@@ -648,6 +648,86 @@ def get_demo_engagement() -> dict:
     }
 
 
+def get_demo_intelligence_rhythm() -> dict:
+    return {
+        "windowDays": 14,
+        "recentFeedCount": 46,
+        "recentInteractionCount": 18,
+        "activeDays": 9,
+        "latestSignalDate": _today(),
+        "cadenceLabel": "工作日推进型",
+        "rhythmSource": "hybrid",
+        "summary": "最近 14 天，你的节奏更像「工作日推进型」，主题重心偏向「读博」，论文主要落在 Computer Vision and Pattern Recognition，推送和操作高峰在 08:00-10:00。",
+        "peakWindow": {
+            "label": "08:00-10:00",
+            "startHour": 8,
+            "endHour": 10,
+            "interactionCount": 6,
+            "feedCount": 9,
+        },
+        "feedMix": [
+            {"label": "arXiv", "count": 18, "share": 0.391, "delta": 6, "examples": ["RT-2", "Open X-Embodiment"]},
+            {"label": "小红书", "count": 11, "share": 0.239, "delta": 3, "examples": ["读博第四年，我终于学会了和焦虑共处"]},
+            {"label": "Follow Up", "count": 8, "share": 0.174, "delta": 2, "examples": ["A Survey of Embodied AI"]},
+            {"label": "Bilibili", "count": 5, "share": 0.109, "delta": -1, "examples": ["具身智能：让 AI 拥有身体是什么体验"]},
+        ],
+        "themeMix": [
+            {"label": "读博", "count": 8, "share": 0.333, "delta": 2, "examples": ["读博第四年，我终于学会了和焦虑共处"]},
+            {"label": "数字游民", "count": 5, "share": 0.208, "delta": 1, "examples": ["数字游民一年后的真实感受：自由的代价"]},
+            {"label": "科研", "count": 4, "share": 0.167, "delta": 2, "examples": ["写在高强度 vibe/auto research 两个月后"]},
+        ],
+        "paperMix": [
+            {
+                "label": "Computer Vision and Pattern Recognition",
+                "count": 7,
+                "share": 0.438,
+                "delta": 3,
+                "examples": ["LMMs Meet Object-Centric Vision", "HDR Video Generation via Latent Alignment"],
+            },
+            {"label": "Robotics", "count": 4, "share": 0.25, "delta": 1, "examples": ["RT-2"]},
+            {"label": "Machine Learning", "count": 3, "share": 0.188, "delta": 0, "examples": ["ClawGUI"]},
+        ],
+        "preferences": [
+            {"keyword": "Agent", "score": 0.85, "count": 18, "sourceModules": ["arxiv-tracker", "zhihu-tracker"]},
+            {"keyword": "LLM", "score": 0.9, "count": 22, "sourceModules": ["arxiv-tracker", "zhihu-tracker"]},
+            {"keyword": "读博", "score": 0.6, "count": 8, "sourceModules": ["xiaohongshu-tracker"]},
+            {"keyword": "Transformer", "score": 0.8, "count": 15, "sourceModules": ["arxiv-tracker", "semantic-scholar-tracker"]},
+        ],
+        "hourlyRhythm": [
+            {
+                "hour": hour,
+                "interaction": 2 if hour in (8, 9, 14, 15) else (1 if hour in (10, 11, 21) else 0),
+                "feed": 4 if hour in (8, 9) else (2 if hour in (10, 14, 15) else (1 if hour in (20, 21) else 0)),
+                "combined": (
+                    2 if hour in (8, 9, 14, 15) else (1 if hour in (10, 11, 21) else 0)
+                ) + (
+                    4 if hour in (8, 9) else (2 if hour in (10, 14, 15) else (1 if hour in (20, 21) else 0))
+                ),
+            }
+            for hour in range(24)
+        ],
+        "weekdayRhythm": [
+            {"weekday": 0, "label": "周一", "interaction": 2, "feed": 6, "combined": 8},
+            {"weekday": 1, "label": "周二", "interaction": 3, "feed": 8, "combined": 11},
+            {"weekday": 2, "label": "周三", "interaction": 4, "feed": 9, "combined": 13},
+            {"weekday": 3, "label": "周四", "interaction": 3, "feed": 7, "combined": 10},
+            {"weekday": 4, "label": "周五", "interaction": 2, "feed": 6, "combined": 8},
+            {"weekday": 5, "label": "周六", "interaction": 1, "feed": 3, "combined": 4},
+            {"weekday": 6, "label": "周日", "interaction": 1, "feed": 2, "combined": 3},
+        ],
+        "highlights": [
+            {"title": "RT-2: Vision-Language-Action Models", "moduleId": "arxiv-tracker", "moduleLabel": "arXiv", "detail": "Robotics", "createdAt": f"{_today()}T08:15:00"},
+            {"title": "读博第四年，我终于学会了和焦虑共处", "moduleId": "xiaohongshu-tracker", "moduleLabel": "小红书", "detail": "读博", "createdAt": f"{_today()}T09:05:00"},
+            {"title": "A Survey of Embodied AI", "moduleId": "semantic-scholar-tracker", "moduleLabel": "Follow Up", "detail": "Follow Up 追踪", "createdAt": f"{_today()}T10:20:00"},
+        ],
+        "suggestions": [
+            {"kind": "rhythm", "title": "上午适合做判断题", "detail": "你的高峰靠前，适合把需要筛选和判断的情报放在上午，把轻量浏览和回顾留给下午或晚上。"},
+            {"kind": "papers", "title": "CV 最近占比最高", "detail": "最近窗口里 CV 论文明显偏多，可以继续深挖，同时给 Robotics 留一个交叉补充窗口。"},
+            {"kind": "theme", "title": "最近生活信号集中在「读博」", "detail": "建议把这类内容分成方法收藏、情绪提示、待执行动作三层，不要让所有状态都堆在同一个标签里。"},
+        ],
+    }
+
+
 # ── Modules Dashboard ───────────────────────────────────────────
 
 def get_demo_modules_dashboard() -> dict:
@@ -657,7 +737,7 @@ def get_demo_modules_dashboard() -> dict:
         {
             "id": "arxiv-tracker", "name": "arXiv 论文追踪",
             "description": "追踪 arXiv 上符合关键词的最新论文",
-            "icon": "book-open", "status": "active", "schedule": "0 8 * * *",
+            "icon": "book-open", "status": "active", "schedule": "0 9 * * *",
             "last_run": (now - timedelta(hours=3)).isoformat(),
             "next_run": (now + timedelta(hours=5)).isoformat(),
             "stats": {"total_cards": 85, "this_week": 10, "success_rate": 100.0, "last_error": None, "error_count": 0},
@@ -667,7 +747,7 @@ def get_demo_modules_dashboard() -> dict:
         {
             "id": "semantic-scholar-tracker", "name": "Semantic Scholar 追踪",
             "description": "追踪 Semantic Scholar 上的最新研究",
-            "icon": "graduation-cap", "status": "active", "schedule": "0 10 * * *",
+            "icon": "graduation-cap", "status": "active", "schedule": "0 9 * * *",
             "last_run": (now - timedelta(hours=1)).isoformat(),
             "next_run": (now + timedelta(hours=7)).isoformat(),
             "stats": {"total_cards": 52, "this_week": 6, "success_rate": 100.0, "last_error": None, "error_count": 0},
@@ -677,7 +757,7 @@ def get_demo_modules_dashboard() -> dict:
         {
             "id": "xiaohongshu-tracker", "name": "小红书追踪",
             "description": "追踪小红书上的相关内容",
-            "icon": "book-heart", "status": "active", "schedule": "0 10 * * *",
+            "icon": "book-heart", "status": "active", "schedule": "30 8 * * *",
             "last_run": (now - timedelta(hours=1)).isoformat(),
             "next_run": (now + timedelta(hours=7)).isoformat(),
             "stats": {"total_cards": 38, "this_week": 8, "success_rate": 95.0, "last_error": None, "error_count": 0},
@@ -687,7 +767,7 @@ def get_demo_modules_dashboard() -> dict:
         {
             "id": "bilibili-tracker", "name": "哔哩哔哩追踪",
             "description": "追踪 B站 上的相关视频",
-            "icon": "tv", "status": "active", "schedule": "0 11 * * *",
+            "icon": "tv", "status": "active", "schedule": "30 8 * * *",
             "last_run": (now - timedelta(hours=2)).isoformat(),
             "next_run": (now + timedelta(hours=6)).isoformat(),
             "stats": {"total_cards": 30, "this_week": 8, "success_rate": 100.0, "last_error": None, "error_count": 0},
@@ -697,7 +777,7 @@ def get_demo_modules_dashboard() -> dict:
         {
             "id": "xiaoyuzhou-tracker", "name": "小宇宙追踪",
             "description": "追踪小宇宙播客",
-            "icon": "podcast", "status": "active", "schedule": "0 10 * * *",
+            "icon": "podcast", "status": "active", "schedule": "0 9 * * *",
             "last_run": (now - timedelta(hours=1)).isoformat(),
             "next_run": (now + timedelta(hours=7)).isoformat(),
             "stats": {"total_cards": 12, "this_week": 6, "success_rate": 100.0, "last_error": None, "error_count": 0},
@@ -707,7 +787,7 @@ def get_demo_modules_dashboard() -> dict:
         {
             "id": "zhihu-tracker", "name": "知乎追踪",
             "description": "追踪知乎上的相关内容",
-            "icon": "help-circle", "status": "active", "schedule": "0 13 * * *",
+            "icon": "help-circle", "status": "active", "schedule": "0 9 * * *",
             "last_run": (now - timedelta(hours=4)).isoformat(),
             "next_run": (now + timedelta(hours=4)).isoformat(),
             "stats": {"total_cards": 24, "this_week": 8, "success_rate": 100.0, "last_error": None, "error_count": 0},

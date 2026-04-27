@@ -1,0 +1,4 @@
+interface:
+  display_name: "Paper Follow-up Mentor"
+  short_description: "Cross-link papers into concrete research guidance"
+  default_prompt: "Use $paper-followup-mentor to identify the source paper, map cross-paper follow-up relations, write a machine-readable relation manifest, update real Obsidian backlinks across the paper notes, analyze each paper's challenge and technical insight, and propose 20 concrete research ideas sampled from the corpus insights."

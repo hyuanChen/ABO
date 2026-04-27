@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../core/api";
+import { isComposingKeyboardEvent } from "../core/keyboard";
 import { useStore, AppConfig } from "../core/store";
 import { BookOpen } from "lucide-react";
 
@@ -55,6 +56,11 @@ export default function SetupWizard() {
               type="text"
               value={path}
               onChange={(e) => setPath(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && isComposingKeyboardEvent(e)) {
+                  e.preventDefault();
+                }
+              }}
               placeholder="~/Documents/MyVault"
               className="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 transition-colors duration-150"
             />

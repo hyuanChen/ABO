@@ -20,7 +20,7 @@ class XiaoyuzhouTracker(Module):
 
     id = "xiaoyuzhou-tracker"
     name = "小宇宙"
-    schedule = "0 10 * * *"  # Daily at 10 AM
+    schedule = "0 9 * * *"  # Daily at 9 AM
     icon = "headphones"
     output = ["obsidian", "ui"]
     subscription_types = [

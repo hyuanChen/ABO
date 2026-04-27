@@ -3,9 +3,12 @@
 
 import asyncio
 import json
-import websockets
 import requests
 import uuid
+import pytest
+import websockets
+
+pytestmark = pytest.mark.skip(reason="manual websocket integration script, not part of automated pytest suite")
 
 BASE_URL = "http://127.0.0.1:8765"
 WS_URL = "ws://127.0.0.1:8765"

@@ -17,6 +17,7 @@ import {
   isModuleHiddenFromManagement,
 } from "../../core/moduleVisibility";
 import { useStore, FeedCard } from "../../core/store";
+import LazyKeywordPreferencesSection from "../../components/LazyKeywordPreferencesSection";
 import { ModuleCard } from "./ModuleCard";
 import { ModuleDetailModal } from "./ModuleDetailModal";
 import type { ModuleConfig, ModuleDashboard, ModuleStatus } from "../../types/module";
@@ -520,38 +521,45 @@ export function ModuleManagementPanel() {
       </div>
 
       <div style={{ flex: 1, overflowY: "auto", padding: "0 28px 28px" }}>
-        {filteredModules.length === 0 ? (
-          <CenteredState
-            icon={<Settings style={{ width: "42px", height: "42px", color: "var(--text-muted)", opacity: 0.35 }} />}
-            title={searchQuery ? "没有匹配的模块" : "当前筛选下没有模块"}
-            description={searchQuery ? "换个关键词再试一次。" : "调整筛选，或者去工具页补齐监控设置。"}
+        <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+          {filteredModules.length === 0 ? (
+            <CenteredState
+              icon={<Settings style={{ width: "42px", height: "42px", color: "var(--text-muted)", opacity: 0.35 }} />}
+              title={searchQuery ? "没有匹配的模块" : "当前筛选下没有模块"}
+              description={searchQuery ? "换个关键词再试一次。" : "调整筛选，或者去工具页补齐监控设置。"}
+            />
+          ) : (
+            <div
+              style={
+                viewMode === "grid"
+                  ? { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: "16px" }
+                  : { display: "flex", flexDirection: "column", gap: "12px" }
+              }
+            >
+              {filteredModules.map((module) => (
+                <ModuleCard
+                  key={module.id}
+                  module={module}
+                  usage={usageByModule[module.id] || EMPTY_MODULE_USAGE_METRICS}
+                  onOpenHistory={() => openModuleModal(module, "history")}
+                  onOpenOverview={() => openModuleModal(module, "overview")}
+                  onOpenTool={() => openModuleTool(module.id)}
+                  onRun={() => {
+                    if (!runningModules.has(module.id)) {
+                      void handleRunModule(module.id);
+                    }
+                  }}
+                  onToggle={() => void handleToggleModule(module.id)}
+                />
+              ))}
+            </div>
+          )}
+
+          <LazyKeywordPreferencesSection
+            title="偏好学习"
+            description="这里展示正向偏好关键词。点击后才会开始加载数据，不影响模块管理首屏。"
           />
-        ) : (
-          <div
-            style={
-              viewMode === "grid"
-                ? { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: "16px" }
-                : { display: "flex", flexDirection: "column", gap: "12px" }
-            }
-          >
-            {filteredModules.map((module) => (
-              <ModuleCard
-                key={module.id}
-                module={module}
-                usage={usageByModule[module.id] || EMPTY_MODULE_USAGE_METRICS}
-                onOpenHistory={() => openModuleModal(module, "history")}
-                onOpenOverview={() => openModuleModal(module, "overview")}
-                onOpenTool={() => openModuleTool(module.id)}
-                onRun={() => {
-                  if (!runningModules.has(module.id)) {
-                    void handleRunModule(module.id);
-                  }
-                }}
-                onToggle={() => void handleToggleModule(module.id)}
-              />
-            ))}
-          </div>
-        )}
+        </div>
       </div>
 
       {selectedModule && (

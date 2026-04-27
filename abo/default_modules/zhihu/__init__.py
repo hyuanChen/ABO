@@ -20,7 +20,7 @@ class ZhihuTracker(Module):
 
     id = "zhihu-tracker"
     name = "知乎"
-    schedule = "0 13 * * *"  # Daily at 1 PM
+    schedule = "0 9 * * *"  # Daily at 9 AM
     icon = "help-circle"
     output = ["obsidian", "ui"]
     subscription_types = [

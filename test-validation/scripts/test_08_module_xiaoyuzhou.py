@@ -19,7 +19,7 @@ class TestXiaoyuzhouTrackerCreation:
 
         assert tracker.id == "xiaoyuzhou-tracker"
         assert tracker.name == "小宇宙"
-        assert tracker.schedule == "0 10 * * *"
+        assert tracker.schedule == "0 9 * * *"
         assert tracker.icon == "headphones"
 
     def test_tracker_has_subscription_types(self):

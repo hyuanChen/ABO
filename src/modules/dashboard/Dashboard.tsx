@@ -1,7 +1,7 @@
 // src/modules/dashboard/Dashboard.tsx
 // Redesigned dashboard: Today Snapshot → Wellness Trend → Engagement Depth → Research Focus → Activity Trend
 import { useEffect, useState } from "react";
-import { BarChart3, Sunrise, Activity, BookOpen, Compass, TrendingUp } from "lucide-react";
+import { BarChart3, Sunrise, Activity, BookOpen, Compass, TrendingUp, RadioTower } from "lucide-react";
 import { api } from "../../core/api";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
 import TodaySnapshot from "./TodaySnapshot";
@@ -9,6 +9,7 @@ import WellnessTrend from "./WellnessTrend";
 import EngagementDepth from "./EngagementDepth";
 import ResearchFocus from "./ResearchFocus";
 import ActivityChart from "./ActivityChart";
+import IntelligenceRhythm, { type IntelligenceRhythmData } from "./IntelligenceRhythm";
 
 // ── Types ────────────────────────────────────────────────────────
 
@@ -135,6 +136,7 @@ export default function Dashboard() {
   const [wellness, setWellness] = useState<WellnessData | null>(null);
   const [engagement, setEngagement] = useState<EngagementData | null>(null);
   const [keywords, setKeywords] = useState<KeywordPref[]>([]);
+  const [intelligenceRhythm, setIntelligenceRhythm] = useState<IntelligenceRhythmData | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -143,18 +145,20 @@ export default function Dashboard() {
 
   async function loadAll() {
     try {
-      const [ov, td, wl, eg, kw] = await Promise.all([
+      const [ov, td, wl, eg, kw, ir] = await Promise.all([
         api.get<OverviewData>("/api/insights/overview"),
         api.get<TodayData>("/api/insights/today"),
         api.get<WellnessData>("/api/insights/wellness"),
         api.get<EngagementData>("/api/insights/engagement"),
         api.get<{ keywords: KeywordPref[] }>("/api/insights/preferences-evolution"),
+        api.get<IntelligenceRhythmData>("/api/insights/intelligence-rhythm"),
       ]);
       setOverview(ov);
       setToday(td);
       setWellness(wl);
       setEngagement(eg);
       setKeywords(kw.keywords);
+      setIntelligenceRhythm(ir);
     } catch (error) {
       console.error("Failed to load dashboard data:", error);
     } finally {
@@ -241,6 +245,15 @@ export default function Dashboard() {
               icon={<Sunrise style={{ width: "18px", height: "18px", color: "#F5C88C" }} />}
             >
               <TodaySnapshot data={today} />
+            </Card>
+          )}
+
+          {intelligenceRhythm && (
+            <Card
+              title="Intelligence Mirror"
+              icon={<RadioTower style={{ width: "18px", height: "18px", color: "#2F7F73" }} />}
+            >
+              <IntelligenceRhythm data={intelligenceRhythm} />
             </Card>
           )}
 

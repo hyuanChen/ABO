@@ -1,0 +1,4 @@
+interface:
+  display_name: "导师式论文跟进（中文）"
+  short_description: "中文综述、交叉链接与具体选题"
+  default_prompt: "使用 $mentor-zh 基于当前论文文件夹，先讲前景、技术进步、未解决问题和 insight，再输出跨论文链接图、机器可读关系清单，更新真正的 Obsidian 双链，逐篇做 challenge 分析，并给出 20 个基于语料 insight 自由采样的具体 idea 及筛选。"

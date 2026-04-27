@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class StreamEvent:
     """流式事件"""
-    type: str  # start, content, tool_call, error, finish
+    type: str  # start, status, content, tool_call, error, finish
     data: str
     msg_id: str
     metadata: Optional[Dict[str, Any]] = None
@@ -24,12 +24,22 @@ class StreamEvent:
 class BaseRunner(ABC):
     """CLI Runner 抽象基类"""
 
-    def __init__(self, cli_info: 'CliInfo', session_id: str, workspace: str = ""):
+    def __init__(
+        self,
+        cli_info: 'CliInfo',
+        session_id: str,
+        workspace: str = "",
+        resume_session_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+    ):
         self.cli_info = cli_info
         self.session_id = session_id
         self.workspace = workspace or os.getcwd()
+        self.resume_session_id = resume_session_id
+        self.conversation_id = conversation_id
         self.process: Optional[asyncio.subprocess.Process] = None
         self._closed = False
+        self.last_session_handle: Optional[str] = resume_session_id
 
     @abstractmethod
     async def send_message(self, message: str, msg_id: str,
@@ -175,6 +185,315 @@ class RawRunner(BaseRunner):
             raise
         finally:
             await self.close()
+
+
+class CodexRunner(BaseRunner):
+    """Codex runner using JSONL events and native session resume."""
+
+    def _exec_options(self) -> list[str]:
+        raw_args = set(getattr(self.cli_info, 'acp_args', []) or [])
+        options = ["--json"]
+        if "--full-auto" in raw_args:
+            options.append("--full-auto")
+        if "--dangerously-bypass-approvals-and-sandbox" in raw_args:
+            options.append("--dangerously-bypass-approvals-and-sandbox")
+        if "--skip-git-repo-check" in raw_args:
+            options.append("--skip-git-repo-check")
+        if "--ignore-user-config" in raw_args:
+            options.append("--ignore-user-config")
+        if "--ignore-rules" in raw_args:
+            options.append("--ignore-rules")
+        return options
+
+    def _build_command(self) -> list[str]:
+        options = self._exec_options()
+        if self.resume_session_id:
+            return [
+                self.cli_info.command,
+                "exec",
+                "resume",
+                *options,
+                self.resume_session_id,
+            ]
+        return [self.cli_info.command, "exec", *options]
+
+    async def send_message(
+        self,
+        message: str,
+        msg_id: str,
+        on_event: Callable[[StreamEvent], None],
+    ) -> None:
+        await on_event(StreamEvent(type="start", data="", msg_id=msg_id))
+        await on_event(
+            StreamEvent(
+                type="status",
+                data="正在启动 Codex 工作机",
+                msg_id=msg_id,
+                metadata={"phase": "launch", "label": "正在启动 Codex 工作机"},
+            )
+        )
+
+        finish_sent = False
+        total_length = 0
+
+        try:
+            cmd = self._build_command()
+            logger.info("Starting Codex process: %s", " ".join(cmd[:4]))
+            self.process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self.workspace,
+                env=self._get_env(),
+            )
+            await on_event(
+                StreamEvent(
+                    type="status",
+                    data="工作机已连接，正在发送任务",
+                    msg_id=msg_id,
+                    metadata={"phase": "dispatch", "label": "工作机已连接，正在发送任务"},
+                )
+            )
+
+            if self.process.stdin:
+                self.process.stdin.write(f"{message}\n".encode("utf-8"))
+                await self.process.stdin.drain()
+                self.process.stdin.close()
+                await on_event(
+                    StreamEvent(
+                        type="status",
+                        data="任务已送达，等待 Codex 响应",
+                        msg_id=msg_id,
+                        metadata={"phase": "waiting", "label": "任务已送达，等待 Codex 响应"},
+                    )
+                )
+
+            assert self.process.stdout
+            while True:
+                try:
+                    line = await asyncio.wait_for(self.process.stdout.readline(), timeout=90.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Codex read timeout")
+                    break
+
+                if not line:
+                    break
+
+                delta_length, finish_sent = await self._process_codex_line(
+                    line.decode("utf-8", errors="replace"),
+                    msg_id,
+                    on_event,
+                    finish_sent,
+                )
+                total_length += delta_length
+
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Codex process didn't exit, forcing kill")
+                self.process.kill()
+                await self.process.wait()
+
+            assert self.process.stderr
+            stderr_data = await self.process.stderr.read()
+            if stderr_data:
+                logger.debug("Codex stderr: %s", stderr_data.decode("utf-8", errors="replace")[:400])
+
+            if not finish_sent:
+                metadata = {"total_length": total_length}
+                if self.last_session_handle:
+                    metadata["thread_id"] = self.last_session_handle
+                await on_event(
+                    StreamEvent(
+                        type="finish",
+                        data="",
+                        msg_id=msg_id,
+                        metadata=metadata,
+                    )
+                )
+
+        except Exception as e:
+            logger.exception("Codex runner error")
+            await on_event(StreamEvent(type="error", data=str(e), msg_id=msg_id))
+            raise
+        finally:
+            await self.close()
+
+    async def _process_codex_line(
+        self,
+        line: str,
+        msg_id: str,
+        on_event: Callable[[StreamEvent], None],
+        finish_sent: bool,
+    ) -> tuple[int, bool]:
+        text = line.strip()
+        if not text or text == "Reading additional input from stdin...":
+            return 0, finish_sent
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            await on_event(StreamEvent(type="content", data=line, msg_id=msg_id))
+            return len(line), finish_sent
+
+        event_type = payload.get("type", "")
+        if event_type == "thread.started":
+            self.last_session_handle = payload.get("thread_id") or self.last_session_handle
+            await on_event(
+                StreamEvent(
+                    type="status",
+                    data="已恢复 Codex 会话",
+                    msg_id=msg_id,
+                    metadata={
+                        "phase": "session",
+                        "label": "已恢复 Codex 会话",
+                        "thread_id": self.last_session_handle,
+                    },
+                )
+            )
+            return 0, finish_sent
+
+        if event_type == "turn.started":
+            await on_event(
+                StreamEvent(
+                    type="status",
+                    data="Codex 正在思考",
+                    msg_id=msg_id,
+                    metadata={"phase": "thinking", "label": "Codex 正在思考"},
+                )
+            )
+            return 0, finish_sent
+
+        if event_type == "turn.cancelled":
+            await on_event(
+                StreamEvent(
+                    type="status",
+                    data="本轮已取消",
+                    msg_id=msg_id,
+                    metadata={"phase": "cancelled", "label": "本轮已取消"},
+                )
+            )
+            return 0, finish_sent
+
+        if event_type == "item.started":
+            item = payload.get("item") or {}
+            if item.get("type") == "command_execution":
+                command = item.get("command", "")
+                tool_metadata = dict(item)
+                tool_metadata.update(
+                    {
+                        "phase": "tool",
+                        "label": "正在执行命令",
+                        "detail": command,
+                        "command": command,
+                    }
+                )
+                await on_event(
+                    StreamEvent(
+                        type="status",
+                        data="正在执行命令",
+                        msg_id=msg_id,
+                        metadata={
+                            "phase": "tool",
+                            "label": "正在执行命令",
+                            "detail": command,
+                            "command": command,
+                        },
+                    )
+                )
+                await on_event(
+                    StreamEvent(
+                        type="tool_call",
+                        data=command,
+                        msg_id=msg_id,
+                        metadata=tool_metadata,
+                    )
+                )
+            return 0, finish_sent
+
+        if event_type == "item.completed":
+            item = payload.get("item") or {}
+            item_type = item.get("type", "")
+            if item_type == "agent_message":
+                agent_text = item.get("text", "")
+                if agent_text:
+                    await on_event(
+                        StreamEvent(
+                            type="status",
+                            data="正在整理回复",
+                            msg_id=msg_id,
+                            metadata={"phase": "responding", "label": "正在整理回复"},
+                        )
+                    )
+                    metadata = {"thread_id": self.last_session_handle} if self.last_session_handle else None
+                    await on_event(
+                        StreamEvent(
+                            type="content",
+                            data=agent_text,
+                            msg_id=msg_id,
+                            metadata=metadata,
+                        )
+                    )
+                    return len(agent_text), finish_sent
+                return 0, finish_sent
+
+            if item_type == "command_execution":
+                command = item.get("command", "")
+                tool_metadata = dict(item)
+                tool_metadata.update(
+                    {
+                        "phase": "tool_done",
+                        "label": "命令执行完成",
+                        "detail": command,
+                        "command": command,
+                    }
+                )
+                await on_event(
+                    StreamEvent(
+                        type="status",
+                        data="命令执行完成",
+                        msg_id=msg_id,
+                        metadata={
+                            "phase": "tool_done",
+                            "label": "命令执行完成",
+                            "detail": command,
+                            "command": command,
+                        },
+                    )
+                )
+                await on_event(
+                    StreamEvent(
+                        type="tool_call",
+                        data=item.get("aggregated_output", ""),
+                        msg_id=msg_id,
+                        metadata=tool_metadata,
+                    )
+                )
+            return 0, finish_sent
+
+        if event_type == "turn.completed":
+            metadata = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+            metadata = dict(metadata)
+            metadata["total_length"] = metadata.get("total_length", 0)
+            if self.last_session_handle:
+                metadata["thread_id"] = self.last_session_handle
+            await on_event(
+                StreamEvent(
+                    type="finish",
+                    data="",
+                    msg_id=msg_id,
+                    metadata=metadata,
+                )
+            )
+            return 0, True
+
+        if event_type == "error":
+            error_message = payload.get("message") or payload.get("error") or "Codex runner error"
+            await on_event(StreamEvent(type="error", data=str(error_message), msg_id=msg_id))
+            return 0, finish_sent
+
+        return 0, finish_sent
 
 
 class AcpRunner(BaseRunner):
@@ -408,8 +727,28 @@ class RunnerFactory:
     }
 
     @classmethod
-    def create(cls, cli_info: 'CliInfo', session_id: str,
-               workspace: str = "") -> BaseRunner:
+    def create(
+        cls,
+        cli_info: 'CliInfo',
+        session_id: str,
+        workspace: str = "",
+        resume_session_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+    ) -> BaseRunner:
         """创建对应协议的 Runner"""
+        if cli_info.id == "codex":
+            return CodexRunner(
+                cli_info,
+                session_id,
+                workspace,
+                resume_session_id=resume_session_id,
+                conversation_id=conversation_id,
+            )
         runner_class = cls.RUNNERS.get(cli_info.protocol, RawRunner)
-        return runner_class(cli_info, session_id, workspace)
+        return runner_class(
+            cli_info,
+            session_id,
+            workspace,
+            resume_session_id=resume_session_id,
+            conversation_id=conversation_id,
+        )

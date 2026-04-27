@@ -5,6 +5,7 @@
 import json
 from collections import Counter
 from datetime import datetime, timedelta, date
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -13,6 +14,7 @@ from ..config import is_demo_mode
 from ..demo.data import (
     get_demo_overview, get_demo_today, get_demo_wellness,
     get_demo_engagement, get_demo_preferences_evolution,
+    get_demo_intelligence_rhythm,
 )
 from ..store.cards import CardStore
 from ..preferences.engine import PreferenceEngine
@@ -129,6 +131,80 @@ class EngagementResponse(BaseModel):
     overall: EngagementCounts
     dailyTrend: List[DailyEngagement]
     weekComparison: WeekComparison
+
+
+# ── Intelligence Rhythm 模型 ─────────────────────────────────────
+
+class InsightBucket(BaseModel):
+    label: str
+    count: int
+    share: float
+    delta: int
+    examples: List[str]
+
+
+class PreferenceSignal(BaseModel):
+    keyword: str
+    score: float
+    count: int
+    sourceModules: List[str]
+
+
+class HourlyRhythmPoint(BaseModel):
+    hour: int
+    interaction: int
+    feed: int
+    combined: int
+
+
+class WeekdayRhythmPoint(BaseModel):
+    weekday: int
+    label: str
+    interaction: int
+    feed: int
+    combined: int
+
+
+class PeakWindow(BaseModel):
+    label: str
+    startHour: int
+    endHour: int
+    interactionCount: int
+    feedCount: int
+
+
+class InsightHighlight(BaseModel):
+    title: str
+    moduleId: str
+    moduleLabel: str
+    detail: str
+    createdAt: str
+
+
+class InsightSuggestion(BaseModel):
+    kind: str
+    title: str
+    detail: str
+
+
+class IntelligenceRhythmResponse(BaseModel):
+    windowDays: int
+    recentFeedCount: int
+    recentInteractionCount: int
+    activeDays: int
+    latestSignalDate: str
+    cadenceLabel: str
+    rhythmSource: str
+    summary: str
+    peakWindow: PeakWindow
+    feedMix: List[InsightBucket]
+    themeMix: List[InsightBucket]
+    paperMix: List[InsightBucket]
+    preferences: List[PreferenceSignal]
+    hourlyRhythm: List[HourlyRhythmPoint]
+    weekdayRhythm: List[WeekdayRhythmPoint]
+    highlights: List[InsightHighlight]
+    suggestions: List[InsightSuggestion]
 
 
 # ── 辅助函数 ──────────────────────────────────────────────────────
@@ -288,6 +364,468 @@ def _get_feedback_counts_for_period(card_store: CardStore, start_ts: float, end_
     )
 
 
+_MODULE_LABELS = {
+    "arxiv-tracker": "arXiv",
+    "semantic-scholar-tracker": "Follow Up",
+    "xiaohongshu-tracker": "小红书",
+    "bilibili-tracker": "Bilibili",
+    "xiaoyuzhou-tracker": "小宇宙",
+    "zhihu-tracker": "知乎",
+    "folder-monitor": "文件监控",
+}
+
+_WEEKDAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+_GENERIC_THEME_LABELS = {
+    "",
+    "其他",
+    "内容",
+    "笔记",
+    "动态",
+    "follow-up",
+    "s2-引用",
+    "关键词追踪",
+    "follow up 追踪",
+}
+
+
+def _safe_json_loads(value: Any, default: Any) -> Any:
+    if value in (None, ""):
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+def _safe_string_list(value: Any) -> list[str]:
+    raw = _safe_json_loads(value, value)
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+    return cleaned
+
+
+def _load_cards_for_period(card_store: CardStore, start_day: date, end_day: date) -> list[dict[str, Any]]:
+    start_ts = datetime.combine(start_day, datetime.min.time()).timestamp()
+    end_ts = datetime.combine(end_day, datetime.min.time()).timestamp()
+
+    with card_store._conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, module_id, title, tags, metadata, created_at, feedback
+            FROM cards
+            WHERE created_at >= ? AND created_at < ?
+            ORDER BY created_at DESC
+            """,
+            (start_ts, end_ts),
+        ).fetchall()
+
+    cards: list[dict[str, Any]] = []
+    for row in rows:
+        created_at = float(row[5] or 0)
+        cards.append(
+            {
+                "id": row[0],
+                "module_id": row[1] or "",
+                "title": row[2] or "",
+                "tags": _safe_string_list(row[3]),
+                "metadata": _safe_json_loads(row[4], {}),
+                "created_at": created_at,
+                "created_dt": datetime.fromtimestamp(created_at) if created_at else None,
+                "feedback": row[6] or "",
+            }
+        )
+    return cards
+
+
+def _load_recent_timelines(activity_tracker: ActivityTracker, days: int) -> list:
+    timelines = []
+    today = date.today()
+    for offset in range(days):
+        timeline = activity_tracker.get_timeline((today - timedelta(days=offset)).isoformat())
+        if timeline.activities:
+            timelines.append(timeline)
+    return timelines
+
+
+def _clean_theme_label(label: str) -> str:
+    text = label.strip()
+    if not text:
+        return ""
+    lowered = text.casefold()
+    if lowered in _GENERIC_THEME_LABELS:
+        return ""
+    return text
+
+
+def _extract_theme_labels(card: dict[str, Any]) -> list[str]:
+    metadata = card.get("metadata") or {}
+    labels: list[str] = []
+
+    for key in ("smart_group_labels", "paper_tracking_labels", "matched_keywords"):
+        labels.extend(_safe_string_list(metadata.get(key)))
+
+    for key in ("smart_group_label", "paper_tracking_label"):
+        value = str(metadata.get(key) or "").strip()
+        if value:
+            labels.append(value)
+
+    crawl_source = str(metadata.get("crawl_source") or "").strip()
+    if crawl_source.startswith("keyword:"):
+        labels.append(crawl_source.split(":", 1)[1].strip())
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        normalized = _clean_theme_label(label)
+        if not normalized:
+            continue
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(normalized)
+    return cleaned[:3]
+
+
+def _extract_paper_label(card: dict[str, Any]) -> str:
+    module_id = card.get("module_id") or ""
+    metadata = card.get("metadata") or {}
+    if module_id not in {"arxiv-tracker", "semantic-scholar-tracker"}:
+        return ""
+
+    for key in ("primary_category_name", "paper_tracking_label"):
+        value = str(metadata.get(key) or "").strip()
+        if value:
+            return value
+
+    for key in ("all_categories", "fields_of_study", "paper_tracking_labels"):
+        labels = _safe_string_list(metadata.get(key))
+        if labels:
+            return labels[0]
+
+    relationship = str(metadata.get("relationship_label") or "").strip()
+    if relationship:
+        return relationship
+
+    for tag in card.get("tags") or []:
+        if "." not in tag and _clean_theme_label(tag):
+            return tag
+    return ""
+
+
+def _build_bucket_pairs(
+    current_pairs: list[tuple[str, str]],
+    previous_labels: list[str],
+    limit: int = 5,
+) -> list[InsightBucket]:
+    current_counter = Counter(label for label, _ in current_pairs if label)
+    previous_counter = Counter(label for label in previous_labels if label)
+    if not current_counter:
+        return []
+
+    total = sum(current_counter.values()) or 1
+    examples_map: dict[str, list[str]] = {}
+    for label, title in current_pairs:
+        if not label or not title:
+            continue
+        bucket_examples = examples_map.setdefault(label, [])
+        if title not in bucket_examples and len(bucket_examples) < 2:
+            bucket_examples.append(title)
+
+    buckets: list[InsightBucket] = []
+    for label, count in current_counter.most_common(limit):
+        buckets.append(
+            InsightBucket(
+                label=label,
+                count=count,
+                share=round(count / total, 3),
+                delta=count - previous_counter.get(label, 0),
+                examples=examples_map.get(label, []),
+            )
+        )
+    return buckets
+
+
+def _load_keyword_preferences(limit: int = 6) -> list[PreferenceSignal]:
+    kw_path = Path.home() / ".abo" / "keyword_preferences.json"
+    if not kw_path.exists():
+        return []
+
+    try:
+        raw = json.loads(kw_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    signals: list[PreferenceSignal] = []
+    for keyword, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        score = float(value.get("score", 0) or 0)
+        count = int(value.get("count", 0) or 0)
+        source_modules = _safe_string_list(value.get("source_modules"))
+        signals.append(
+            PreferenceSignal(
+                keyword=str(keyword),
+                score=round(score, 3),
+                count=count,
+                sourceModules=source_modules,
+            )
+        )
+
+    signals.sort(key=lambda item: (item.score, item.count), reverse=True)
+    return [item for item in signals if item.score > 0][:limit]
+
+
+def _build_hourly_rhythm(recent_cards: list[dict[str, Any]], recent_timelines: list) -> list[HourlyRhythmPoint]:
+    interaction_counts = {hour: 0 for hour in range(24)}
+    feed_counts = {hour: 0 for hour in range(24)}
+
+    for card in recent_cards:
+        created_dt = card.get("created_dt")
+        if created_dt:
+            feed_counts[created_dt.hour] += 1
+
+    for timeline in recent_timelines:
+        for activity in timeline.activities:
+            try:
+                ts = datetime.fromisoformat(activity.timestamp)
+            except (TypeError, ValueError):
+                continue
+            interaction_counts[ts.hour] += 1
+
+    return [
+        HourlyRhythmPoint(
+            hour=hour,
+            interaction=interaction_counts[hour],
+            feed=feed_counts[hour],
+            combined=interaction_counts[hour] + feed_counts[hour],
+        )
+        for hour in range(24)
+    ]
+
+
+def _build_weekday_rhythm(recent_cards: list[dict[str, Any]], recent_timelines: list) -> list[WeekdayRhythmPoint]:
+    interaction_counts = {weekday: 0 for weekday in range(7)}
+    feed_counts = {weekday: 0 for weekday in range(7)}
+
+    for card in recent_cards:
+        created_dt = card.get("created_dt")
+        if created_dt:
+            feed_counts[created_dt.weekday()] += 1
+
+    for timeline in recent_timelines:
+        if not timeline.activities:
+            continue
+        try:
+            weekday = date.fromisoformat(timeline.date).weekday()
+        except ValueError:
+            continue
+        interaction_counts[weekday] += len(timeline.activities)
+
+    return [
+        WeekdayRhythmPoint(
+            weekday=weekday,
+            label=_WEEKDAY_LABELS[weekday],
+            interaction=interaction_counts[weekday],
+            feed=feed_counts[weekday],
+            combined=interaction_counts[weekday] + feed_counts[weekday],
+        )
+        for weekday in range(7)
+    ]
+
+
+def _build_peak_window(hourly_rhythm: list[HourlyRhythmPoint]) -> PeakWindow:
+    best_start = 0
+    best_total = -1
+    best_interaction = 0
+    best_feed = 0
+
+    for start_hour in range(24):
+        current = hourly_rhythm[start_hour]
+        next_point = hourly_rhythm[(start_hour + 1) % 24]
+        combined_total = current.combined + next_point.combined
+        if combined_total > best_total:
+            best_total = combined_total
+            best_start = start_hour
+            best_interaction = current.interaction + next_point.interaction
+            best_feed = current.feed + next_point.feed
+
+    end_hour = (best_start + 2) % 24
+    return PeakWindow(
+        label=f"{best_start:02d}:00-{end_hour:02d}:00",
+        startHour=best_start,
+        endHour=end_hour,
+        interactionCount=best_interaction,
+        feedCount=best_feed,
+    )
+
+
+def _determine_cadence_label(weekday_rhythm: list[WeekdayRhythmPoint], active_days: int, window_days: int) -> str:
+    total = sum(point.combined for point in weekday_rhythm)
+    if total == 0:
+        return "等待更多记录"
+    if active_days <= max(2, window_days // 5):
+        return "间歇冲刺型"
+
+    weekdays = sum(point.combined for point in weekday_rhythm[:5])
+    weekend = sum(point.combined for point in weekday_rhythm[5:])
+    midweek = sum(point.combined for point in weekday_rhythm[1:4])
+
+    if weekdays >= max(1, weekend * 2):
+        return "工作日推进型"
+    if weekend >= max(1, int(weekdays * 0.8)):
+        return "周末补课型"
+    if midweek >= total * 0.55:
+        return "周中爆发型"
+    return "均匀循环型"
+
+
+def _build_highlights(recent_cards: list[dict[str, Any]], limit: int = 6) -> list[InsightHighlight]:
+    highlights: list[InsightHighlight] = []
+    for card in recent_cards[:limit]:
+        theme_labels = _extract_theme_labels(card)
+        paper_label = _extract_paper_label(card)
+        detail = theme_labels[0] if theme_labels else (paper_label or "最近情报")
+        created_dt = card.get("created_dt")
+        highlights.append(
+            InsightHighlight(
+                title=card.get("title") or "",
+                moduleId=card.get("module_id") or "",
+                moduleLabel=_MODULE_LABELS.get(card.get("module_id") or "", card.get("module_id") or ""),
+                detail=detail,
+                createdAt=created_dt.isoformat() if created_dt else "",
+            )
+        )
+    return highlights
+
+
+def _build_summary(
+    window_days: int,
+    cadence_label: str,
+    peak_window: PeakWindow,
+    rhythm_source: str,
+    feed_mix: list[InsightBucket],
+    theme_mix: list[InsightBucket],
+    paper_mix: list[InsightBucket],
+) -> str:
+    primary_theme = theme_mix[0].label if theme_mix else ""
+    primary_module = feed_mix[0].label if feed_mix else "情报流"
+    primary_paper = paper_mix[0].label if paper_mix else ""
+    rhythm_phrase = {
+        "hybrid": "推送和操作",
+        "interaction": "操作行为",
+        "feed": "情报流入",
+        "none": "记录信号",
+    }.get(rhythm_source, "记录信号")
+
+    parts = [f"最近 {window_days} 天，你的节奏更像「{cadence_label}」"]
+    if primary_theme:
+        parts.append(f"主题重心偏向「{primary_theme}」")
+    else:
+        parts.append(f"内容来源以 {primary_module} 为主")
+    if primary_paper:
+        parts.append(f"论文主要落在 {primary_paper}")
+    if peak_window.interactionCount or peak_window.feedCount:
+        parts.append(f"{rhythm_phrase}高峰在 {peak_window.label}")
+    return "，".join(parts) + "。"
+
+
+def _build_suggestions(
+    *,
+    window_days: int,
+    cadence_label: str,
+    peak_window: PeakWindow,
+    rhythm_source: str,
+    recent_feed_count: int,
+    recent_interaction_count: int,
+    theme_mix: list[InsightBucket],
+    paper_mix: list[InsightBucket],
+) -> list[InsightSuggestion]:
+    suggestions: list[InsightSuggestion] = []
+
+    if recent_feed_count > 0 and recent_interaction_count <= max(2, recent_feed_count // 6):
+        suggestions.append(
+            InsightSuggestion(
+                kind="feedback",
+                title="反馈还不够密",
+                detail="最近情报进来得比你的反馈快很多。每轮至少标记几条 like/save/dislike，偏好画像才会更快贴近你这段时间的生活状态。",
+            )
+        )
+
+    if peak_window.interactionCount or peak_window.feedCount:
+        if peak_window.startHour >= 22 or peak_window.startHour < 2:
+            suggestions.append(
+                InsightSuggestion(
+                    kind="rhythm",
+                    title="夜间是高峰时段",
+                    detail="如果这是主动安排，可以保留；如果只是被动拖延，建议把第一轮论文筛读前移到白天，只把收藏和复盘留到晚上。",
+                )
+            )
+        elif 8 <= peak_window.startHour < 12:
+            suggestions.append(
+                InsightSuggestion(
+                    kind="rhythm",
+                    title="上午适合做判断题",
+                    detail="你的高峰靠前，适合把需要筛选和判断的情报放在上午，把轻量浏览和回顾留给下午或晚上。",
+                )
+            )
+
+    if paper_mix and paper_mix[0].share >= 0.45:
+        suggestions.append(
+            InsightSuggestion(
+                kind="papers",
+                title=f"{paper_mix[0].label} 最近占比最高",
+                detail=f"最近窗口里这类论文占到 {int(paper_mix[0].share * 100)}% 左右。可以继续深挖，同时给相邻方向留一次交叉补充，避免视角越来越窄。",
+            )
+        )
+
+    if theme_mix:
+        suggestions.append(
+            InsightSuggestion(
+                kind="theme",
+                title=f"最近生活信号集中在「{theme_mix[0].label}」",
+                detail="建议把这类内容分成方法收藏、情绪提示、待执行动作三层，不要让所有状态都堆在同一个标签里。",
+            )
+        )
+
+    if cadence_label == "间歇冲刺型":
+        suggestions.append(
+            InsightSuggestion(
+                kind="cadence",
+                title="你的节奏更像冲刺",
+                detail=f"最近 {window_days} 天不是匀速推进，而是几次集中爆发。更适合做 2-3 天一次的小复盘，而不是要求自己每天都高活跃。",
+            )
+        )
+
+    if rhythm_source == "feed" and recent_feed_count > 0:
+        suggestions.append(
+            InsightSuggestion(
+                kind="source",
+                title="现在更像情报在推着你走",
+                detail="最近的时段判断主要来自 Feed 到达时间，而不是交互记录。给关键内容补一点操作记录，洞察会更接近你的真实作息。",
+            )
+        )
+
+    return suggestions[:3]
+
+
 # ── API 路由 ───────────────────────────────────────────────────────
 
 @router.get("/overview")
@@ -366,7 +904,7 @@ async def get_today():
     total = len(timeline.activities)
 
     # Todo progress
-    todos = profile_store.get_todos_today()
+    todos = profile_store.get_manual_todos_today()
     todo_total = len(todos)
     todo_done = sum(1 for t in todos if t.get("done", False))
     todo_rate = todo_done / todo_total if todo_total > 0 else 0.0
@@ -512,6 +1050,131 @@ async def get_activity(days: int = 30):
     card_store = CardStore()
     daily_trend = get_daily_card_counts(card_store, days=days)
     return ActivityResponse(days=days, data=daily_trend)
+
+
+@router.get("/intelligence-rhythm")
+async def get_intelligence_rhythm(days: int = 14):
+    """Fuse recent feed, paper categories, active hours, and preference signals."""
+    if is_demo_mode():
+        return get_demo_intelligence_rhythm()
+
+    safe_days = max(7, min(days, 30))
+    today = date.today()
+    start_day = today - timedelta(days=safe_days - 1)
+    previous_start_day = start_day - timedelta(days=safe_days)
+
+    card_store = CardStore()
+    activity_tracker = ActivityTracker()
+
+    recent_cards = _load_cards_for_period(card_store, start_day, today + timedelta(days=1))
+    previous_cards = _load_cards_for_period(card_store, previous_start_day, start_day)
+    recent_timelines = _load_recent_timelines(activity_tracker, safe_days)
+
+    recent_feed_pairs = [
+        (_MODULE_LABELS.get(card["module_id"], card["module_id"] or "其他"), card.get("title") or "")
+        for card in recent_cards
+    ]
+    previous_feed_labels = [
+        _MODULE_LABELS.get(card["module_id"], card["module_id"] or "其他")
+        for card in previous_cards
+    ]
+    feed_mix = _build_bucket_pairs(recent_feed_pairs, previous_feed_labels, limit=5)
+
+    recent_theme_pairs: list[tuple[str, str]] = []
+    previous_theme_labels: list[str] = []
+    for card in recent_cards:
+        recent_theme_pairs.extend((label, card.get("title") or "") for label in _extract_theme_labels(card))
+    for card in previous_cards:
+        previous_theme_labels.extend(_extract_theme_labels(card))
+    theme_mix = _build_bucket_pairs(recent_theme_pairs, previous_theme_labels, limit=6)
+
+    recent_paper_pairs = []
+    previous_paper_labels = []
+    for card in recent_cards:
+        label = _extract_paper_label(card)
+        if label:
+            recent_paper_pairs.append((label, card.get("title") or ""))
+    for card in previous_cards:
+        label = _extract_paper_label(card)
+        if label:
+            previous_paper_labels.append(label)
+    paper_mix = _build_bucket_pairs(recent_paper_pairs, previous_paper_labels, limit=5)
+
+    preferences = _load_keyword_preferences(limit=6)
+    hourly_rhythm = _build_hourly_rhythm(recent_cards, recent_timelines)
+    weekday_rhythm = _build_weekday_rhythm(recent_cards, recent_timelines)
+    peak_window = _build_peak_window(hourly_rhythm)
+
+    interaction_total = sum(point.interaction for point in hourly_rhythm)
+    feed_total = len(recent_cards)
+    active_days = len(
+        {
+            *{
+                card["created_dt"].date().isoformat()
+                for card in recent_cards
+                if card.get("created_dt")
+            },
+            *{timeline.date for timeline in recent_timelines if timeline.activities},
+        }
+    )
+
+    if interaction_total and feed_total:
+        rhythm_source = "hybrid"
+    elif interaction_total:
+        rhythm_source = "interaction"
+    elif feed_total:
+        rhythm_source = "feed"
+    else:
+        rhythm_source = "none"
+
+    latest_dates = [
+        card["created_dt"].date().isoformat()
+        for card in recent_cards
+        if card.get("created_dt")
+    ] + [timeline.date for timeline in recent_timelines if timeline.activities]
+    latest_signal_date = max(latest_dates) if latest_dates else today.isoformat()
+
+    cadence_label = _determine_cadence_label(weekday_rhythm, active_days, safe_days)
+    summary = _build_summary(
+        safe_days,
+        cadence_label,
+        peak_window,
+        rhythm_source,
+        feed_mix,
+        theme_mix,
+        paper_mix,
+    )
+    highlights = _build_highlights(recent_cards, limit=6)
+    suggestions = _build_suggestions(
+        window_days=safe_days,
+        cadence_label=cadence_label,
+        peak_window=peak_window,
+        rhythm_source=rhythm_source,
+        recent_feed_count=feed_total,
+        recent_interaction_count=interaction_total,
+        theme_mix=theme_mix,
+        paper_mix=paper_mix,
+    )
+
+    return IntelligenceRhythmResponse(
+        windowDays=safe_days,
+        recentFeedCount=feed_total,
+        recentInteractionCount=interaction_total,
+        activeDays=active_days,
+        latestSignalDate=latest_signal_date,
+        cadenceLabel=cadence_label,
+        rhythmSource=rhythm_source,
+        summary=summary,
+        peakWindow=peak_window,
+        feedMix=feed_mix,
+        themeMix=theme_mix,
+        paperMix=paper_mix,
+        preferences=preferences,
+        hourlyRhythm=hourly_rhythm,
+        weekdayRhythm=weekday_rhythm,
+        highlights=highlights,
+        suggestions=suggestions,
+    )
 
 
 @router.get("/preferences-evolution")

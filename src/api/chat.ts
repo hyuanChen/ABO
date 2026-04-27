@@ -1,4 +1,4 @@
-import type { CliConfig, Conversation, Message, StreamEvent } from '../types/chat';
+import type { ChatRuntimeState, CliConfig, Conversation, Message, StreamEvent } from '../types/chat';
 
 const API_BASE = 'http://127.0.0.1:8765/api/chat';
 
@@ -39,12 +39,13 @@ export async function getCliInfo(cliId: string): Promise<CliConfig> {
 export async function createConversation(
   cliType: string,
   title?: string,
-  workspace?: string
+  workspace?: string,
+  origin?: string
 ): Promise<Conversation> {
   const res = await fetch(`${API_BASE}/conversations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cli_type: cliType, title, workspace }),
+    body: JSON.stringify({ cli_type: cliType, title, workspace, origin }),
   });
   if (!res.ok) throw new Error('Failed to create conversation');
   return toCamelCase<Conversation>(await res.json());
@@ -73,10 +74,33 @@ export async function deleteConversation(convId: string): Promise<void> {
 }
 
 export async function updateConversationTitle(convId: string, title: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/conversations/${convId}/title?title=${encodeURIComponent(title)}`, {
+  const res = await fetch(`${API_BASE}/conversations/${convId}/title`, {
     method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
   });
   if (!res.ok) throw new Error('Failed to update title');
+}
+
+export async function getConversationRuntime(convId: string): Promise<ChatRuntimeState> {
+  const res = await fetch(`${API_BASE}/conversations/${convId}/runtime`);
+  if (!res.ok) throw new Error('Failed to get conversation runtime');
+  return toCamelCase<ChatRuntimeState>(await res.json());
+}
+
+export async function warmupConversation(convId: string): Promise<ChatRuntimeState> {
+  const res = await fetch(`${API_BASE}/conversations/${convId}/warmup`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to warm up conversation runtime');
+  return toCamelCase<ChatRuntimeState>(await res.json());
+}
+
+export async function stopConversation(convId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/conversations/${convId}/stop`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to stop conversation');
 }
 
 // === Messages ===

@@ -1,6 +1,7 @@
 // src/components/chat/SendBox.tsx
 import { useState, useRef, useEffect } from 'react';
 import { Send, Paperclip } from 'lucide-react';
+import { isActionEnterKey, isComposingKeyboardEvent } from '../../core/keyboard';
 
 interface SendBoxProps {
   onSend: (message: string, files?: File[]) => void;
@@ -52,15 +53,19 @@ export function SendBox({ onSend, onStop, loading, disabled, placeholder }: Send
 
   // Keyboard shortcuts
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (isComposingKeyboardEvent(e)) return;
+
     // Enter to send (without Shift)
-    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    if (isActionEnterKey(e) && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
       if (input.trim() && !loading) {
         handleSend();
       }
+      return;
     }
+
     // Shift+Enter or Ctrl/Cmd+Enter inserts newline
-    if (e.key === 'Enter' && (e.shiftKey || e.ctrlKey || e.metaKey)) {
+    if (isActionEnterKey(e) && (e.shiftKey || e.ctrlKey || e.metaKey)) {
       setIsSingleLine(false);
     }
   };

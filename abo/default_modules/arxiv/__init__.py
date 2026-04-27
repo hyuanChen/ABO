@@ -1,20 +1,52 @@
-import json
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 
+from abo.config import is_paper_ai_scoring_enabled
+from abo.paper_paths import build_arxiv_grouped_relative_dir, sanitize_paper_title_for_path
 from abo.sdk import Module, Item, Card, agent_json
 from abo.default_modules.arxiv.category import get_category_name, ALL_SUBCATEGORIES
 from abo.store.papers import PaperStore
-from abo.tools.arxiv_api import arxiv_api_search, resolve_arxiv_figure_url
+from abo.tools.arxiv_api import ArxivAPITool, arxiv_api_search, build_structured_digest_markdown
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(text)
+    return deduped
+
+
+def _derive_year(year_value: Any, published: str) -> int | None:
+    try:
+        if year_value not in (None, ""):
+            return int(year_value)
+    except (TypeError, ValueError):
+        pass
+
+    published_text = str(published or "").strip()
+    if len(published_text) >= 4:
+        try:
+            return int(published_text[:4])
+        except ValueError:
+            return None
+    return None
 
 
 class ArxivTracker(Module):
     id       = "arxiv-tracker"
     name     = "arXiv 论文追踪"
-    schedule = "0 8 * * *"
+    schedule = "0 9 * * *"
     icon     = "book-open"
     output   = ["obsidian", "ui"]
 
@@ -292,78 +324,8 @@ class ArxivTracker(Module):
 
     async def fetch_figures(self, arxiv_id: str) -> list[dict]:
         """Fetch figures from arXiv HTML version."""
-        html_url = f"https://arxiv.org/html/{arxiv_id}"
-        figures = []
-
-        try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                resp = await self._rate_limited_request(client, html_url, timeout=15)
-
-            if resp.status_code != 200:
-                return figures
-
-            html = resp.text
-            import re
-
-            # Look for img tags that are likely pipeline/method figures
-            img_pattern = r'<img[^>]+src="([^"]+)"[^>]*>'
-
-            found_urls = set()
-            img_matches = list(re.finditer(img_pattern, html, re.IGNORECASE))
-
-            for i, match in enumerate(img_matches):
-                try:
-                    src = match.group(1)
-                    if not src:
-                        continue
-
-                    # Extract alt from the same img tag
-                    img_tag = match.group(0)
-                    alt_match = re.search(r'alt="([^"]*)"', img_tag, re.IGNORECASE)
-                    alt = alt_match.group(1) if alt_match else ""
-
-                    # Skip non-figure images
-                    src_lower = src.lower()
-                    if src_lower.startswith("data:"):
-                        continue
-                    if any(skip in src_lower for skip in ['icon', 'logo', 'button', 'spacer']):
-                        continue
-
-                    src = resolve_arxiv_figure_url(arxiv_id, src)
-                    if not src:
-                        continue
-
-                    if src in found_urls:
-                        continue
-                    found_urls.add(src)
-
-                    # Check if it's a method/pipeline related figure
-                    alt_lower = alt.lower()
-                    is_method_figure = any(kw in alt_lower for kw in [
-                        'method', 'pipeline', 'architecture', 'framework',
-                        'overview', 'structure', 'model', 'system', 'approach',
-                        'flowchart', 'diagram', 'fig', 'figure'
-                    ])
-
-                    figures.append({
-                        'url': src,
-                        'caption': alt[:100] if alt else f"Figure {i+1}",
-                        'is_method': is_method_figure,
-                        'type': 'img'
-                    })
-                    if len(figures) >= 5:
-                        break
-                except Exception:
-                    continue
-
-            # Limit to first 3 figures, prioritize method figures
-            figures.sort(key=lambda x: (not x['is_method'], x['caption']))
-            figures = figures[:3]
-
-        except Exception as e:
-            print(f"Failed to fetch figures for {arxiv_id}: {e}")
-
-        return figures
+        tool = ArxivAPITool()
+        return await tool.fetch_figures(arxiv_id)
 
     async def fetch(self, **kwargs) -> list[Item]:
         """Module SDK 兼容的 fetch 方法"""
@@ -493,25 +455,87 @@ class ArxivTracker(Module):
             },
         )
 
-    async def process(self, items: list[Item], prefs: dict) -> list[Card]:
-        """Process papers into Cards with agent analysis"""
+    def item_from_api_result(self, paper: dict) -> Item | None:
+        return self._paper_from_api_result(paper)
+
+    async def build_tracking_payload(
+        self,
+        item: Item,
+        prefs: dict,
+        *,
+        arxiv_api: ArxivAPITool | None = None,
+        ai_scoring_enabled: bool | None = None,
+    ) -> dict[str, Any]:
         import asyncio
-        cards = []
 
-        for item in items:
-            p = item.raw
-            monitor_matches = p.get("monitor_matches", [])
-            monitor_labels = [match.get("label", "") for match in monitor_matches if match.get("label")]
+        p = item.raw
+        arxiv_api = arxiv_api or ArxivAPITool()
+        ai_scoring_enabled = is_paper_ai_scoring_enabled() if ai_scoring_enabled is None else ai_scoring_enabled
 
-            # Fetch figures
+        monitor_matches_raw = p.get("monitor_matches", [])
+        monitor_matches = monitor_matches_raw if isinstance(monitor_matches_raw, list) else []
+        monitor_labels = _dedupe_strings(
+            [
+                str(match.get("label", "")).strip()
+                for match in monitor_matches
+                if isinstance(match, dict) and str(match.get("label", "")).strip()
+            ]
+        )
+
+        explicit_tracking_labels_raw = p.get("paper_tracking_labels", [])
+        explicit_tracking_labels = (
+            [
+                str(label).strip()
+                for label in explicit_tracking_labels_raw
+                if str(label or "").strip()
+            ]
+            if isinstance(explicit_tracking_labels_raw, list)
+            else []
+        )
+        explicit_tracking_label = str(
+            p.get("paper_tracking_label")
+            or p.get("search_label")
+            or "",
+        ).strip()
+        tracking_labels = _dedupe_strings([
+            *explicit_tracking_labels,
+            *monitor_labels,
+            explicit_tracking_label,
+        ])
+        tracking_label = explicit_tracking_label or (tracking_labels[0] if tracking_labels else "")
+
+        tracking_type = str(p.get("paper_tracking_type") or "keyword").strip() or "keyword"
+        tracking_role = str(p.get("paper_tracking_role") or tracking_type).strip() or tracking_type
+        relationship = str(p.get("relationship") or "keyword").strip() or "keyword"
+        relationship_label = str(p.get("relationship_label") or "关键词追踪").strip() or "关键词追踪"
+
+        figures_raw = p.get("figures", [])
+        figures = figures_raw if isinstance(figures_raw, list) else []
+        local_figures_raw = p.get("local_figures", [])
+        local_figures = local_figures_raw if isinstance(local_figures_raw, list) else []
+        introduction = str(p.get("introduction") or "").strip()
+
+        if not figures:
             try:
-                figures = await asyncio.wait_for(self.fetch_figures(item.id), timeout=10)
+                figures = await asyncio.wait_for(arxiv_api.fetch_figures(item.id), timeout=15)
             except asyncio.TimeoutError:
-                figures = []
-            except Exception:
-                figures = []
+                print(f"[arxiv] Figure fetch timeout for {item.id}")
+            except Exception as e:
+                print(f"[arxiv] Figure fetch error for {item.id}: {e}")
 
-            # Build enhanced prompt with more metadata
+        if not introduction:
+            try:
+                introduction = await asyncio.wait_for(
+                    arxiv_api.fetch_introduction(item.id),
+                    timeout=20,
+                )
+            except asyncio.TimeoutError:
+                print(f"[arxiv] Introduction fetch timeout for {item.id}")
+            except Exception as e:
+                print(f"[arxiv] Introduction fetch error for {item.id}: {e}")
+
+        result = {}
+        if ai_scoring_enabled:
             categories_str = ", ".join(p.get("all_categories", [])[:3])
             comments_info = f"\nComments: {p['comments']}" if p.get("comments") else ""
 
@@ -528,61 +552,119 @@ class ArxivTracker(Module):
                 result = await asyncio.wait_for(agent_json(prompt, prefs=prefs), timeout=30)
             except asyncio.TimeoutError:
                 print(f"[arxiv] Agent timeout for {item.id}, using fallback")
-                result = {}
             except Exception as e:
                 print(f"[arxiv] Agent error for {item.id}: {e}")
-                result = {}
 
-            # Build category path for Obsidian
-            primary_cat = p.get("primary_category", "unknown")
-            cat_folder = primary_cat.replace(".", "_")
+        primary_cat = p.get("primary_category", "unknown")
+        note_name = sanitize_paper_title_for_path(
+            p["title"],
+            fallback=item.id,
+            max_length=120,
+        )
+        year = _derive_year(p.get("year"), p.get("published", ""))
+        venue = str(p.get("venue") or p.get("journal_ref") or "").strip()
+        abstract = str(p.get("abstract") or "").strip()
+        formatted_digest = build_structured_digest_markdown(abstract, introduction)
+        source_url = p.get("url", "")
 
-            first_author = p["authors"][0].split()[-1] if p["authors"] else "Unknown"
-            year = p["published"][:4] if p.get("published") else datetime.now().year
-            slug = p["title"][:40].replace(" ", "-").replace("/", "-")
+        obsidian_dir = build_arxiv_grouped_relative_dir(
+            {
+                "id": item.id,
+                "title": p["title"],
+                "metadata": {
+                    "paper_tracking_label": tracking_label,
+                    "paper_tracking_labels": tracking_labels,
+                    "primary_category": primary_cat,
+                },
+            },
+            root_folder="Literature/arXiv",
+            paper_fallback=item.id,
+        )
 
-            # Build rich metadata
-            metadata = {
-                "abo-type": "arxiv-paper",
-                "authors": p["authors"],
-                "author_count": p.get("author_count", len(p["authors"])),
-                "arxiv-id": item.id,
-                "primary_category": primary_cat,
-                "primary_category_name": p.get("primary_category_name", ""),
-                "categories": p.get("categories", []),
-                "all_categories": p.get("all_categories", []),
-                "published": p.get("published", ""),
-                "updated": p.get("updated", ""),
-                "comments": p.get("comments", ""),
-                "journal_ref": p.get("journal_ref", ""),
-                "doi": p.get("doi", ""),
-                "pdf-url": p.get("pdf_url", ""),
-                "html-url": p.get("html_url", ""),
-                "contribution": result.get("contribution", ""),
-                "abstract": p["abstract"],
-                "keywords": result.get("tags", []),
-                "figures": figures,
-                "paper_tracking_type": "keyword",
-                "paper_tracking_label": monitor_labels[0] if monitor_labels else "",
-                "paper_tracking_labels": monitor_labels,
-                "paper_tracking_matches": monitor_matches,
-                "relationship_label": "关键词追踪",
-            }
+        metadata = {
+            "abo-type": "arxiv-paper",
+            "authors": p.get("authors", []),
+            "author_count": p.get("author_count", len(p.get("authors", []))),
+            "paper_id": "",
+            "arxiv_id": item.id,
+            "arxiv-id": item.id,
+            "year": year,
+            "venue": venue,
+            "published": p.get("published", ""),
+            "updated": p.get("updated", ""),
+            "citation_count": 0,
+            "reference_count": 0,
+            "fields_of_study": [],
+            "source_paper_title": str(p.get("source_paper_title") or "").strip(),
+            "source_paper": p.get("source_paper", {}) or {},
+            "contribution": result.get("contribution", ""),
+            "abstract": abstract,
+            "introduction": introduction,
+            "formatted-digest": formatted_digest,
+            "keywords": result.get("tags", []),
+            "s2_url": "",
+            "arxiv_url": source_url,
+            "pdf-url": p.get("pdf_url", ""),
+            "html-url": p.get("html_url", ""),
+            "figures": figures,
+            "local_figures": local_figures,
+            "paper_tracking_type": tracking_type,
+            "paper_tracking_role": tracking_role,
+            "paper_tracking_label": tracking_label,
+            "paper_tracking_labels": tracking_labels,
+            "paper_tracking_matches": monitor_matches,
+            "relationship": relationship,
+            "relationship_label": relationship_label,
+            "saved_to_literature": bool(p.get("saved_to_literature") or p.get("literature_path")),
+            "literature_path": str(p.get("literature_path") or "").strip(),
+            "primary_category": primary_cat,
+            "primary_category_name": p.get("primary_category_name", ""),
+            "categories": p.get("categories", []),
+            "all_categories": p.get("all_categories", []),
+            "comments": p.get("comments", ""),
+            "journal_ref": p.get("journal_ref", ""),
+            "doi": p.get("doi", ""),
+        }
 
-            card_tags = list(
-                dict.fromkeys(
-                    [*result.get("tags", []), primary_cat, *monitor_labels[:2]]
-                )
+        tags = _dedupe_strings([
+            *result.get("tags", []),
+            primary_cat,
+            *tracking_labels[:2],
+        ])
+
+        return {
+            "title": p["title"],
+            "summary": result.get("summary", abstract[:150]),
+            "score": min(result.get("score", 5), 10) / 10,
+            "tags": tags,
+            "source_url": source_url,
+            "obsidian_path": str(obsidian_dir / f"{note_name}.md"),
+            "metadata": metadata,
+        }
+
+    async def process(self, items: list[Item], prefs: dict) -> list[Card]:
+        """Process papers into Cards with agent analysis"""
+        cards = []
+        arxiv_api = ArxivAPITool()
+        ai_scoring_enabled = is_paper_ai_scoring_enabled()
+
+        for item in items:
+            payload = await self.build_tracking_payload(
+                item,
+                prefs,
+                arxiv_api=arxiv_api,
+                ai_scoring_enabled=ai_scoring_enabled,
             )
             cards.append(Card(
                 id=f"arxiv-monitor:{item.id}",
-                title=p["title"],
-                summary=result.get("summary", p["abstract"][:150]),
-                score=min(result.get("score", 5), 10) / 10,
-                tags=card_tags,
-                source_url=p.get("url", ""),
-                obsidian_path=f"Literature/arXiv/{cat_folder}/{first_author}{year}-{slug}.md",
-                metadata=metadata,
+                title=payload["title"],
+                summary=payload["summary"],
+                score=payload["score"],
+                tags=payload["tags"],
+                source_url=payload["source_url"],
+                obsidian_path=payload["obsidian_path"],
+                module_id=self.id,
+                metadata=payload["metadata"],
             ))
 
         return cards

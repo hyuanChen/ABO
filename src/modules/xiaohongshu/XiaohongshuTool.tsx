@@ -15,15 +15,19 @@ import {
   Cookie,
   AlertCircle,
   CheckCircle,
-  Image as ImageIcon,
-  PlayCircle,
+  Plus,
+  RefreshCw,
   X,
   Save,
   FolderDown,
   Trash2,
 } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState } from "../../components/Layout";
 import { api } from "../../core/api";
+import { isActionEnterKey } from "../../core/keyboard";
+import { dirnamePath, formatLibraryLocation, withLocationSuffix } from "../../core/pathDisplay";
+import { useStore } from "../../core/store";
 import { useToast } from "../../components/Toast";
 import { CookieGuide } from "../../components/ConfigHelp";
 import {
@@ -31,6 +35,10 @@ import {
   type CrawlBatchResponse,
   type XHSTaskStatus,
   type XHSAuthorCandidate,
+  type XHSCreatorRecentResponse,
+  type XHSSmartGroupOption,
+  type XHSSmartGroupResult,
+  xiaohongshuCancelTask,
   xiaohongshuGetConfig,
   xiaohongshuGetTaskStatus,
   xiaohongshuGetCookieFromBrowser,
@@ -38,20 +46,39 @@ import {
   xiaohongshuSaveConfig,
   xiaohongshuSavePreviews,
   xiaohongshuSyncAuthorsToTracker,
-  xiaohongshuStartAuthorCandidatesTask,
   xiaohongshuStartCommentsTask,
   xiaohongshuStartCrawlBatchTask,
   xiaohongshuStartCrawlNoteTask,
+  xiaohongshuStartCreatorRecentTask,
   xiaohongshuStartFollowingFeedTask,
   xiaohongshuStartSearchTask,
+  xiaohongshuStartSmartGroupTask,
   xiaohongshuVerifyCookie,
 } from "../../api/xiaohongshu";
+import { SmartGroupActionButton } from "../../components/SmartGroupActionButton";
+import { SharedSignalMappingPanel, type SharedSignalEntry } from "../../components/SharedSignalMappingPanel";
+import {
+  createCreatorMonitor,
+  createFollowingScan,
+  createFollowingScanMonitor,
+  createKeywordMonitor,
+  DEFAULT_XHS_RECENT_DAYS,
+  formatKeywordInput,
+  normalizeXhsTrackerConfig,
+  parseKeywordInput,
+  type XHSTrackerCreatorMonitor,
+  type XHSTrackerFollowingScanMonitor,
+  type XHSTrackerFollowingScan,
+  type XHSTrackerKeywordMonitor,
+} from "./trackerConfig";
+import XiaohongshuNoteCard from "./XiaohongshuNoteCard";
 
 interface XHSNote {
   id: string;
   title: string;
   content: string;
   author: string;
+  author_id?: string;
   likes: number;
   collects: number;
   comments_count: number;
@@ -88,10 +115,35 @@ interface CommentsResponse {
   comments: XHSComment[];
 }
 
-type TabType = "collections" | "following";
+type TabType = "collections" | "search" | "following";
 type AlbumCrawlMode = "incremental" | "full";
 type BrowserChoice = "default" | "edge" | "chrome" | "brave" | "safari" | "firefox";
+type NoteResultLayout = "horizontal" | "vertical";
 const XIAOHONGSHU_TOOL_TAB_KEY = "xiaohongshu_tool_tab";
+const CREATOR_BATCH_DELAY_SECONDS_RANGE = [20, 30] as const;
+const XHS_CREATOR_RISK_MARKERS = [
+  "访问频繁",
+  "安全验证",
+  "安全限制",
+  "安全访问",
+  "扫码",
+  "请先登录",
+  "登录后查看更多内容",
+  "请稍后再试",
+  "risk_limited",
+  "manual_required",
+  "auth_invalid",
+];
+
+const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+const randomCreatorBatchDelaySeconds = () => {
+  const [minSeconds, maxSeconds] = CREATOR_BATCH_DELAY_SECONDS_RANGE;
+  return minSeconds + Math.floor(Math.random() * (maxSeconds - minSeconds + 1));
+};
+const isXhsCreatorRiskError = (value: unknown) => {
+  const text = value instanceof Error ? value.message : String(value || "");
+  return XHS_CREATOR_RISK_MARKERS.some((marker) => text.includes(marker));
+};
 
 interface FollowingFeedResponse {
   total_found: number;
@@ -154,20 +206,60 @@ interface XHSAlbumCrawlResponse {
 interface XHSCreatorProfile {
   author?: string;
   author_id?: string;
+  profile_url?: string;
+  pending_author_id?: boolean;
+  recent_days?: number;
+  sort_by?: "likes" | "time";
   smart_groups?: string[];
+  smart_group_labels?: string[];
   latest_title?: string;
   sample_titles?: string[];
   sample_albums?: string[];
   sample_tags?: string[];
+  sample_note_urls?: string[];
   source_summary?: string;
+}
+
+interface SharedCreatorGroupingSnapshot {
+  updated_at?: string;
+  signal_group_labels?: Record<string, string | string[]>;
+  vault_signal_database?: {
+    indexed_files?: number;
+    signal_count?: number;
+    database_path?: string;
+    tag_index_path?: string;
+    saved_at?: string;
+  };
+  shared_data_paths?: {
+    tag_index_path?: string;
+    shared_groups_path?: string;
+    creator_profiles_path?: string;
+  };
+}
+
+interface CreatorBatchTarget {
+  profileId: string;
+  author: string;
+  authorId: string;
+  query: string;
+  groupValue?: string;
+  groupLabel?: string;
+}
+
+interface CreatorBatchResultItem {
+  target: CreatorBatchTarget;
+  result?: XHSCreatorRecentResponse;
+  error?: string;
 }
 
 export function XiaohongshuTool() {
   const [activeTab, setActiveTab] = useState<TabType>(() => {
     const saved = localStorage.getItem(XIAOHONGSHU_TOOL_TAB_KEY);
-    return saved === "following" ? "following" : "collections";
+    if (saved === "following" || saved === "search") return saved;
+    return "collections";
   });
   const toast = useToast();
+  const config = useStore((state) => state.config);
 
   // Cookie config state
   const [webSession, setWebSession] = useState(() => localStorage.getItem("xiaohongshu_websession") || "");
@@ -183,10 +275,16 @@ export function XiaohongshuTool() {
 
   // Search state
   const [searchKeyword, setSearchKeyword] = useState("");
-  const [sortBy, setSortBy] = useState<"likes" | "time">("likes");
   const [minLikes, setMinLikes] = useState(100);
   const [searchLimit, setSearchLimit] = useState(20);
+  const [searchRecentDays, setSearchRecentDays] = useState(DEFAULT_XHS_RECENT_DAYS);
+  const [searchAutoSaveAfterFetch, setSearchAutoSaveAfterFetch] = useState(false);
+  const [searchSaveComments, setSearchSaveComments] = useState(false);
+  const [searchSaveCommentsLimit, setSearchSaveCommentsLimit] = useState(20);
+  const [searchSaveCommentsSortBy, setSearchSaveCommentsSortBy] = useState<"likes" | "time">("likes");
   const [searchResult, setSearchResult] = useState<SearchResponse | null>(null);
+  const [showSearchResults, setShowSearchResults] = useState(true);
+  const [searchResultLayout, setSearchResultLayout] = useState<NoteResultLayout>("horizontal");
   const [expandedNotes, setExpandedNotes] = useState<Set<string>>(new Set());
 
   // Comments state
@@ -196,8 +294,31 @@ export function XiaohongshuTool() {
 
   // Following feed state
   const [followingKeywords, setFollowingKeywords] = useState("");
-  const [followingLimit, setFollowingLimit] = useState(50);
+  const [followingLimit, setFollowingLimit] = useState(20);
+  const [followingRecentDays, setFollowingRecentDays] = useState(DEFAULT_XHS_RECENT_DAYS);
+  const [followingAutoSaveAfterFetch, setFollowingAutoSaveAfterFetch] = useState(false);
   const [followingResult, setFollowingResult] = useState<FollowingFeedResponse | null>(null);
+  const [showFollowingResults, setShowFollowingResults] = useState(true);
+  const [followingResultLayout, setFollowingResultLayout] = useState<NoteResultLayout>("horizontal");
+  const [expandedFollowingNotes, setExpandedFollowingNotes] = useState<Set<string>>(new Set());
+  const [followingFeedTaskId, setFollowingFeedTaskId] = useState<string | null>(null);
+  const [creatorSearchQuery, setCreatorSearchQuery] = useState("");
+  const [creatorRecentDays, setCreatorRecentDays] = useState(DEFAULT_XHS_RECENT_DAYS);
+  const [creatorRecentLimit, setCreatorRecentLimit] = useState(10);
+  const [creatorRecentAutoSaveAfterFetch, setCreatorRecentAutoSaveAfterFetch] = useState(false);
+  const [creatorRecentResult, setCreatorRecentResult] = useState<XHSCreatorRecentResponse | null>(null);
+  const [creatorRecentResultLayout, setCreatorRecentResultLayout] = useState<NoteResultLayout>("horizontal");
+  const [expandedCreatorRecentNotes, setExpandedCreatorRecentNotes] = useState<Set<string>>(new Set());
+  const [creatorBatchResultLayout, setCreatorBatchResultLayout] = useState<NoteResultLayout>("horizontal");
+  const [expandedCreatorBatchNotes, setExpandedCreatorBatchNotes] = useState<Set<string>>(new Set());
+  const [creatorRecentTaskId, setCreatorRecentTaskId] = useState<string | null>(null);
+  const [selectedCreatorBatchIds, setSelectedCreatorBatchIds] = useState<Set<string>>(new Set());
+  const [creatorBatchResults, setCreatorBatchResults] = useState<CreatorBatchResultItem[]>([]);
+  const [creatorBatchProgress, setCreatorBatchProgress] = useState<{
+    completed: number;
+    total: number;
+    currentLabel: string;
+  } | null>(null);
 
   // Crawl state
   const [crawlUrl, setCrawlUrl] = useState("");
@@ -244,20 +365,61 @@ export function XiaohongshuTool() {
   const [albumCrawlTaskId, setAlbumCrawlTaskId] = useState<string | null>(null);
   const albumListTimerRef = useRef<number | null>(null);
   const albumCrawlTimerRef = useRef<number | null>(null);
-  const [trackerKeywords, setTrackerKeywords] = useState<string[]>([]);
+  const followingResultTopRef = useRef<HTMLDivElement | null>(null);
+  const followingResultBottomRef = useRef<HTMLDivElement | null>(null);
+  const searchResultCarouselRef = useRef<HTMLDivElement | null>(null);
+  const followingResultCarouselRef = useRef<HTMLDivElement | null>(null);
+  const creatorRecentResultCarouselRef = useRef<HTMLDivElement | null>(null);
+  const creatorBatchResultCarouselRef = useRef<HTMLDivElement | null>(null);
+  const [, setTrackerKeywords] = useState<string[]>([]);
   const [trackerMaxResults, setTrackerMaxResults] = useState(20);
   const [trackerKeywordMinLikes, setTrackerKeywordMinLikes] = useState(500);
   const [trackerKeywordLimit, setTrackerKeywordLimit] = useState(10);
   const [trackerEnableKeywordSearch, setTrackerEnableKeywordSearch] = useState(true);
-  const [trackerFollowFeed, setTrackerFollowFeed] = useState(false);
-  const [trackerFollowLimit, setTrackerFollowLimit] = useState(20);
+  const [trackerKeywordMonitors, setTrackerKeywordMonitors] = useState<XHSTrackerKeywordMonitor[]>([]);
+  const [trackerFollowingScan, setTrackerFollowingScan] = useState<XHSTrackerFollowingScan>(createFollowingScan());
+  const [trackerFollowingScanMonitors, setTrackerFollowingScanMonitors] = useState<XHSTrackerFollowingScanMonitor[]>([]);
+  const [trackerKeywordDraft, setTrackerKeywordDraft] = useState("");
+  const [trackerKeywordMonitorDrafts, setTrackerKeywordMonitorDrafts] = useState<Record<string, string>>({});
+  const [trackerFollowingScanMonitorDrafts, setTrackerFollowingScanMonitorDrafts] = useState<Record<string, string>>({});
+  const [trackerFollowingScanKeywordDraft, setTrackerFollowingScanKeywordDraft] = useState("");
+  const [trackerCreatorMonitors, setTrackerCreatorMonitors] = useState<XHSTrackerCreatorMonitor[]>([]);
   const [trackerUserIds, setTrackerUserIds] = useState<string[]>([]);
   const [disabledCreatorIds, setDisabledCreatorIds] = useState<Set<string>>(new Set());
   const [trackerCreatorProfiles, setTrackerCreatorProfiles] = useState<Record<string, XHSCreatorProfile>>({});
-  const [trackerCreatorPushEnabled, setTrackerCreatorPushEnabled] = useState(true);
+  const [trackerCreatorNameMap, setTrackerCreatorNameMap] = useState<Record<string, {
+    author?: string;
+    author_id?: string;
+    profile_url?: string;
+    source?: string;
+    updated_at?: string;
+  }>>({});
+  const [trackerCreatorGroups, setTrackerCreatorGroups] = useState<string[]>([]);
+  const [trackerCreatorGroupOptions, setTrackerCreatorGroupOptions] = useState<XHSSmartGroupOption[]>([]);
+  const [trackerCreatorPushEnabled, setTrackerCreatorPushEnabled] = useState(false);
+  const [sharedSignalEntries, setSharedSignalEntries] = useState<SharedSignalEntry[]>([]);
+  const [sharedCreatorGrouping, setSharedCreatorGrouping] = useState<SharedCreatorGroupingSnapshot>({});
+  const [savingSignalMappings, setSavingSignalMappings] = useState(false);
+  const [smartGroupResult, setSmartGroupResult] = useState<XHSSmartGroupResult | null>(null);
+  const [showSharedGroupingDetail, setShowSharedGroupingDetail] = useState(false);
+  const [showSharedSignalRules, setShowSharedSignalRules] = useState(false);
+  const [showSharedCreatorGroupManager, setShowSharedCreatorGroupManager] = useState(false);
+  const [expandedCreatorSelectorGroups, setExpandedCreatorSelectorGroups] = useState<Set<string>>(new Set());
+  const [expandedSharedManagerGroups, setExpandedSharedManagerGroups] = useState<Set<string>>(new Set());
+  const [expandedSharedManagerMembers, setExpandedSharedManagerMembers] = useState<Set<string>>(new Set());
   const [authorCandidates, setAuthorCandidates] = useState<XHSAuthorCandidate[]>([]);
-  const [selectedAuthors, setSelectedAuthors] = useState<Set<string>>(new Set());
   const [authorCandidateMeta, setAuthorCandidateMeta] = useState<{ totalNotes: number; message: string } | null>(null);
+  const [showAllFrequentAuthors, setShowAllFrequentAuthors] = useState(false);
+  const [frequentAuthorGroupFilter, setFrequentAuthorGroupFilter] = useState<string>("all");
+  const [creatorMonitorGroupFilter, setCreatorMonitorGroupFilter] = useState<string>("all");
+  const [creatorMonitorPage, setCreatorMonitorPage] = useState(0);
+  const [showCreatorImportPanel, setShowCreatorImportPanel] = useState(false);
+  const [showCreatorFilterPanel, setShowCreatorFilterPanel] = useState(false);
+  const [showCreatorRecentWorkbench, setShowCreatorRecentWorkbench] = useState(false);
+  const [showManualCrawlWorkbench, setShowManualCrawlWorkbench] = useState(false);
+  const [sharedCreatorManagerQuery, setSharedCreatorManagerQuery] = useState("");
+  const [sharedCreatorManagerPageSize, setSharedCreatorManagerPageSize] = useState<20 | 50>(20);
+  const [sharedCreatorManagerPages, setSharedCreatorManagerPages] = useState<Record<string, number>>({});
   const [activeTaskKinds, setActiveTaskKinds] = useState<Set<string>>(new Set());
   const [backgroundTask, setBackgroundTask] = useState<{ kind: string; stage: string; taskId: string } | null>(null);
   const [taskHistory, setTaskHistory] = useState<XHSTaskStatus[]>([]);
@@ -266,6 +428,7 @@ export function XiaohongshuTool() {
   const [taskHistoryPage, setTaskHistoryPage] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [expandedPushes, setExpandedPushes] = useState<Set<string>>(new Set(["creator"]));
+  const [updatingSharedCreatorIds, setUpdatingSharedCreatorIds] = useState<Set<string>>(new Set());
 
   const compactControlStyle = {
     padding: "10px 12px",
@@ -349,6 +512,38 @@ export function XiaohongshuTool() {
     return "后端 HTML 兜底";
   };
 
+  const normalizeAuthorKey = (value?: string | null) => String(value || "").trim().toLowerCase();
+
+  const normalizeXhsProfileUserId = (value?: string | null) => {
+    const cleanValue = String(value || "").trim();
+    const profileMatch = cleanValue.match(/\/user\/profile\/([^/?#]+)/);
+    return decodeURIComponent(profileMatch?.[1] || cleanValue).trim();
+  };
+
+  const buildXhsProfileUrl = (userId?: string | null) => {
+    const cleanUserId = normalizeXhsProfileUserId(userId);
+    return cleanUserId ? `https://www.xiaohongshu.com/user/profile/${encodeURIComponent(cleanUserId)}` : "";
+  };
+
+  const openExternalUrl = async (url?: string | null, label = "页面") => {
+    const cleanUrl = String(url || "").trim();
+    if (!cleanUrl) {
+      toast.error(`${label}链接不存在`);
+      return;
+    }
+    try {
+      await openUrl(cleanUrl);
+    } catch (e) {
+      try {
+        window.open(cleanUrl, "_blank", "noopener,noreferrer");
+        return;
+      } catch {
+        // fall through
+      }
+      toast.error(`打开${label}失败`, e instanceof Error ? e.message : "未知错误");
+    }
+  };
+
   useEffect(() => {
     return () => {
       if (albumListTimerRef.current) window.clearInterval(albumListTimerRef.current);
@@ -382,17 +577,384 @@ export function XiaohongshuTool() {
 
   const refreshTrackerConfig = async () => {
     const config = await api.get<any>("/api/modules/xiaohongshu-tracker/config");
-    setTrackerKeywords(config.keywords || []);
+    const normalized = normalizeXhsTrackerConfig(config);
+    const keywordKeywords = Array.from(
+      new Set(normalized.keywordMonitors.flatMap((monitor) => monitor.keywords))
+    );
+    const firstKeywordMonitor = normalized.keywordMonitors[0];
+    const creatorProfiles = { ...(config.creator_profiles || {}) };
+    normalized.creatorMonitors.forEach((monitor) => {
+      if (!monitor.user_id) return;
+      creatorProfiles[monitor.user_id] = {
+        ...(creatorProfiles[monitor.user_id] || {}),
+        author: monitor.author || monitor.label || monitor.user_id,
+        author_id: monitor.user_id,
+        smart_groups: monitor.smart_groups || [],
+        smart_group_labels: monitor.smart_group_labels || [],
+      };
+    });
+
+    setTrackerKeywords(keywordKeywords);
     setTrackerMaxResults(config.max_results ?? 20);
-    setTrackerKeywordMinLikes(config.keyword_min_likes ?? 500);
-    setTrackerKeywordLimit(config.keyword_search_limit ?? 10);
-    setTrackerEnableKeywordSearch(config.enable_keyword_search ?? true);
-    setTrackerFollowFeed(Boolean(config.follow_feed));
-    setTrackerFollowLimit(config.fetch_follow_limit ?? 20);
-    setTrackerUserIds(config.user_ids || []);
-    setDisabledCreatorIds(new Set(config.disabled_creator_ids || []));
-    setTrackerCreatorProfiles(config.creator_profiles || {});
-    setTrackerCreatorPushEnabled(config.creator_push_enabled ?? true);
+    setTrackerKeywordMinLikes(firstKeywordMonitor?.min_likes ?? config.keyword_min_likes ?? 500);
+    setTrackerKeywordLimit(firstKeywordMonitor?.per_keyword_limit ?? config.keyword_search_limit ?? 10);
+    setTrackerEnableKeywordSearch(normalized.keywordMonitors.some((monitor) => monitor.enabled));
+    setTrackerKeywordMonitors(normalized.keywordMonitors);
+    setTrackerFollowingScan(normalized.followingScan);
+    setTrackerFollowingScanMonitors(normalized.followingScanMonitors);
+    setTrackerKeywordDraft(keywordKeywords.join(", "));
+    setTrackerKeywordMonitorDrafts(Object.fromEntries(
+      normalized.keywordMonitors.map((monitor) => [monitor.id, monitor.keywords[0] || ""])
+    ));
+    setTrackerFollowingScanMonitorDrafts(Object.fromEntries(
+      normalized.followingScanMonitors.map((monitor) => [monitor.id, monitor.keywords[0] || ""])
+    ));
+    setTrackerFollowingScanKeywordDraft(formatKeywordInput(
+      normalized.followingScanMonitors.flatMap((monitor) => monitor.keywords),
+    ));
+    setTrackerCreatorMonitors(normalized.creatorMonitors);
+    setTrackerUserIds(normalized.creatorMonitors.map((monitor) => monitor.user_id).filter(Boolean));
+    setDisabledCreatorIds(new Set(normalized.creatorMonitors.filter((monitor) => !monitor.enabled).map((monitor) => monitor.user_id)));
+    setTrackerCreatorProfiles(creatorProfiles);
+    setTrackerCreatorNameMap(config.creator_name_map || {});
+    setTrackerCreatorGroups(config.creator_groups || []);
+    setTrackerCreatorGroupOptions(config.creator_group_options || []);
+    setTrackerCreatorPushEnabled(config.creator_push_enabled ?? false);
+    setSharedSignalEntries(config.shared_signal_entries || []);
+    setSharedCreatorGrouping(config.shared_creator_grouping || {});
+  };
+
+  const buildTrackerConfigPayload = (overrides: {
+    keyword_monitors?: XHSTrackerKeywordMonitor[];
+    following_scan?: XHSTrackerFollowingScan;
+    following_scan_monitors?: XHSTrackerFollowingScanMonitor[];
+    creator_monitors?: XHSTrackerCreatorMonitor[];
+    creator_groups?: string[];
+    creator_push_enabled?: boolean;
+  } = {}) => ({
+    keyword_monitors: overrides.keyword_monitors ?? trackerKeywordMonitors,
+    following_scan: overrides.following_scan ?? trackerFollowingScan,
+    following_scan_monitors: overrides.following_scan_monitors ?? trackerFollowingScanMonitors,
+    creator_monitors: overrides.creator_monitors ?? trackerCreatorMonitors,
+    creator_groups: overrides.creator_groups ?? trackerCreatorGroups,
+    creator_push_enabled: overrides.creator_push_enabled ?? trackerCreatorPushEnabled,
+    max_results: trackerMaxResults,
+  });
+
+  const buildKeywordMonitorsFromKeywords = (
+    keywords: string[],
+    currentMonitors: XHSTrackerKeywordMonitor[] = trackerKeywordMonitors,
+  ): XHSTrackerKeywordMonitor[] => {
+    const normalizedKeywords = parseKeywordInput(keywords.join(", "));
+    const existingByKeyword = new Map<string, XHSTrackerKeywordMonitor>();
+    currentMonitors.forEach((monitor) => {
+      const firstKeyword = (monitor.keywords[0] || "").trim().toLowerCase();
+      if (firstKeyword) {
+        existingByKeyword.set(firstKeyword, monitor);
+      }
+    });
+
+    return normalizedKeywords.map((keyword) => {
+      const existing = existingByKeyword.get(keyword.toLowerCase());
+      return createKeywordMonitor({
+        id: existing?.id,
+        label: keyword,
+        keywords: [keyword],
+        enabled: existing?.enabled ?? true,
+        min_likes: existing?.min_likes ?? trackerKeywordMinLikes,
+        per_keyword_limit: existing?.per_keyword_limit ?? trackerKeywordLimit,
+        include_comments: existing?.include_comments ?? false,
+        comments_limit: existing?.comments_limit ?? 20,
+        comments_sort_by: existing?.comments_sort_by ?? "likes",
+      });
+    });
+  };
+
+  const applyKeywordDraftToMonitors = (draftText: string) => {
+    const keywords = parseKeywordInput(draftText);
+    const nextMonitors = buildKeywordMonitorsFromKeywords(keywords);
+    const normalizedDraft = formatKeywordInput(keywords);
+    setTrackerKeywordDraft(normalizedDraft);
+    setTrackerKeywords(keywords);
+    setTrackerKeywordMonitors(nextMonitors);
+    setTrackerKeywordMonitorDrafts(Object.fromEntries(
+      nextMonitors.map((monitor) => [monitor.id, monitor.keywords[0] || ""])
+    ));
+    setTrackerEnableKeywordSearch(nextMonitors.some((monitor) => monitor.enabled));
+    return nextMonitors;
+  };
+
+  const mergeKeywordsIntoKeywordMonitors = (keywords: string[]) => {
+    const mergedKeywords = Array.from(new Set([
+      ...trackerKeywordMonitors.flatMap((monitor) => monitor.keywords),
+      ...parseKeywordInput(keywords.join(", ")),
+    ]));
+    return applyKeywordDraftToMonitors(formatKeywordInput(mergedKeywords));
+  };
+
+  const normalizeSingleKeywordDraft = (value: string) => {
+    const [firstKeyword] = parseKeywordInput(value);
+    return firstKeyword || "";
+  };
+
+  const commitKeywordMonitorDraft = (monitorId: string, draftText?: string) => {
+    const rawText = draftText ?? trackerKeywordMonitorDrafts[monitorId] ?? "";
+    const normalizedKeyword = normalizeSingleKeywordDraft(rawText);
+    const normalizedDraft = normalizedKeyword;
+    const nextMonitors = trackerKeywordMonitors.map((monitor) => (
+      monitor.id === monitorId
+        ? {
+            ...monitor,
+            keywords: normalizedKeyword ? [normalizedKeyword] : [],
+            label: normalizedKeyword || monitor.label,
+          }
+        : monitor
+    )).filter((monitor) => monitor.keywords.length > 0);
+    const mergedKeywords = Array.from(
+      new Set(nextMonitors.flatMap((monitor) => monitor.keywords).filter(Boolean))
+    );
+    setTrackerKeywordMonitorDrafts((prev) => ({
+      ...prev,
+      [monitorId]: normalizedDraft,
+    }));
+    setTrackerKeywordMonitors(nextMonitors);
+    setTrackerKeywords(mergedKeywords);
+    setTrackerKeywordDraft(formatKeywordInput(mergedKeywords));
+    setTrackerEnableKeywordSearch(nextMonitors.some((monitor) => monitor.enabled));
+  };
+
+  const buildFollowingScanMonitorsFromKeywords = (
+    keywords: string[],
+    currentMonitors: XHSTrackerFollowingScanMonitor[] = trackerFollowingScanMonitors,
+  ): XHSTrackerFollowingScanMonitor[] => {
+    const normalizedKeywords = parseKeywordInput(keywords.join(", "));
+    const existingByKeyword = new Map<string, XHSTrackerFollowingScanMonitor>();
+    currentMonitors.forEach((monitor) => {
+      const firstKeyword = (monitor.keywords[0] || "").trim().toLowerCase();
+      if (firstKeyword) {
+        existingByKeyword.set(firstKeyword, monitor);
+      }
+    });
+    return normalizedKeywords.map((keyword) => {
+      const existing = existingByKeyword.get(keyword.toLowerCase());
+      return createFollowingScanMonitor({
+        id: existing?.id,
+        label: keyword,
+        keywords: [keyword],
+        enabled: existing?.enabled ?? trackerFollowingScan.enabled ?? true,
+        fetch_limit: existing?.fetch_limit ?? trackerFollowingScan.fetch_limit,
+        recent_days: existing?.recent_days ?? trackerFollowingScan.recent_days,
+        sort_by: existing?.sort_by ?? trackerFollowingScan.sort_by,
+        keyword_filter: true,
+        include_comments: existing?.include_comments ?? trackerFollowingScan.include_comments,
+        comments_limit: existing?.comments_limit ?? trackerFollowingScan.comments_limit,
+        comments_sort_by: existing?.comments_sort_by ?? trackerFollowingScan.comments_sort_by,
+      });
+    });
+  };
+
+  const syncFollowingScanFromMonitors = (
+    monitors: XHSTrackerFollowingScanMonitor[],
+    baseScan: XHSTrackerFollowingScan = trackerFollowingScan,
+  ) => {
+    const primaryMonitor = monitors.find((monitor) => monitor.enabled) || monitors[0];
+    const activeKeywords = Array.from(new Set(
+      monitors
+        .filter((monitor) => monitor.enabled)
+        .flatMap((monitor) => monitor.keywords)
+        .filter(Boolean),
+    ));
+    setTrackerFollowingScan({
+      ...baseScan,
+      enabled: monitors.some((monitor) => monitor.enabled),
+      keywords: activeKeywords,
+      fetch_limit: primaryMonitor?.fetch_limit ?? baseScan.fetch_limit,
+      recent_days: primaryMonitor?.recent_days ?? baseScan.recent_days,
+      sort_by: primaryMonitor?.sort_by ?? baseScan.sort_by,
+      keyword_filter: true,
+      include_comments: primaryMonitor?.include_comments ?? baseScan.include_comments,
+      comments_limit: primaryMonitor?.comments_limit ?? baseScan.comments_limit,
+      comments_sort_by: primaryMonitor?.comments_sort_by ?? baseScan.comments_sort_by,
+    });
+  };
+
+  const applyFollowingScanDraftToMonitors = (draftText: string) => {
+    const keywords = parseKeywordInput(draftText);
+    const nextMonitors = buildFollowingScanMonitorsFromKeywords(keywords);
+    const normalizedDraft = formatKeywordInput(keywords);
+    setTrackerFollowingScanKeywordDraft(normalizedDraft);
+    setTrackerFollowingScanMonitors(nextMonitors);
+    setTrackerFollowingScanMonitorDrafts(Object.fromEntries(
+      nextMonitors.map((monitor) => [monitor.id, monitor.keywords[0] || ""])
+    ));
+    syncFollowingScanFromMonitors(nextMonitors);
+    return nextMonitors;
+  };
+
+  const mergeKeywordsIntoFollowingScanMonitors = (keywords: string[]) => {
+    const mergedKeywords = Array.from(new Set([
+      ...trackerFollowingScanMonitors.flatMap((monitor) => monitor.keywords),
+      ...parseKeywordInput(keywords.join(", ")),
+    ]));
+    return applyFollowingScanDraftToMonitors(formatKeywordInput(mergedKeywords));
+  };
+
+  const commitFollowingScanMonitorDraft = (monitorId: string, draftText?: string) => {
+    const rawText = draftText ?? trackerFollowingScanMonitorDrafts[monitorId] ?? "";
+    const normalizedKeyword = normalizeSingleKeywordDraft(rawText);
+    const normalizedDraft = normalizedKeyword;
+    const nextMonitors = trackerFollowingScanMonitors.map((monitor) => (
+      monitor.id === monitorId
+        ? createFollowingScanMonitor({
+            ...monitor,
+            label: normalizedKeyword || monitor.label,
+            keywords: normalizedKeyword ? [normalizedKeyword] : [],
+          })
+        : monitor
+    )).filter((monitor) => monitor.keywords.length > 0);
+    const mergedKeywords = Array.from(new Set(nextMonitors.flatMap((monitor) => monitor.keywords).filter(Boolean)));
+    setTrackerFollowingScanMonitorDrafts((prev) => ({
+      ...prev,
+      [monitorId]: normalizedDraft,
+    }));
+    setTrackerFollowingScanMonitors(nextMonitors);
+    setTrackerFollowingScanKeywordDraft(formatKeywordInput(mergedKeywords));
+    syncFollowingScanFromMonitors(nextMonitors);
+  };
+
+  const commitFollowingScanMonitorsForSave = () => {
+    const committedMonitors = trackerFollowingScanMonitors
+      .map((monitor) => {
+        const normalizedKeyword = normalizeSingleKeywordDraft(
+          trackerFollowingScanMonitorDrafts[monitor.id] ?? (monitor.keywords[0] || ""),
+        );
+        return createFollowingScanMonitor({
+          ...monitor,
+          label: normalizedKeyword || monitor.label,
+          keywords: normalizedKeyword ? [normalizedKeyword] : [],
+          keyword_filter: true,
+        });
+      })
+      .filter((monitor) => monitor.keywords.length > 0);
+    const mergedKeywords = Array.from(new Set(committedMonitors.flatMap((monitor) => monitor.keywords).filter(Boolean)));
+    setTrackerFollowingScanMonitors(committedMonitors);
+    setTrackerFollowingScanMonitorDrafts(Object.fromEntries(
+      committedMonitors.map((monitor) => [monitor.id, monitor.keywords[0] || ""])
+    ));
+    setTrackerFollowingScanKeywordDraft(formatKeywordInput(mergedKeywords));
+    syncFollowingScanFromMonitors(committedMonitors);
+    return committedMonitors;
+  };
+
+  const handleRemoveFollowingScanMonitor = (monitorId: string) => {
+    const nextMonitors = trackerFollowingScanMonitors.filter((monitor) => monitor.id !== monitorId);
+    const mergedKeywords = Array.from(new Set(nextMonitors.flatMap((monitor) => monitor.keywords).filter(Boolean)));
+    setTrackerFollowingScanMonitors(nextMonitors);
+    setTrackerFollowingScanMonitorDrafts((prev) => {
+      const next = { ...prev };
+      delete next[monitorId];
+      return next;
+    });
+    setTrackerFollowingScanKeywordDraft(formatKeywordInput(mergedKeywords));
+    syncFollowingScanFromMonitors(nextMonitors);
+  };
+
+  const buildFollowingScanPayload = (
+    monitors: XHSTrackerFollowingScanMonitor[] = trackerFollowingScanMonitors,
+    scan: XHSTrackerFollowingScan = trackerFollowingScan,
+  ) => {
+    const normalizedMonitors = monitors.map((monitor) => createFollowingScanMonitor({
+      ...monitor,
+      keyword_filter: true,
+    })).filter((monitor) => monitor.keywords.length > 0);
+    const primaryMonitor = normalizedMonitors.find((monitor) => monitor.enabled) || normalizedMonitors[0];
+    const activeKeywords = Array.from(new Set(
+      normalizedMonitors
+        .filter((monitor) => monitor.enabled)
+        .flatMap((monitor) => monitor.keywords)
+        .filter(Boolean),
+    ));
+    return {
+      followingScanMonitors: normalizedMonitors,
+      followingScan: createFollowingScan({
+        ...scan,
+        enabled: normalizedMonitors.some((monitor) => monitor.enabled),
+        keywords: activeKeywords,
+        fetch_limit: primaryMonitor?.fetch_limit ?? scan.fetch_limit,
+        recent_days: primaryMonitor?.recent_days ?? scan.recent_days,
+        sort_by: primaryMonitor?.sort_by ?? scan.sort_by,
+        keyword_filter: true,
+        include_comments: primaryMonitor?.include_comments ?? scan.include_comments,
+        comments_limit: primaryMonitor?.comments_limit ?? scan.comments_limit,
+        comments_sort_by: primaryMonitor?.comments_sort_by ?? scan.comments_sort_by,
+      }),
+    };
+  };
+
+  const commitKeywordMonitorsForSave = () => {
+    const committedMonitors = trackerKeywordMonitors
+      .map((monitor) => {
+        const normalizedKeyword = normalizeSingleKeywordDraft(
+          trackerKeywordMonitorDrafts[monitor.id] ?? (monitor.keywords[0] || ""),
+        );
+        return createKeywordMonitor({
+          ...monitor,
+          label: normalizedKeyword || monitor.label,
+          keywords: normalizedKeyword ? [normalizedKeyword] : [],
+        });
+      })
+      .filter((monitor) => monitor.keywords.length > 0);
+    const mergedKeywords = Array.from(
+      new Set(committedMonitors.flatMap((monitor) => monitor.keywords).filter(Boolean))
+    );
+    setTrackerKeywordMonitors(committedMonitors);
+    setTrackerKeywordMonitorDrafts(Object.fromEntries(
+      committedMonitors.map((monitor) => [monitor.id, monitor.keywords[0] || ""])
+    ));
+    setTrackerKeywords(mergedKeywords);
+    setTrackerKeywordDraft(formatKeywordInput(mergedKeywords));
+    setTrackerEnableKeywordSearch(committedMonitors.some((monitor) => monitor.enabled));
+    return committedMonitors;
+  };
+
+  const handleRemoveKeywordMonitor = (monitorId: string) => {
+    const nextMonitors = trackerKeywordMonitors.filter((monitor) => monitor.id !== monitorId);
+    const mergedKeywords = Array.from(
+      new Set(nextMonitors.flatMap((monitor) => monitor.keywords).filter(Boolean))
+    );
+    setTrackerKeywordMonitors(nextMonitors);
+    setTrackerKeywordMonitorDrafts((prev) => {
+      const next = { ...prev };
+      delete next[monitorId];
+      return next;
+    });
+    setTrackerKeywords(mergedKeywords);
+    setTrackerKeywordDraft(formatKeywordInput(mergedKeywords));
+    setTrackerEnableKeywordSearch(nextMonitors.some((monitor) => monitor.enabled));
+  };
+
+  const handleSaveSharedSignalMappings = async (mapping: Record<string, string[]>) => {
+    setSavingSignalMappings(true);
+    try {
+      await api.post("/api/modules/xiaohongshu-tracker/config", {
+        shared_creator_grouping: {
+          signal_group_labels: Object.fromEntries(
+            Object.entries(mapping)
+              .map(([signal, labels]) => [
+                signal.trim(),
+                [...new Set((labels || []).map((label) => String(label || "").trim()).filter(Boolean))],
+              ])
+              .filter(([signal, labels]) => signal && Array.isArray(labels) && labels.length > 0)
+          ),
+        },
+      });
+      await refreshTrackerConfig();
+      toast.success("共享映射已保存", "下次执行“共享智能分组”会优先使用这份映射。");
+    } catch (err) {
+      toast.error("保存失败", err instanceof Error ? err.message : "未知错误");
+    } finally {
+      setSavingSignalMappings(false);
+    }
   };
 
   // Persist cookies
@@ -499,15 +1061,31 @@ export function XiaohongshuTool() {
   const searchRunning = isTaskRunning("search");
   const commentsRunning = isTaskRunning("comments");
   const followingRunning = isTaskRunning("following-feed");
+  const creatorRecentRunning = isTaskRunning("creator-recent");
+  const creatorRecentBatchRunning = isTaskRunning("creator-recent-batch");
   const crawlNoteRunning = isTaskRunning("crawl-note");
   const crawlBatchRunning = isTaskRunning("crawl-batch");
   const previewSaveRunning = isTaskRunning("save-previews");
+  const smartGroupRunning = isTaskRunning("smart-groups");
+
+  useEffect(() => {
+    if (!followingRunning) {
+      setFollowingFeedTaskId(null);
+    }
+  }, [followingRunning]);
+
+  useEffect(() => {
+    if (!creatorRecentRunning) {
+      setCreatorRecentTaskId(null);
+    }
+  }, [creatorRecentRunning]);
 
   const runBackgroundTask = async <T,>(
     kind: string,
     start: () => Promise<{ success: boolean; task_id: string }>,
     onComplete: (result: T) => void,
     successMessage: (result: T) => { title: string; description?: string },
+    onStarted?: (taskId: string) => void,
   ) => {
     if (isTaskRunning(kind)) {
       toast.info("任务正在执行", "同类型任务完成后再启动新的。");
@@ -516,6 +1094,7 @@ export function XiaohongshuTool() {
     setTaskRunning(kind, true);
     try {
       const started = await start();
+      onStarted?.(started.task_id);
       setBackgroundTask({ kind, stage: "任务已创建", taskId: started.task_id });
       setTaskHistory((prev) => [
         {
@@ -549,6 +1128,13 @@ export function XiaohongshuTool() {
             setTaskRunning(kind, false);
             return;
           }
+          if (progress.status === "cancelled" || progress.status === "interrupted") {
+            toast.info("任务已停止", progress.stage || "已中断");
+            setTaskHistory((prev) => [progress, ...prev.filter((item) => item.task_id !== progress.task_id)].slice(0, 20));
+            setBackgroundTask(null);
+            setTaskRunning(kind, false);
+            return;
+          }
           window.setTimeout(poll, 1000);
         } catch (err) {
           toast.error("读取后台进度失败", err instanceof Error ? err.message : "未知错误");
@@ -564,6 +1150,53 @@ export function XiaohongshuTool() {
       throw err;
     }
   };
+
+  const normalizeFollowingLimit = (value: unknown) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 20;
+    return Math.max(1, Math.min(300, Math.round(parsed)));
+  };
+
+  const scrollToAnchor = (ref: React.RefObject<HTMLDivElement | null>) => {
+    ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const scrollNoteCarousel = (ref: React.RefObject<HTMLDivElement | null>, direction: -1 | 1) => {
+    const el = ref.current;
+    if (!el) return;
+    el.scrollBy({ left: direction * Math.max(320, el.clientWidth - 80), behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    const handleNoteCarouselKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.tagName === "INPUT" ||
+        target?.tagName === "TEXTAREA" ||
+        target?.tagName === "SELECT" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      const direction = key === "arrowleft" || key === "q" ? -1 : key === "arrowright" || key === "e" ? 1 : 0;
+      if (!direction) return;
+
+      const activeCarouselRef = activeTab === "following"
+        ? followingResultCarouselRef
+        : activeTab === "search"
+          ? searchResultCarouselRef
+          : (creatorRecentResultCarouselRef.current ? creatorRecentResultCarouselRef : creatorBatchResultCarouselRef.current ? creatorBatchResultCarouselRef : null);
+      if (!activeCarouselRef?.current) return;
+
+      event.preventDefault();
+      scrollNoteCarousel(activeCarouselRef, direction as -1 | 1);
+    };
+
+    document.addEventListener("keydown", handleNoteCarouselKeyDown, { capture: true });
+    return () => document.removeEventListener("keydown", handleNoteCarouselKeyDown, { capture: true });
+  }, [activeTab]);
 
   const handleGetCookieFromBrowser = async (browser: BrowserChoice = albumCookieBrowser) => {
     setGettingCookie(true);
@@ -647,17 +1280,25 @@ export function XiaohongshuTool() {
       return;
     }
     try {
+      const shouldAutoSave = searchAutoSaveAfterFetch;
       await runBackgroundTask<SearchResponse>(
         "search",
         () => xiaohongshuStartSearchTask({
           keyword: searchKeyword.trim(),
           max_results: Math.max(1, Math.min(300, searchLimit || 20)),
           min_likes: minLikes,
-          sort_by: sortBy,
+          sort_by: "comprehensive",
+          recent_days: Math.max(1, Math.min(365, searchRecentDays || DEFAULT_XHS_RECENT_DAYS)),
           cookie: buildCookie() || undefined,
           ...xhsBridgeOptions,
         }),
-        (result) => setSearchResult(result),
+        (result) => {
+          setSearchResult(result);
+          setShowSearchResults(true);
+          if (shouldAutoSave && result.notes.length > 0) {
+            void handleSaveSearchResults(result.notes, result.keyword);
+          }
+        },
         (result) => ({ title: `找到 ${result.total_found} 条结果` }),
       );
     } catch (e) {
@@ -709,21 +1350,152 @@ export function XiaohongshuTool() {
       return;
     }
     try {
-      const keywords = followingKeywords.split(/[,，]/).map(k => k.trim()).filter(Boolean);
+      const keywords = parseKeywordInput(followingKeywords);
+      const keywordLabel = keywords.join("，") || followingKeywords.trim();
+      const shouldAutoSave = followingAutoSaveAfterFetch;
       await runBackgroundTask<FollowingFeedResponse>(
         "following-feed",
         () => xiaohongshuStartFollowingFeedTask({
           cookie: buildCookie() || undefined,
           keywords,
-          max_notes: Math.max(1, Math.min(300, followingLimit || 50)),
+          max_notes: normalizeFollowingLimit(followingLimit),
+          recent_days: Math.max(1, Math.min(365, followingRecentDays || DEFAULT_XHS_RECENT_DAYS)),
+          sort_by: "time",
           ...xhsBridgeOptions,
         }),
-        (result) => setFollowingResult(result),
-        (result) => ({ title: `关注列表中找到 ${result.total_found} 条匹配结果` }),
+        (result) => {
+          setFollowingResult(result);
+          setShowFollowingResults(true);
+          setExpandedFollowingNotes(new Set());
+          if (shouldAutoSave && result.notes.length > 0) {
+            void handleSaveFollowingResults(result.notes, keywordLabel);
+          }
+        },
+        (result) => ({ title: `已关注筛选中找到 ${result.total_found} 条匹配结果` }),
+        (taskId) => setFollowingFeedTaskId(taskId),
       );
     } catch (e) {
-      console.error("获取关注列表失败:", e);
-      toast.error("获取关注列表失败");
+      console.error("获取关注流关键词结果失败:", e);
+      setFollowingFeedTaskId(null);
+      toast.error("获取关注流关键词结果失败", e instanceof Error ? e.message : "未知错误");
+    }
+  };
+
+  const runCreatorRecentFetch = async (
+    nextCreatorQuery = creatorSearchQuery,
+    overrides: { recentDays?: number; maxNotes?: number } = {},
+  ) => {
+    const trimmedQuery = String(nextCreatorQuery || "").trim();
+    if (!trimmedQuery) {
+      toast.error("请输入博主名称、主页链接或 user_id");
+      return;
+    }
+    if (!requireCookie()) {
+      return;
+    }
+    const recentDays = Math.max(1, Math.min(365, overrides.recentDays ?? creatorRecentDays ?? DEFAULT_XHS_RECENT_DAYS));
+    const maxNotes = Math.max(1, Math.min(50, overrides.maxNotes ?? creatorRecentLimit ?? 10));
+    const shouldAutoSave = creatorRecentAutoSaveAfterFetch;
+    setCreatorSearchQuery(trimmedQuery);
+    setCreatorRecentDays(recentDays);
+    setCreatorRecentLimit(maxNotes);
+    setShowCreatorRecentWorkbench(true);
+    setCreatorRecentResult(null);
+    setCreatorBatchResults([]);
+    try {
+      await runBackgroundTask<XHSCreatorRecentResponse>(
+        "creator-recent",
+        () => xiaohongshuStartCreatorRecentTask({
+          creator_query: trimmedQuery,
+          cookie: buildCookie() || undefined,
+          recent_days: recentDays,
+          max_notes: maxNotes,
+          use_extension: true,
+          extension_port: albumExtensionPort,
+          dedicated_window_mode: albumDedicatedWindowMode,
+          manual_current_tab: false,
+          require_extension_success: true,
+        }),
+        (result) => {
+          setCreatorRecentResult(result);
+          setCreatorRecentTaskId(null);
+          focusCreatorRecentResults();
+          if (shouldAutoSave && result.notes.length > 0) {
+            void handleSaveCreatorRecentNotes(
+              result.notes,
+              result.resolved_author || result.creator_query,
+              "博主最近动态已入库",
+            );
+          }
+        },
+        (result) => ({
+          title: `${result.resolved_author || result.resolved_user_id} 最近 ${result.recent_days} 天 ${result.total_found} 条`,
+        }),
+        (taskId) => setCreatorRecentTaskId(taskId),
+      );
+    } catch (e) {
+      console.error("抓取指定博主失败:", e);
+      setCreatorRecentTaskId(null);
+      toast.error("抓取指定博主失败", e instanceof Error ? e.message : "未知错误");
+    }
+  };
+
+  const handleFetchCreatorRecent = async () => {
+    await runCreatorRecentFetch();
+  };
+
+  const waitForTaskResult = async <T,>(taskId: string): Promise<T> => {
+    while (true) {
+      const progress = await xiaohongshuGetTaskStatus<T>(taskId);
+      if (progress.status === "completed" && progress.result) {
+        return progress.result;
+      }
+      if (progress.status === "failed") {
+        throw new Error(progress.error || progress.stage || "任务执行失败");
+      }
+      if (progress.status === "cancelled" || progress.status === "interrupted") {
+        throw new Error(progress.stage || "任务已停止");
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 800));
+    }
+  };
+
+  const fetchCreatorRecentDirect = async (
+    creatorQuery: string,
+    recentDays: number,
+    maxNotes: number,
+  ): Promise<XHSCreatorRecentResponse> => {
+    const started = await xiaohongshuStartCreatorRecentTask({
+      creator_query: creatorQuery,
+      cookie: buildCookie() || undefined,
+      recent_days: recentDays,
+      max_notes: maxNotes,
+      use_extension: true,
+      extension_port: albumExtensionPort,
+      dedicated_window_mode: albumDedicatedWindowMode,
+      manual_current_tab: false,
+      require_extension_success: true,
+    });
+    return waitForTaskResult<XHSCreatorRecentResponse>(started.task_id);
+  };
+
+  const handleCancelFollowingFeed = async () => {
+    if (!followingFeedTaskId) return;
+    try {
+      await xiaohongshuCancelTask(followingFeedTaskId);
+      toast.info("已发送停止指令", "关注流关键词搜索正在中断。");
+    } catch (e) {
+      toast.error("停止失败", e instanceof Error ? e.message : "未知错误");
+    }
+  };
+
+  const handleCancelCreatorRecent = async () => {
+    if (!creatorRecentTaskId) return;
+    try {
+      await xiaohongshuCancelTask(creatorRecentTaskId);
+      toast.info("已发送停止指令", "指定 UP 主抓取正在中断。");
+    } catch (e) {
+      toast.error("停止失败", e instanceof Error ? e.message : "未知错误");
     }
   };
 
@@ -749,7 +1521,10 @@ export function XiaohongshuTool() {
           ...xhsCrawlFallbackOptions,
         }),
         (result) => setCrawlResult(result),
-        (result) => ({ title: "已保存到 xhs", description: result.markdown_path }),
+        (result) => ({
+          title: "已保存到 xhs",
+          description: formatLibraryLocation(result.markdown_path, "vault", config),
+        }),
       );
     } catch (e) {
       console.error("Crawl note failed:", e);
@@ -780,7 +1555,18 @@ export function XiaohongshuTool() {
           ...xhsCrawlFallbackOptions,
         }),
         (result) => setBatchResult(result),
-        (result) => ({ title: "批量入库完成", description: `成功 ${result.saved} 条，失败 ${result.failed} 条` }),
+        (result) => {
+          const firstSavedResult = result.results.find((item): item is CrawlNoteResponse => item.success === true);
+          return {
+            title: "批量入库完成",
+            description: withLocationSuffix(
+              `成功 ${result.saved} 条，失败 ${result.failed} 条`,
+              firstSavedResult?.xhs_dir || firstSavedResult?.markdown_path,
+              "vault",
+              config,
+            ),
+          };
+        },
       );
     } catch (e) {
       console.error("Crawl batch failed:", e);
@@ -788,10 +1574,52 @@ export function XiaohongshuTool() {
     }
   };
 
-  const handleSavePreviewNotes = async (notes: XHSNote[]) => {
+  const buildSaveSubfolderName = (raw: string, fallback: string) => {
+    const compact = raw.trim().replace(/\s+/g, " ");
+    return compact || fallback;
+  };
+
+  const buildKeywordSaveSubfolder = (keyword: string) => buildSaveSubfolderName(
+    `关键词扫描/${keyword}`,
+    "关键词扫描/未命名关键词",
+  );
+
+  const buildFollowingSaveSubfolder = (keywordLabel: string) => buildSaveSubfolderName(
+    `关注流扫描/${keywordLabel}`,
+    "关注流扫描/未命名关键词",
+  );
+
+  const buildCreatorSaveSubfolder = (rawLabel: string) => buildSaveSubfolderName(
+    `指定用户扫描/${rawLabel}`,
+    "指定用户扫描/未命名用户",
+  );
+
+  const keywordLabelFromFollowingResult = (result: FollowingFeedResponse, fallback: string) => {
+    const keywords = Array.from(new Set(
+      result.notes.flatMap((note) => note.matched_keywords || []).map((keyword) => keyword.trim()).filter(Boolean),
+    ));
+    return keywords.join("，") || parseKeywordInput(fallback).join("，") || fallback;
+  };
+
+  const focusCreatorRecentResults = () => {
+    setExpandedCreatorSelectorGroups(new Set());
+    setShowCreatorRecentWorkbench(false);
+  };
+
+  const handleSavePreviewNotesWithOptions = async (
+    notes: XHSNote[],
+    options: {
+      subfolder?: string;
+      successTitle?: string;
+      includeComments?: boolean;
+      commentsLimit?: number;
+      commentsSortBy?: "likes" | "time";
+      emptyMessage?: string;
+    },
+  ) => {
     const targetNotes = notes.filter((note) => note.url);
     if (targetNotes.length === 0) {
-      toast.error("没有可入库的搜索结果");
+      toast.error(options.emptyMessage || "没有可入库的搜索结果");
       return;
     }
     if (previewSaveRunning) {
@@ -800,15 +1628,28 @@ export function XiaohongshuTool() {
     }
     setTaskRunning("save-previews", true);
     try {
-      const result = await xiaohongshuSavePreviews(targetNotes);
+      const result = await xiaohongshuSavePreviews({
+        notes: targetNotes,
+        subfolder: options.subfolder,
+        ...xhsCrawlFallbackOptions,
+        download_images_mode: "always",
+        save_strategy: "card",
+        short_content_threshold: 120,
+        include_comments: Boolean(options.includeComments),
+        comments_limit: options.includeComments ? Math.max(1, options.commentsLimit || 20) : 0,
+        comments_sort_by: options.includeComments ? (options.commentsSortBy || "likes") : "likes",
+      });
       const status: XHSTaskStatus["status"] = result.failed > 0 ? "failed" : "completed";
-      toast.success("已保存到 xhs", `成功 ${result.saved} 条，失败 ${result.failed} 条`);
+      toast.success(
+        options.successTitle || "已保存到 xhs",
+        withLocationSuffix(`成功 ${result.saved} 条，失败 ${result.failed} 条`, result.xhs_dir, "vault", config),
+      );
       setTaskHistory((prev) => [
         {
           task_id: `preview-${Date.now()}`,
           kind: "save-previews",
           status,
-          stage: `预览入库完成：成功 ${result.saved} 条，失败 ${result.failed} 条`,
+          stage: `统一入库完成：成功 ${result.saved} 条，失败 ${result.failed} 条`,
           result,
           error: result.failed > 0 ? "部分搜索结果保存失败" : null,
           created_at: new Date().toISOString(),
@@ -821,6 +1662,40 @@ export function XiaohongshuTool() {
     } finally {
       setTaskRunning("save-previews", false);
     }
+  };
+
+  const handleSaveCreatorRecentNotes = async (
+    notes: XHSNote[],
+    rawSubfolder: string,
+    successTitle: string,
+  ) => {
+    await handleSavePreviewNotesWithOptions(notes, {
+      subfolder: buildCreatorSaveSubfolder(rawSubfolder),
+      successTitle,
+      emptyMessage: "没有可入库的博主动态",
+    });
+  };
+
+  const handleSaveSearchResults = async (notes: XHSNote[], keyword: string) => {
+    await handleSavePreviewNotesWithOptions(notes, {
+      subfolder: buildKeywordSaveSubfolder(keyword),
+      successTitle: "关键词结果已入库",
+      includeComments: searchSaveComments,
+      commentsLimit: searchSaveCommentsLimit,
+      commentsSortBy: searchSaveCommentsSortBy,
+      emptyMessage: "没有可入库的关键词结果",
+    });
+  };
+
+  const handleSaveFollowingResults = async (notes: XHSNote[], keywordLabel: string) => {
+    await handleSavePreviewNotesWithOptions(notes, {
+      subfolder: buildFollowingSaveSubfolder(keywordLabel),
+      successTitle: "关注流搜索结果已入库",
+      includeComments: searchSaveComments,
+      commentsLimit: searchSaveCommentsLimit,
+      commentsSortBy: searchSaveCommentsSortBy,
+      emptyMessage: "没有可入库的关注流结果",
+    });
   };
 
   const handleFetchAlbums = async () => {
@@ -964,12 +1839,22 @@ export function XiaohongshuTool() {
             if (failedCount > 0) {
               toast.error(
                 `专辑${mode === "full" ? "全量" : "增量"}抓取结束`,
-                `新增 ${savedCount} 条，跳过 ${skippedCount} 条，失败 ${failedCount} 条；已保留当前专辑列表${failureDetail}`,
+                withLocationSuffix(
+                  `新增 ${savedCount} 条，跳过 ${skippedCount} 条，失败 ${failedCount} 条；已保留当前专辑列表${failureDetail}`,
+                  dirnamePath(progress.result?.progress_path),
+                  "vault",
+                  config,
+                ),
               );
             } else {
               toast.success(
                 `专辑${mode === "full" ? "全量" : "增量"}抓取完成`,
-                `新增 ${savedCount} 条，跳过 ${skippedCount} 条；已保留当前专辑列表`,
+                withLocationSuffix(
+                  `新增 ${savedCount} 条，跳过 ${skippedCount} 条；已保留当前专辑列表`,
+                  dirnamePath(progress.result?.progress_path),
+                  "vault",
+                  config,
+                ),
               );
             }
           } else if (progress.status === "cancelled") {
@@ -999,16 +1884,14 @@ export function XiaohongshuTool() {
 
   const handleSaveTrackerKeywords = async () => {
     try {
-      await api.post("/api/modules/xiaohongshu-tracker/config", {
-        keywords: trackerKeywords,
-        max_results: trackerMaxResults,
-        enable_keyword_search: trackerEnableKeywordSearch,
-        keyword_min_likes: trackerKeywordMinLikes,
-        keyword_search_limit: trackerKeywordLimit,
-        follow_feed: trackerFollowFeed,
-        fetch_follow_limit: trackerFollowLimit,
-      });
-      toast.success("关键词推送已保存", "模块管理会按定时任务抓取这些关键词");
+      const draftKeywords = parseKeywordInput(trackerKeywordDraft);
+      const nextKeywordMonitors = draftKeywords.length > 0
+        ? applyKeywordDraftToMonitors(trackerKeywordDraft)
+        : commitKeywordMonitorsForSave();
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        keyword_monitors: nextKeywordMonitors,
+      }));
+      toast.success("情报推送已保存", "模块管理会按定时任务抓取这些定义");
       await refreshTrackerConfig();
       setExpandedPushes((prev) => new Set(prev).add("keyword"));
     } catch (e) {
@@ -1017,11 +1900,25 @@ export function XiaohongshuTool() {
   };
 
   const handleToggleKeywordPush = async () => {
+    const draftKeywords = parseKeywordInput(trackerKeywordDraft);
+    const existingMonitors = draftKeywords.length > 0
+      ? applyKeywordDraftToMonitors(trackerKeywordDraft)
+      : commitKeywordMonitorsForSave();
+    if (existingMonitors.length === 0) {
+      toast.error("请先添加至少一个关键词定义");
+      return;
+    }
     const next = !trackerEnableKeywordSearch;
+    const nextKeywordMonitors = existingMonitors.map((monitor) => ({
+      ...monitor,
+      enabled: next,
+    }));
     try {
-      await api.post("/api/modules/xiaohongshu-tracker/config", { enable_keyword_search: next });
-      setTrackerEnableKeywordSearch(next);
-      toast.success(next ? "关键词推送已开启" : "关键词推送已关闭");
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        keyword_monitors: nextKeywordMonitors,
+      }));
+      await refreshTrackerConfig();
+      toast.success(next ? "情报推送已开启" : "情报推送已关闭");
     } catch (e) {
       toast.error("保存失败", e instanceof Error ? e.message : "未知错误");
     }
@@ -1029,29 +1926,37 @@ export function XiaohongshuTool() {
 
   const handleDeleteKeywordPush = async () => {
     try {
-      await api.post("/api/modules/xiaohongshu-tracker/config", {
-        keywords: [],
-        enable_keyword_search: false,
-      });
+      setTrackerKeywordDraft("");
+      setTrackerKeywordMonitorDrafts({});
+      setTrackerKeywordMonitors([]);
       setTrackerKeywords([]);
       setTrackerEnableKeywordSearch(false);
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        keyword_monitors: [],
+      }));
+      await refreshTrackerConfig();
       setExpandedPushes((prev) => {
         const next = new Set(prev);
         next.delete("keyword");
         return next;
       });
-      toast.success("关键词推送已删除");
+      toast.success("情报推送已删除");
     } catch (e) {
       toast.error("删除失败", e instanceof Error ? e.message : "未知错误");
     }
   };
 
   const handleToggleCreatorPush = async () => {
-    const next = !trackerCreatorPushEnabled;
+    const baseCreatorMonitors = trackerCreatorMonitors.length > 0 ? trackerCreatorMonitors : creatorEntries;
+    const next = !baseCreatorMonitors.some((monitor) => monitor.enabled);
+    const nextCreatorMonitors = baseCreatorMonitors.map((monitor) => ({ ...monitor, enabled: next }));
     try {
-      await api.post("/api/modules/xiaohongshu-tracker/config", { creator_push_enabled: next });
-      setTrackerCreatorPushEnabled(next);
-      toast.success(next ? "博主推送已开启" : "博主推送已关闭");
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        creator_monitors: nextCreatorMonitors,
+        creator_push_enabled: next,
+      }));
+      await refreshTrackerConfig();
+      toast.success(next ? "全部博主已开启" : "全部博主已关闭");
     } catch (e) {
       toast.error("保存失败", e instanceof Error ? e.message : "未知错误");
     }
@@ -1059,125 +1964,194 @@ export function XiaohongshuTool() {
 
   const handleDeleteCreatorPush = async () => {
     try {
-      await api.post("/api/modules/xiaohongshu-tracker/config", {
-        user_ids: [],
-        creator_profiles: {},
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        creator_monitors: [],
         creator_groups: [],
-        disabled_creator_ids: [],
         creator_push_enabled: false,
-      });
-      setTrackerUserIds([]);
-      setTrackerCreatorProfiles({});
-      setDisabledCreatorIds(new Set());
-      setTrackerCreatorPushEnabled(false);
+      }));
+      await refreshTrackerConfig();
       setExpandedPushes((prev) => {
         const next = new Set(prev);
         next.delete("creator");
         return next;
       });
-      toast.success("博主推送已删除");
+      toast.success("特定关注已删除");
     } catch (e) {
       toast.error("删除失败", e instanceof Error ? e.message : "未知错误");
     }
   };
 
   const handleToggleCreatorUser = async (userId: string) => {
-    const next = new Set(disabledCreatorIds);
-    if (next.has(userId)) next.delete(userId);
-    else next.add(userId);
+    const normalizedUserId = normalizeXhsProfileUserId(userId);
+    const baseCreatorMonitors = trackerCreatorMonitors.length > 0 ? trackerCreatorMonitors : creatorEntries;
+    const nextCreatorMonitors = baseCreatorMonitors.map((monitor) => (
+      normalizeXhsProfileUserId(monitor.user_id) === normalizedUserId
+        ? { ...monitor, enabled: !monitor.enabled }
+        : monitor
+    ));
     try {
-      await api.post("/api/modules/xiaohongshu-tracker/config", {
-        disabled_creator_ids: Array.from(next),
-      });
-      setDisabledCreatorIds(next);
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        creator_monitors: nextCreatorMonitors,
+      }));
+      await refreshTrackerConfig();
     } catch (e) {
       toast.error("保存失败", e instanceof Error ? e.message : "未知错误");
     }
   };
 
   const handleRemoveCreatorUser = async (userId: string) => {
-    const nextIds = trackerUserIds.filter((item) => item !== userId);
-    const nextProfiles = { ...trackerCreatorProfiles };
-    delete nextProfiles[userId];
-    const nextDisabled = new Set(disabledCreatorIds);
-    nextDisabled.delete(userId);
+    const normalizedUserId = normalizeXhsProfileUserId(userId);
+    const baseCreatorMonitors = trackerCreatorMonitors.length > 0 ? trackerCreatorMonitors : creatorEntries;
+    const nextCreatorMonitors = baseCreatorMonitors.filter((monitor) => normalizeXhsProfileUserId(monitor.user_id) !== normalizedUserId);
     try {
-      await api.post("/api/modules/xiaohongshu-tracker/config", {
-        user_ids: nextIds,
-        creator_profiles: nextProfiles,
-        disabled_creator_ids: Array.from(nextDisabled),
-        creator_push_enabled: nextIds.length > 0 ? trackerCreatorPushEnabled : false,
-      });
-      setTrackerUserIds(nextIds);
-      setTrackerCreatorProfiles(nextProfiles);
-      setDisabledCreatorIds(nextDisabled);
-      if (nextIds.length === 0) setTrackerCreatorPushEnabled(false);
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        creator_monitors: nextCreatorMonitors,
+      }));
+      await refreshTrackerConfig();
       toast.success("博主已移除");
     } catch (e) {
       toast.error("删除失败", e instanceof Error ? e.message : "未知错误");
     }
   };
 
-  const handleAnalyzeAuthors = async () => {
-    if (!requireCookie("需要 Cookie 才能回查作者 ID")) {
+  const handleRemoveCreatorMonitor = async (creatorMonitor: XHSTrackerCreatorMonitor) => {
+    if (creatorMonitor.user_id) {
+      await handleRemoveCreatorUser(creatorMonitor.user_id);
       return;
     }
+    const nextCreatorMonitors = trackerCreatorMonitors.filter((monitor) => monitor.id !== creatorMonitor.id);
+    setTrackerCreatorMonitors(nextCreatorMonitors);
+  };
+
+  const handleClearCreatorMonitors = async (scope: "all" | "filtered" | "page") => {
+    const baseCreatorMonitors = trackerCreatorMonitors.length > 0 ? trackerCreatorMonitors : creatorEntries;
+    const removeIds = new Set(
+      (scope === "all" ? baseCreatorMonitors : scope === "filtered" ? filteredCreatorEntries : visibleCreatorEntries)
+        .map((monitor) => monitor.id),
+    );
+    if (removeIds.size === 0) {
+      toast.info("当前没有可删除的关注");
+      return;
+    }
+    const nextCreatorMonitors = scope === "all"
+      ? []
+      : baseCreatorMonitors.filter((monitor) => !removeIds.has(monitor.id));
     try {
-      await runBackgroundTask<{
-        total_notes: number;
-        message: string;
-        candidates: XHSAuthorCandidate[];
-      }>(
-        "author-candidates",
-        () => xiaohongshuStartAuthorCandidatesTask({
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        creator_monitors: nextCreatorMonitors,
+        creator_push_enabled: nextCreatorMonitors.length > 0 ? trackerCreatorPushEnabled : false,
+      }));
+      await refreshTrackerConfig();
+      setCreatorMonitorPage(0);
+      toast.success("关注已批量删除", `删除 ${removeIds.size} 个博主`);
+    } catch (e) {
+      toast.error("批量删除失败", e instanceof Error ? e.message : "未知错误");
+    }
+  };
+
+  const handleImportCreatorGroup = async (groupValue: string) => {
+    const group = visibleSharedCreatorGroups.find((item) => item.value === groupValue);
+    if (!group) return;
+    const currentMonitors = trackerCreatorMonitors.length > 0 ? trackerCreatorMonitors : creatorEntries;
+    const existingIds = new Set(currentMonitors.map((monitor) => normalizeXhsProfileUserId(monitor.user_id)).filter(Boolean));
+    const importedMonitors = group.members
+      .filter((member) => member.authorId && !existingIds.has(normalizeXhsProfileUserId(member.authorId)))
+      .map((member) => createCreatorMonitor({
+        user_id: member.authorId,
+        label: member.author,
+        author: member.author,
+        enabled: true,
+        smart_groups: member.profile.smart_groups || [],
+        smart_group_labels: member.profile.smart_group_labels || [],
+      }));
+    if (importedMonitors.length === 0) {
+      toast.info("这个智能分组里的博主都已添加");
+      return;
+    }
+    const nextCreatorMonitors = [...currentMonitors, ...importedMonitors];
+    try {
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        creator_monitors: nextCreatorMonitors,
+      }));
+      await refreshTrackerConfig();
+      setCreatorMonitorGroupFilter(groupValue);
+      setCreatorMonitorPage(0);
+      setExpandedPushes((prev) => new Set(prev).add("creator"));
+      toast.success("已从智能分组导入", `新增 ${importedMonitors.length} 个博主`);
+    } catch (e) {
+      toast.error("导入失败", e instanceof Error ? e.message : "未知错误");
+    }
+  };
+
+  const handleRunSharedSmartGroups = async (mode: "full" | "creator-only" = "full") => {
+    try {
+      await runBackgroundTask<XHSSmartGroupResult>(
+        "smart-groups",
+        () => xiaohongshuStartSmartGroupTask({
           cookie: buildCookie() || undefined,
-          resolve_author_ids: true,
-          resolve_limit: 15,
+          resolve_author_ids: Boolean(buildCookie()),
+          resolve_limit: 0,
+          mode,
         }),
         (result) => {
-          setAuthorCandidates(result.candidates);
-          setAuthorCandidateMeta({ totalNotes: result.total_notes, message: result.message });
-          setSelectedAuthors(new Set(result.candidates.filter((item) => item.author_id).slice(0, 10).map((item) => item.author)));
+          setSmartGroupResult(result);
+          setAuthorCandidates(result.xhs_candidates || []);
+          setAuthorCandidateMeta({
+            totalNotes: result.total_notes || 0,
+            message: result.xhs_candidate_message || result.message,
+          });
+          setFrequentAuthorGroupFilter("all");
+          setShowAllFrequentAuthors(false);
+          void refreshTrackerConfig();
+          setExpandedPushes((prev) => new Set(prev).add("creator"));
         },
-        (result) => ({ title: "博主候选已生成", description: result.message }),
+        (result) => ({
+          title: result.workflow_mode === "creator-only"
+            ? "博主 / UP 已重新整理"
+            : (result.already_grouped ? "智能分组已增量更新" : "智能分组已生成"),
+          description: result.message,
+        }),
       );
     } catch (e) {
-      toast.error("分析失败", e instanceof Error ? e.message : "未知错误");
+      toast.error("智能分组失败", e instanceof Error ? e.message : "未知错误");
     }
   };
 
-  const toggleAuthorSelection = (author: string) => {
-    setSelectedAuthors((prev) => {
-      const next = new Set(prev);
-      if (next.has(author)) next.delete(author);
-      else next.add(author);
-      return next;
-    });
+  const handleBuildSmartGroups = async () => {
+    await handleRunSharedSmartGroups("full");
   };
 
-  const handleSyncSelectedAuthors = async () => {
-    const selected = authorCandidates.filter((item) => selectedAuthors.has(item.author) && item.author_id);
-    if (selected.length === 0) {
-      toast.error("没有可同步的博主", "请选择已经解析出作者 ID 的候选");
+  const handleRefreshSharedCreatorAssignments = async () => {
+    await handleRunSharedSmartGroups("creator-only");
+  };
+
+  const handleAddFrequentAuthorToCreatorMonitor = async (candidate: XHSAuthorCandidate) => {
+    if (!candidate.author_id) {
+      toast.error("这个博主还没解析出 user_id", "先重新执行一次“共享智能分组”。");
+      return;
+    }
+    if (trackerCreatorMonitors.some((monitor) => monitor.user_id === candidate.author_id)) {
+      setExpandedPushes((prev) => new Set(prev).add("creator"));
+      toast.info("这个博主已经在指定关注里");
       return;
     }
     try {
-      const result = await xiaohongshuSyncAuthorsToTracker(
-        selected.map((item) => ({
-          author: item.author,
-          author_id: item.author_id,
-          latest_title: item.latest_title,
-          sample_titles: item.sample_titles,
-          sample_albums: item.sample_albums || [],
-          sample_tags: item.sample_tags || [],
-          source_summary: item.source_summary || "",
-        }))
-      );
-      toast.success("已同步到模块管理", `新增 ${result.added_count} 个 user_id，当前总数 ${result.total_user_ids}`);
+      const result = await xiaohongshuSyncAuthorsToTracker([
+        {
+          author: candidate.author,
+          author_id: candidate.author_id,
+          latest_title: candidate.latest_title,
+          sample_titles: candidate.sample_titles,
+          sample_albums: candidate.sample_albums || [],
+          sample_tags: candidate.sample_tags || [],
+          source_summary: candidate.source_summary || "",
+        },
+      ]);
       await refreshTrackerConfig();
       setExpandedPushes((prev) => new Set(prev).add("creator"));
+      toast.success("已加入指定关注爬取", `新增 ${result.added_count} 个博主，当前总数 ${result.total_user_ids}`);
     } catch (e) {
-      toast.error("同步失败", e instanceof Error ? e.message : "未知错误");
+      toast.error("加入失败", e instanceof Error ? e.message : "未知错误");
     }
   };
 
@@ -1190,118 +2164,212 @@ export function XiaohongshuTool() {
     });
   };
 
-  const renderNoteMedia = (note: XHSNote) => {
-    const images = note.images || [];
-    const previewImages = images.slice(0, 6);
-
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px", marginBottom: "12px" }}>
-        {note.video_url && (
-          <div
+  const renderHorizontalNoteResults = ({
+    notes,
+    carouselRef,
+    layout,
+    onLayoutChange,
+    expandedIds,
+    onToggleExpand,
+    saveSubfolder,
+    saveSuccessTitle,
+    saveAllSubfolder,
+    saveAllSuccessTitle,
+    creatorSourceLabel,
+    showMatchedKeywords = false,
+  }: {
+    notes: Array<XHSNote & { matched_keywords?: string[] }>;
+    carouselRef: React.RefObject<HTMLDivElement | null>;
+    layout: NoteResultLayout;
+    onLayoutChange: (layout: NoteResultLayout) => void;
+    expandedIds: Set<string>;
+    onToggleExpand: (noteId: string) => void;
+    saveSubfolder: (note: XHSNote & { matched_keywords?: string[] }) => string;
+    saveSuccessTitle: string;
+    saveAllSubfolder: string;
+    saveAllSuccessTitle: string;
+    creatorSourceLabel: (note: XHSNote & { matched_keywords?: string[] }) => { tags: string[]; summary: string };
+    showMatchedKeywords?: boolean;
+  }) => (
+    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "10px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+          {layout === "horizontal"
+            ? "结果已整理成横向轨道。可左右滑动，或用 Q / E、← / → 快速翻页。"
+            : "结果已切回竖向原版卡片。适合逐条细看、连续入库和对比详情。"}
+        </div>
+        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => onLayoutChange(layout === "horizontal" ? "vertical" : "horizontal")}
+            style={segmentedButtonStyle(layout === "vertical")}
+          >
+            {layout === "horizontal" ? "切到竖排" : "切到横排"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleSavePreviewNotesWithOptions(notes, {
+              subfolder: saveAllSubfolder,
+              successTitle: saveAllSuccessTitle,
+              includeComments: searchSaveComments,
+              commentsLimit: searchSaveCommentsLimit,
+              commentsSortBy: searchSaveCommentsSortBy,
+              emptyMessage: "没有可入库的搜索结果",
+            })}
+            disabled={previewSaveRunning || notes.length === 0}
             style={{
-              borderRadius: "var(--radius-lg)",
-              overflow: "hidden",
-              background: "var(--bg-card)",
-              border: "1px solid var(--border-light)",
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              padding: "8px 14px",
+              borderRadius: "var(--radius-sm)",
+              border: "none",
+              background: previewSaveRunning || notes.length === 0 ? "var(--bg-hover)" : "var(--color-primary)",
+              color: "white",
+              fontSize: "0.8125rem",
+              fontWeight: 600,
+              cursor: previewSaveRunning || notes.length === 0 ? "not-allowed" : "pointer",
+              opacity: previewSaveRunning || notes.length === 0 ? 0.62 : 1,
+              whiteSpace: "nowrap",
             }}
           >
-            <video
-              controls
-              preload="metadata"
-              src={note.video_url}
-              style={{ width: "100%", maxHeight: "420px", display: "block", background: "#000" }}
-            />
-          </div>
-        )}
+            <FolderDown style={{ width: "14px", height: "14px" }} />
+            {previewSaveRunning ? "入库中..." : "全部入库"}
+          </button>
+          {layout === "horizontal" ? (
+            <>
+              <button type="button" onClick={() => scrollNoteCarousel(carouselRef, -1)} style={segmentedButtonStyle(false)}>
+                ← Q 上一页
+              </button>
+              <button type="button" onClick={() => scrollNoteCarousel(carouselRef, 1)} style={segmentedButtonStyle(false)}>
+                E 下一页 →
+              </button>
+            </>
+          ) : null}
+        </div>
+      </div>
 
-        {previewImages.length > 0 && (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-              gap: "10px",
-            }}
-          >
-            {previewImages.map((imageUrl, index) => (
-              <a
-                key={`${note.id}-${index}`}
-                href={imageUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{
-                  display: "block",
-                  borderRadius: "var(--radius-md)",
-                  overflow: "hidden",
-                  background: "var(--bg-card)",
-                  border: "1px solid var(--border-light)",
-                  aspectRatio: "1 / 1",
-                }}
-              >
-                <img
-                  src={imageUrl}
-                  alt={`${note.title}-${index + 1}`}
-                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                />
-              </a>
-            ))}
-          </div>
-        )}
+      <div
+        ref={carouselRef}
+        style={{
+          display: layout === "horizontal" ? "flex" : "grid",
+          gridTemplateColumns: layout === "vertical" ? "1fr" : undefined,
+          gap: "14px",
+          overflowX: layout === "horizontal" ? "auto" : "visible",
+          alignItems: "stretch",
+          paddingBottom: "6px",
+          scrollSnapType: layout === "horizontal" ? "x proximity" : undefined,
+          scrollBehavior: "smooth",
+        }}
+      >
+        {notes.map((note) => {
+          const expanded = expandedIds.has(note.id);
+          const content = note.content || "";
+          const authorId = String(note.author_id || resolveKnownAuthorId(note.author) || "").trim();
+          const creatorSource = creatorSourceLabel(note);
 
-        {note.comments_preview && note.comments_preview.length > 0 && (
-          <div
-            style={{
-              padding: "12px",
-              borderRadius: "var(--radius-md)",
-              background: "var(--bg-card)",
-              border: "1px solid var(--border-light)",
-            }}
-          >
+          return (
             <div
+              key={note.id}
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "6px",
-                fontSize: "0.8125rem",
-                color: "var(--text-muted)",
-                marginBottom: "10px",
-                fontWeight: 600,
+                flex: layout === "horizontal" ? "0 0 min(420px, calc(100vw - 88px))" : undefined,
+                minWidth: layout === "horizontal" ? "320px" : 0,
+                maxWidth: layout === "horizontal" ? "420px" : "100%",
+                scrollSnapAlign: layout === "horizontal" ? "start" : undefined,
               }}
             >
-              <MessageCircle style={{ width: "14px", height: "14px" }} />
-              评论预览
+              <XiaohongshuNoteCard
+                note={note}
+                showMatchedKeywords={showMatchedKeywords}
+                expanded={expanded}
+                onToggleExpand={onToggleExpand}
+                addToMonitorAction={{
+                  onClick: () => handleAddFrequentAuthorToCreatorMonitor({
+                    author: note.author,
+                    author_id: authorId,
+                    note_count: 1,
+                    total_likes: note.likes || 0,
+                    total_collects: note.collects || 0,
+                    total_comments: note.comments_count || 0,
+                    latest_date: note.published_at || "",
+                    latest_title: note.title || content.slice(0, 28) || note.author,
+                    sample_note_urls: note.url ? [note.url] : [],
+                    sample_titles: note.title ? [note.title] : [],
+                    sample_albums: [],
+                    sample_tags: creatorSource.tags,
+                    source_summary: creatorSource.summary,
+                    score: (note.likes || 0) + (note.collects || 0),
+                  }),
+                  disabled: !authorId,
+                }}
+                primaryAction={{
+                  label: "入库",
+                  onClick: () => handleSavePreviewNotesWithOptions([note], {
+                    subfolder: saveSubfolder(note),
+                    successTitle: saveSuccessTitle,
+                    includeComments: searchSaveComments,
+                    commentsLimit: searchSaveCommentsLimit,
+                    commentsSortBy: searchSaveCommentsSortBy,
+                  }),
+                  disabled: previewSaveRunning,
+                  icon: <Save style={{ width: "12px", height: "12px" }} />,
+                }}
+              />
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              {note.comments_preview.slice(0, 3).map((comment) => (
-                <div
-                  key={comment.id}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: "var(--radius-sm)",
-                    background: "var(--bg-hover)",
-                    fontSize: "0.8125rem",
-                    color: "var(--text-main)",
-                    lineHeight: 1.6,
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", marginBottom: "4px" }}>
-                    <span style={{ fontWeight: 600, color: "var(--color-primary)" }}>{comment.author}</span>
-                    <span style={{ color: "var(--text-muted)" }}>赞 {comment.likes}</span>
-                  </div>
-                  {comment.content}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+          );
+        })}
       </div>
-    );
-  };
+    </div>
+  );
+
+  const renderCreatorNoteResults = ({
+    notes,
+    carouselRef,
+    layout,
+    onLayoutChange,
+    expandedIds,
+    onToggleExpand,
+    sourceLabel,
+    saveAllTitle,
+  }: {
+    notes: XHSNote[];
+    carouselRef: React.RefObject<HTMLDivElement | null>;
+    layout: NoteResultLayout;
+    onLayoutChange: (layout: NoteResultLayout) => void;
+    expandedIds: Set<string>;
+    onToggleExpand: (noteId: string) => void;
+    sourceLabel: string;
+    saveAllTitle: string;
+  }) => renderHorizontalNoteResults({
+    notes,
+    carouselRef,
+    layout,
+    onLayoutChange,
+    expandedIds,
+    onToggleExpand,
+    saveSubfolder: () => buildCreatorSaveSubfolder(sourceLabel),
+    saveSuccessTitle: "博主动态已入库",
+    saveAllSubfolder: buildCreatorSaveSubfolder(sourceLabel),
+    saveAllSuccessTitle: saveAllTitle,
+    creatorSourceLabel: (note) => ({
+      tags: [sourceLabel].filter(Boolean),
+      summary: `来自指定博主抓取：${sourceLabel || note.author}`,
+    }),
+  });
 
   const renderTabs = () => (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+        gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
         gap: "12px",
       }}
     >
@@ -1312,6 +2380,13 @@ export function XiaohongshuTool() {
           icon: Save,
           accent: "#FF6B81",
           bg: "rgba(255, 107, 129, 0.14)",
+        },
+        {
+          id: "search" as const,
+          label: "主动爬取",
+          icon: Filter,
+          accent: "#EF4444",
+          bg: "rgba(239, 68, 68, 0.12)",
         },
         {
           id: "following" as const,
@@ -1382,6 +2457,8 @@ export function XiaohongshuTool() {
         return "关键词扫描";
       case "following-feed":
         return "关注流扫描";
+      case "creator-recent":
+        return "指定博主抓取";
       case "crawl-note":
         return "单条入库";
       case "crawl-batch":
@@ -1390,6 +2467,10 @@ export function XiaohongshuTool() {
         return "评论抓取";
       case "author-candidates":
         return "博主候选分析";
+      case "smart-groups":
+        return "智能分组";
+      case "save-previews":
+        return "搜索结果入库";
       default:
         return kind;
     }
@@ -1426,6 +2507,15 @@ export function XiaohongshuTool() {
     }
     if (typeof input.max_notes === "number") {
       lines.push(`抓取上限：${input.max_notes}`);
+    }
+    if (typeof input.max_creators === "number") {
+      lines.push(`博主上限：${input.max_creators}`);
+    }
+    if (typeof input.creator_query === "string" && input.creator_query) {
+      lines.push(`博主：${input.creator_query}`);
+    }
+    if (typeof input.recent_days === "number") {
+      lines.push(`最近天数：${input.recent_days}`);
     }
 
     if (lines.length === 0) return null;
@@ -1676,11 +2766,25 @@ export function XiaohongshuTool() {
     <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
       <Card title="收藏专辑抓取（反爬严格，约 10s 一条）（如遇限流，等待，更新 Cookie，切换 IP，重新登录）" icon={<Save style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
-            <strong style={{ color: "var(--text-main)" }}>注意：</strong>
-            <strong style={{ color: "var(--text-main)" }}>因系统限制，小红书窗口不能被完全遮挡，须漏出一点才可滚动爬取。</strong>
-            当前默认是插件优先，失败后再走兜底；增量会跳过本地仍存在 Markdown 文件的已抓笔记，最近天数留空表示不限。
-          </p>
+          <div
+            style={{
+              padding: "12px 14px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid rgba(255, 138, 0, 0.18)",
+              background: "rgba(255, 138, 0, 0.08)",
+              fontSize: "0.8125rem",
+              color: "#C2410C",
+              lineHeight: 1.7,
+              fontWeight: 600,
+            }}
+          >
+            <div>因小红书限制，一次只能执行一个任务。请耐心等待当前任务完成后，再启动下一项抓取或入库。</div>
+            <div>需要桌面非全屏，并漏出后台浏览器的一点点像素，才能正常滚动和爬取。</div>
+          </div>
+
+          <div style={{ fontSize: "0.875rem", color: "var(--text-secondary)", lineHeight: 1.7 }}>
+            <div>当前默认是插件优先，失败后再走兜底；增量会跳过本地仍存在 Markdown 文件的已抓笔记，最近天数留空表示不限。</div>
+          </div>
 
           <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
             <button
@@ -2162,12 +3266,12 @@ export function XiaohongshuTool() {
   };
 
   const renderPushRow = (
-    id: "creator" | "keyword",
+    id: "creator" | "keyword" | "following-scan",
     title: string,
     subtitle: string,
     active: boolean,
     onToggle: () => void,
-    onDelete: () => void,
+    onDelete: (() => void) | undefined,
     children: React.ReactNode,
   ) => {
     const expanded = expandedPushes.has(id);
@@ -2213,25 +3317,27 @@ export function XiaohongshuTool() {
           <button type="button" onClick={onToggle} aria-label={active ? "关闭推送" : "开启推送"} style={switchStyle(active)}>
             <span style={switchKnobStyle(active)} />
           </button>
-          <button
-            type="button"
-            onClick={onDelete}
-            style={{
-              width: "32px",
-              height: "32px",
-              borderRadius: "var(--radius-sm)",
-              border: "1px solid var(--border-light)",
-              background: "transparent",
-              color: "var(--color-danger)",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-            aria-label="删除推送"
-          >
-            <Trash2 style={{ width: "15px", height: "15px" }} />
-          </button>
+          {onDelete ? (
+            <button
+              type="button"
+              onClick={onDelete}
+              style={{
+                width: "32px",
+                height: "32px",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--border-light)",
+                background: "transparent",
+                color: "var(--color-danger)",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+              aria-label="删除推送"
+            >
+              <Trash2 style={{ width: "15px", height: "15px" }} />
+            </button>
+          ) : null}
         </div>
         {expanded && (
           <div style={{ padding: "0 14px 14px", display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -2242,360 +3348,1662 @@ export function XiaohongshuTool() {
     );
   };
 
-  const renderTrackerPushList = () => {
-    const hasCreatorPush = trackerUserIds.length > 0;
-    const hasKeywordPush = trackerKeywords.length > 0;
-    if (!hasCreatorPush && !hasKeywordPush) {
-      return (
-        <div style={{ color: "var(--text-muted)", fontSize: "0.8125rem", lineHeight: 1.6 }}>
-          还没有定时推送。同步反推博主或保存关键词后，这里会单独列出可开关、可删除的推送。
-        </div>
-      );
+  const creatorEntries = trackerCreatorMonitors.length > 0
+    ? trackerCreatorMonitors
+    : trackerUserIds.map((userId) => createCreatorMonitor({
+        user_id: userId,
+        label: trackerCreatorProfiles[userId]?.author || userId,
+        author: trackerCreatorProfiles[userId]?.author || userId,
+        enabled: trackerCreatorPushEnabled && !disabledCreatorIds.has(userId),
+        smart_groups: trackerCreatorProfiles[userId]?.smart_groups || [],
+        smart_group_labels: trackerCreatorProfiles[userId]?.smart_group_labels || [],
+      }));
+  const creatorMonitorByUserId = new Map<string, XHSTrackerCreatorMonitor>();
+  creatorEntries.forEach((creatorMonitor) => {
+    const userId = String(creatorMonitor.user_id || "").trim();
+    if (!userId || creatorMonitorByUserId.has(userId)) return;
+    creatorMonitorByUserId.set(userId, creatorMonitor);
+  });
+  const creatorGroupLabelMap = new Map(
+    trackerCreatorGroupOptions.map((option) => [option.value, option.label]),
+  );
+  const creatorGroupCounts = trackerCreatorGroupOptions.reduce<Record<string, number>>((acc, option) => {
+    acc[option.value] = Object.values(trackerCreatorProfiles).filter((profile) =>
+      (profile.smart_groups || []).includes(option.value),
+    ).length;
+    return acc;
+  }, {});
+  const vaultIndexedFileCount = Number(sharedCreatorGrouping.vault_signal_database?.indexed_files || 0);
+  const vaultSignalCount = Number(sharedCreatorGrouping.vault_signal_database?.signal_count || 0);
+  const sharedTagIndexPath = sharedCreatorGrouping.shared_data_paths?.tag_index_path
+    || sharedCreatorGrouping.vault_signal_database?.tag_index_path
+    || sharedCreatorGrouping.vault_signal_database?.database_path
+    || "";
+  const creatorGroupDisplayOptions = trackerCreatorGroupOptions.filter((option) =>
+    (creatorGroupCounts[option.value] || 0) > 0 || trackerCreatorGroups.includes(option.value),
+  );
+  const getCreatorGroupLabels = (profile?: XHSCreatorProfile | null): string[] => (
+    (profile?.smart_groups || []).map((group, index) =>
+      profile?.smart_group_labels?.[index]
+      || creatorGroupLabelMap.get(group)
+      || group,
+    )
+  );
+  const getCreatorMonitorGroupLabels = (monitor: XHSTrackerCreatorMonitor): string[] => {
+    const userId = String(monitor.user_id || "").trim();
+    const profile = trackerCreatorProfiles[userId];
+    const values = profile?.smart_groups?.length ? profile.smart_groups : monitor.smart_groups;
+    const labels = profile?.smart_group_labels?.length ? profile.smart_group_labels : monitor.smart_group_labels;
+    return (values || []).map((group, index) => labels?.[index] || creatorGroupLabelMap.get(group) || group);
+  };
+  const resolveCreatorProfileUrl = (profile?: XHSCreatorProfile | null, fallbackAuthorId?: string | null) => {
+    const directUrl = String(profile?.profile_url || "").trim();
+    if (directUrl) return directUrl;
+    const directAuthorId = String(profile?.author_id || fallbackAuthorId || "").trim();
+    if (directAuthorId) return buildXhsProfileUrl(directAuthorId);
+    const mappedEntry = trackerCreatorNameMap[normalizeAuthorKey(profile?.author)] || null;
+    const mappedAuthorId = String(mappedEntry?.author_id || "").trim();
+    if (mappedAuthorId) return buildXhsProfileUrl(mappedAuthorId);
+    return String(mappedEntry?.profile_url || "").trim();
+  };
+  const trackedCreatorUserIds = new Set(
+    creatorEntries.map((monitor) => String(monitor.user_id || "").trim()).filter(Boolean),
+  );
+  const getMonitorGroupValues = (monitor: XHSTrackerCreatorMonitor): string[] => {
+    const userId = String(monitor.user_id || "").trim();
+    const profile = trackerCreatorProfiles[userId];
+    return (profile?.smart_groups?.length ? profile.smart_groups : monitor.smart_groups) || [];
+  };
+  const filteredCreatorEntries = creatorEntries.filter((monitor) => {
+    if (creatorMonitorGroupFilter === "all") return true;
+    if (creatorMonitorGroupFilter === "__ungrouped__") return getMonitorGroupValues(monitor).length === 0;
+    return getMonitorGroupValues(monitor).includes(creatorMonitorGroupFilter);
+  });
+  const creatorMonitorPageSize = 8;
+  const creatorMonitorPageCount = Math.max(1, Math.ceil(filteredCreatorEntries.length / creatorMonitorPageSize));
+  const safeCreatorMonitorPage = Math.min(creatorMonitorPage, creatorMonitorPageCount - 1);
+  const visibleCreatorEntries = filteredCreatorEntries.slice(
+    safeCreatorMonitorPage * creatorMonitorPageSize,
+    safeCreatorMonitorPage * creatorMonitorPageSize + creatorMonitorPageSize,
+  );
+  const buildSharedCreatorMembers = (
+    predicate: (profile: XHSCreatorProfile, profileId: string) => boolean,
+  ) => Object.entries(trackerCreatorProfiles)
+    .filter(([profileId, profile]) => predicate(profile, profileId))
+    .map(([profileId, profile]) => {
+      const authorId = String(profile.author_id || profileId || "").trim();
+      const author = String(profile.author || authorId || "未命名博主").trim() || "未命名博主";
+      return {
+        profileId,
+        profile,
+        author,
+        authorId,
+        latestTitle: String(profile.latest_title || profile.sample_titles?.[0] || "").trim(),
+        sourceSummary: String(profile.source_summary || "").trim(),
+        sampleUrl: String(profile.sample_note_urls?.[0] || "").trim(),
+        profileUrl: resolveCreatorProfileUrl(profile, profileId),
+        sampleLabels: [...new Set([...(profile.sample_tags || []), ...(profile.sample_albums || [])])].slice(0, 5),
+        inTracker: trackedCreatorUserIds.has(authorId),
+      };
+    })
+    .sort((left, right) =>
+      Number(right.inTracker) - Number(left.inTracker)
+      || left.author.localeCompare(right.author, "zh-CN")
+    );
+  const sharedCreatorGroups = creatorGroupDisplayOptions.map((option) => {
+    const members = buildSharedCreatorMembers((profile) => (profile.smart_groups || []).includes(option.value));
+    return {
+      ...option,
+      members,
+      count: members.length,
+    };
+  }).filter((group) => group.count > 0);
+  const ungroupedCreatorMembers = buildSharedCreatorMembers((profile) => (profile.smart_groups || []).length === 0);
+  const visibleSharedCreatorGroups = [
+    ...sharedCreatorGroups,
+    ...(ungroupedCreatorMembers.length > 0 ? [{
+      value: "__ungrouped__",
+      label: "未分组",
+      count: ungroupedCreatorMembers.length,
+      members: ungroupedCreatorMembers,
+      isUngrouped: true,
+    }] : []),
+  ];
+  const allSharedCreatorMembers = buildSharedCreatorMembers(() => true);
+  const normalizedSharedCreatorManagerQuery = sharedCreatorManagerQuery.trim().toLowerCase();
+  const filteredSharedCreatorMembers = allSharedCreatorMembers.filter((member) => {
+    if (!normalizedSharedCreatorManagerQuery) return true;
+    const candidateText = [
+      member.author,
+      member.authorId,
+      member.latestTitle,
+      member.sourceSummary,
+      ...getCreatorGroupLabels(member.profile),
+    ].join(" ").toLowerCase();
+    return candidateText.includes(normalizedSharedCreatorManagerQuery);
+  });
+  const filteredSharedCreatorManagerGroups = visibleSharedCreatorGroups.map((group) => {
+    const groupQueryMatched = !normalizedSharedCreatorManagerQuery
+      || group.label.toLowerCase().includes(normalizedSharedCreatorManagerQuery);
+    const members = group.members.filter((member) => {
+      if (groupQueryMatched) return true;
+      const candidateText = [
+        member.author,
+        member.authorId,
+        member.latestTitle,
+        member.sourceSummary,
+        ...getCreatorGroupLabels(member.profile),
+      ].join(" ").toLowerCase();
+      return candidateText.includes(normalizedSharedCreatorManagerQuery);
+    });
+    return {
+      ...group,
+      members,
+      filteredCount: members.length,
+    };
+  }).filter((group) => group.filteredCount > 0);
+  const creatorBatchTargetByProfileId = new Map<string, CreatorBatchTarget>();
+  visibleSharedCreatorGroups.forEach((group) => {
+    group.members.forEach((member) => {
+      creatorBatchTargetByProfileId.set(member.profileId, {
+        profileId: member.profileId,
+        author: member.author,
+        authorId: member.authorId,
+        query: member.authorId || member.author,
+        groupValue: group.value,
+        groupLabel: group.label,
+      });
+    });
+  });
+  const selectedCreatorBatchTargets = [...selectedCreatorBatchIds]
+    .map((profileId) => creatorBatchTargetByProfileId.get(profileId))
+    .filter((target): target is CreatorBatchTarget => Boolean(target?.query));
+  const knownAuthorIdByName = new Map<string, string>();
+  authorCandidates.forEach((candidate) => {
+    const authorKey = normalizeAuthorKey(candidate.author);
+    if (authorKey && candidate.author_id) knownAuthorIdByName.set(authorKey, candidate.author_id);
+  });
+  Object.values(trackerCreatorNameMap).forEach((entry) => {
+    const authorKey = normalizeAuthorKey(entry.author);
+    const authorId = String(entry.author_id || "").trim();
+    if (authorKey && authorId) knownAuthorIdByName.set(authorKey, authorId);
+  });
+  Object.entries(trackerCreatorProfiles).forEach(([profileId, profile]) => {
+    const authorKey = normalizeAuthorKey(profile.author);
+    const profileAuthorId = String(profile.author_id || profileId || "").trim();
+    if (authorKey && profileAuthorId) knownAuthorIdByName.set(authorKey, profileAuthorId);
+  });
+  const resolveKnownAuthorId = (author?: string | null) => knownAuthorIdByName.get(normalizeAuthorKey(author)) || "";
+  const frequentAuthorCandidates = [...authorCandidates].sort((a, b) => {
+    if (b.note_count !== a.note_count) return b.note_count - a.note_count;
+    if (b.total_collects !== a.total_collects) return b.total_collects - a.total_collects;
+    if (b.total_likes !== a.total_likes) return b.total_likes - a.total_likes;
+    return b.score - a.score;
+  });
+  const getCandidateGroupLabels = (candidate: XHSAuthorCandidate): string[] => {
+    const profile = candidate.author_id ? trackerCreatorProfiles[candidate.author_id] : undefined;
+    return getCreatorGroupLabels(profile);
+  };
+  const frequentAuthorGroupCounts = creatorGroupDisplayOptions.reduce<Record<string, number>>((acc, option) => {
+    acc[option.value] = frequentAuthorCandidates.filter((candidate) => {
+      const profile = candidate.author_id ? trackerCreatorProfiles[candidate.author_id] : undefined;
+      return (profile?.smart_groups || []).includes(option.value);
+    }).length;
+    return acc;
+  }, {});
+  const frequentAuthorGroupOptions = creatorGroupDisplayOptions.filter((option) =>
+    (frequentAuthorGroupCounts[option.value] || 0) > 0
+  );
+  const filteredFrequentAuthorCandidates = frequentAuthorCandidates.filter((candidate) => {
+    if (frequentAuthorGroupFilter === "all") return true;
+    const profile = candidate.author_id ? trackerCreatorProfiles[candidate.author_id] : undefined;
+    return (profile?.smart_groups || []).includes(frequentAuthorGroupFilter);
+  });
+  const visibleFrequentAuthorCandidates = showAllFrequentAuthors
+    ? filteredFrequentAuthorCandidates
+    : filteredFrequentAuthorCandidates.slice(0, 10);
+
+  const persistTrackerDefinitions = async (successTitle: string, successDescription?: string) => {
+    try {
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload());
+      await refreshTrackerConfig();
+      toast.success(successTitle, successDescription);
+    } catch (e) {
+      toast.error("保存失败", e instanceof Error ? e.message : "未知错误");
     }
-    return (
-      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-        {hasCreatorPush && renderPushRow(
-          "creator",
-          "收藏反推博主",
-          `${trackerUserIds.length} 个博主 · ${trackerCreatorPushEnabled ? "已开启" : "已关闭"}`,
-          trackerCreatorPushEnabled,
-          handleToggleCreatorPush,
-          handleDeleteCreatorPush,
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "10px" }}>
-            {trackerUserIds.slice(0, 24).map((userId) => {
-              const profile = trackerCreatorProfiles[userId];
-              const active = trackerCreatorPushEnabled && !disabledCreatorIds.has(userId);
-              const source = profile?.source_summary || profile?.latest_title || "来自收藏反推博主";
-              return (
-                <button
-                  key={userId}
-                  type="button"
-                  onClick={() => handleToggleCreatorUser(userId)}
-                  style={{
-                    position: "relative",
-                    textAlign: "left",
-                    padding: "10px 30px 10px 10px",
-                    borderRadius: "var(--radius-sm)",
-                    background: active ? "rgba(255, 36, 66, 0.10)" : "var(--bg-hover)",
-                    border: active ? "1px solid rgba(255, 36, 66, 0.30)" : "1px solid var(--border-light)",
-                    color: "var(--text-main)",
-                    cursor: "pointer",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "6px",
-                  }}
-                >
-                  <span style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.8125rem", fontWeight: 700 }}>
-                    <span
-                      style={{
-                        width: "7px",
-                        height: "7px",
-                        borderRadius: "50%",
-                        background: active ? "var(--color-primary)" : "var(--text-muted)",
-                        flexShrink: 0,
-                      }}
-                    />
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {profile?.author || userId}
-                    </span>
-                  </span>
-                  <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem", lineHeight: 1.45 }}>
-                    {source}
-                  </span>
-                  {(profile?.sample_albums?.length || profile?.sample_tags?.length) ? (
-                    <span style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                      {[...(profile?.sample_albums || []), ...(profile?.sample_tags || [])].slice(0, 3).map((label) => (
-                        <span
-                          key={label}
-                          style={{
-                            padding: "3px 6px",
-                            borderRadius: "var(--radius-sm)",
-                            background: "var(--bg-card)",
-                            color: "var(--text-muted)",
-                            fontSize: "0.6875rem",
-                          }}
-                        >
-                          {label}
-                        </span>
-                      ))}
-                    </span>
-                  ) : null}
-                  <span
-                    role="button"
-                    tabIndex={0}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleRemoveCreatorUser(userId);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        handleRemoveCreatorUser(userId);
-                      }
-                    }}
-                    style={{
-                      position: "absolute",
-                      top: "8px",
-                      right: "8px",
-                      width: "18px",
-                      height: "18px",
-                      borderRadius: "50%",
-                      display: "inline-flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      color: "var(--text-muted)",
-                      background: "var(--bg-card)",
-                      border: "1px solid var(--border-light)",
-                      fontSize: "0.75rem",
-                    }}
-                    title="移除博主"
-                  >
-                    ×
-                  </span>
-                </button>
-              );
-            })}
-            {trackerUserIds.length > 24 && (
-              <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)", alignSelf: "center" }}>
-                还有 {trackerUserIds.length - 24} 个
-              </span>
-            )}
-          </div>,
-        )}
-        {hasKeywordPush && renderPushRow(
-          "keyword",
-          "关键词推送",
-          `${trackerKeywords.length} 个关键词 · ${trackerEnableKeywordSearch ? "已开启" : "已关闭"}`,
-          trackerEnableKeywordSearch,
-          handleToggleKeywordPush,
-          handleDeleteKeywordPush,
-          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-            {trackerKeywords.map((keyword) => (
-              <span
-                key={keyword}
-                style={{
-                  padding: "6px 10px",
-                  borderRadius: "var(--radius-sm)",
-                  background: "rgba(255, 36, 66, 0.08)",
-                  border: "1px solid var(--border-light)",
-                  color: "var(--color-primary)",
-                  fontSize: "0.8125rem",
-                  fontWeight: 600,
-                }}
-              >
-                {keyword}
-              </span>
-            ))}
-          </div>,
-        )}
-      </div>
+  };
+
+  const handleToggleFollowingScanPush = async () => {
+    const draftKeywords = parseKeywordInput(trackerFollowingScanKeywordDraft);
+    const existingMonitors = draftKeywords.length > 0
+      ? applyFollowingScanDraftToMonitors(trackerFollowingScanKeywordDraft)
+      : commitFollowingScanMonitorsForSave();
+    if (existingMonitors.length === 0) {
+      toast.error("请先添加至少一个关注流关键词定义");
+      return;
+    }
+    const next = !trackerFollowingScan.enabled;
+    const nextMonitors = existingMonitors.map((monitor) => ({
+      ...monitor,
+      enabled: next,
+    }));
+    const payload = buildFollowingScanPayload(nextMonitors, {
+      ...trackerFollowingScan,
+      enabled: next,
+    });
+    try {
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        following_scan: payload.followingScan,
+        following_scan_monitors: payload.followingScanMonitors,
+      }));
+      await refreshTrackerConfig();
+      toast.success(next ? "关注流情报推送已开启" : "关注流情报推送已关闭");
+    } catch (e) {
+      toast.error("保存失败", e instanceof Error ? e.message : "未知错误");
+    }
+  };
+
+  const handleSaveFollowingScan = async () => {
+    try {
+      const draftKeywords = parseKeywordInput(trackerFollowingScanKeywordDraft);
+      const nextMonitors = draftKeywords.length > 0
+        ? applyFollowingScanDraftToMonitors(trackerFollowingScanKeywordDraft)
+        : commitFollowingScanMonitorsForSave();
+      const payload = buildFollowingScanPayload(nextMonitors);
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        following_scan: payload.followingScan,
+        following_scan_monitors: payload.followingScanMonitors,
+      }));
+      toast.success("关注流情报推送已保存", "模块管理会按定时任务抓取这些定义");
+      await refreshTrackerConfig();
+      setExpandedPushes((prev) => new Set(prev).add("following-scan"));
+    } catch (e) {
+      toast.error("保存失败", e instanceof Error ? e.message : "未知错误");
+    }
+  };
+
+  const handleDeleteFollowingScanPush = async () => {
+    try {
+      await api.post("/api/modules/xiaohongshu-tracker/config", buildTrackerConfigPayload({
+        following_scan: createFollowingScan({
+          ...trackerFollowingScan,
+          enabled: false,
+          keywords: [],
+        }),
+        following_scan_monitors: [],
+      }));
+      await refreshTrackerConfig();
+      setExpandedPushes((prev) => {
+        const next = new Set(prev);
+        next.delete("following-scan");
+        return next;
+      });
+      toast.success("关注流情报推送已清空");
+    } catch (e) {
+      toast.error("删除失败", e instanceof Error ? e.message : "未知错误");
+    }
+  };
+
+  const toggleCreatorBatchSelection = (profileId: string) => {
+    setSelectedCreatorBatchIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(profileId)) next.delete(profileId);
+      else next.add(profileId);
+      return next;
+    });
+  };
+
+  const buildCreatorBatchTargetsFromMembers = (
+    members: Array<{
+      profileId: string;
+      author: string;
+      authorId: string;
+    }>,
+    groupLabel?: string,
+    groupValue?: string,
+  ): CreatorBatchTarget[] => Array.from(new Map(
+    members
+      .map((member) => ({
+        profileId: member.profileId,
+        author: member.author,
+        authorId: member.authorId,
+        query: member.authorId || member.author,
+        groupLabel,
+        groupValue,
+      }))
+      .filter((target) => String(target.query || "").trim())
+      .map((target) => [target.profileId, target]),
+  ).values());
+
+  const runCreatorRecentBatch = async (targets: CreatorBatchTarget[], sourceLabel: string) => {
+    if (creatorRecentRunning || creatorRecentBatchRunning) {
+      toast.info("任务正在执行", "当前有博主抓取任务在进行，完成后再启动新的。");
+      return;
+    }
+    if (!requireCookie()) {
+      return;
+    }
+    const normalizedTargets = Array.from(new Map(
+      targets
+        .map((target) => ({
+          ...target,
+          query: String(target.query || "").trim(),
+        }))
+        .filter((target) => target.query)
+        .map((target) => [target.profileId, target]),
+    ).values());
+    if (normalizedTargets.length === 0) {
+      toast.error("没有可抓取的博主");
+      return;
+    }
+
+    const recentDays = Math.max(1, Math.min(365, creatorRecentDays || DEFAULT_XHS_RECENT_DAYS));
+    const maxNotes = Math.max(1, Math.min(50, creatorRecentLimit || 10));
+    const shouldAutoSave = creatorRecentAutoSaveAfterFetch;
+    setShowCreatorRecentWorkbench(true);
+    setCreatorRecentResult(null);
+    setCreatorBatchResults([]);
+    setCreatorBatchProgress({
+      completed: 0,
+      total: normalizedTargets.length,
+      currentLabel: sourceLabel,
+    });
+    setTaskRunning("creator-recent-batch", true);
+
+    const nextResults: CreatorBatchResultItem[] = [];
+    let fuseStopped = false;
+    try {
+      for (let index = 0; index < normalizedTargets.length; index += 1) {
+        const target = normalizedTargets[index];
+        if (index > 0) {
+          const delaySeconds = randomCreatorBatchDelaySeconds();
+          setCreatorBatchProgress({
+            completed: index,
+            total: normalizedTargets.length,
+            currentLabel: `等待 ${delaySeconds} 秒后抓取 ${target.author}`,
+          });
+          await wait(delaySeconds * 1000);
+        }
+        setCreatorBatchProgress({
+          completed: index,
+          total: normalizedTargets.length,
+          currentLabel: target.author,
+        });
+        try {
+          const result = await fetchCreatorRecentDirect(target.query, recentDays, maxNotes);
+          nextResults.push({ target, result });
+        } catch (err) {
+          nextResults.push({
+            target,
+            error: err instanceof Error ? err.message : "未知错误",
+          });
+          if (isXhsCreatorRiskError(err)) {
+            fuseStopped = true;
+            toast.error("博主批量抓取已熔断", "检测到访问频繁/验证/登录限制，已停止后续博主抓取。等待恢复后再重试。");
+            setCreatorBatchResults([...nextResults]);
+            break;
+          }
+        }
+        setCreatorBatchResults([...nextResults]);
+      }
+
+      const successCount = nextResults.filter((item) => item.result).length;
+      const failedCount = nextResults.length - successCount;
+      const successfulNotes = nextResults.flatMap((item) => item.result?.notes || []);
+      setCreatorBatchProgress({
+        completed: normalizedTargets.length,
+        total: normalizedTargets.length,
+        currentLabel: "已完成",
+      });
+      if (successCount > 0) {
+        focusCreatorRecentResults();
+        if (shouldAutoSave && successfulNotes.length > 0) {
+          await handleSaveCreatorRecentNotes(
+            successfulNotes,
+            sourceLabel,
+            "批量抓取结果已入库",
+          );
+        }
+      }
+      if (successCount > 0 && failedCount === 0) {
+        toast.success("批量抓取完成", `${sourceLabel} 共抓取 ${successCount} 位博主`);
+      } else if (successCount > 0) {
+        toast.success("批量抓取已完成", `成功 ${successCount} 位，失败 ${failedCount} 位`);
+      } else if (fuseStopped) {
+        toast.error("批量抓取已停止", "触发风险熔断，未继续抓取后续博主。 ");
+      } else {
+        toast.error("批量抓取失败", "这批博主都没有成功抓取到结果");
+      }
+    } finally {
+      setTaskRunning("creator-recent-batch", false);
+      window.setTimeout(() => setCreatorBatchProgress(null), 1200);
+    }
+  };
+
+  const handleRunSelectedCreatorBatch = async () => {
+    await runCreatorRecentBatch(selectedCreatorBatchTargets, "已选博主");
+  };
+
+  const handleRefreshCreatorRecentResult = async () => {
+    if (!creatorRecentResult) return;
+    setCreatorRecentResult(null);
+    await runCreatorRecentFetch(
+      creatorRecentResult.resolved_user_id || creatorRecentResult.creator_query,
+      {
+        recentDays: creatorRecentResult.recent_days,
+        maxNotes: creatorRecentLimit,
+      },
     );
   };
 
-  const renderFollowingTab = () => (
-    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-      <Card title="关注监控实验台" icon={<Users style={{ width: "18px", height: "18px" }} />}>
-        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
-            关注流扫描和关键词扫描共用同一套抓取配置，优先走插件 bridge 读取真实页面 state，再回退到浏览器兜底链路。
-            {!cookieVerified && (
-              <span style={{ color: "var(--color-warning)" }}>（需先配置 Cookie）</span>
-            )}
-          </p>
+  const handleRefreshCreatorBatchResults = async () => {
+    if (creatorBatchResults.length === 0) return;
+    const targets = creatorBatchResults.map((item) => item.target);
+    setCreatorBatchResults([]);
+    await runCreatorRecentBatch(targets, "当前批量结果");
+  };
 
-          <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
+  const handleRunGroupCreatorBatch = async (
+    groupLabel: string,
+    groupValue: string,
+    members: Array<{
+      profileId: string;
+      author: string;
+      authorId: string;
+    }>,
+  ) => {
+    const targets = buildCreatorBatchTargetsFromMembers(members, groupLabel, groupValue);
+    if (targets.length === 0) {
+      toast.error("这个分组里没有可抓取的博主");
+      return;
+    }
+    setSelectedCreatorBatchIds(new Set(targets.map((target) => target.profileId)));
+    await runCreatorRecentBatch(targets, groupLabel);
+  };
+
+  const saveSharedCreatorGroupMembership = async (profileId: string, nextGroupValues: string[]) => {
+    const normalizedProfileId = String(profileId || "").trim();
+    if (!normalizedProfileId) return;
+
+    const currentProfile = trackerCreatorProfiles[normalizedProfileId];
+    if (!currentProfile) {
+      toast.error("没找到这个博主的共享分组信息");
+      return;
+    }
+
+    const nextGroups = Array.from(new Set(
+      nextGroupValues
+        .map((groupValue) => String(groupValue || "").trim())
+        .filter((groupValue) => groupValue && groupValue !== "__ungrouped__"),
+    ));
+    const nextGroupLabels = nextGroups.map((groupValue) =>
+      trackerCreatorGroupOptions.find((option) => option.value === groupValue)?.label || groupValue
+    );
+    const currentGroups = Array.from(new Set(
+      (currentProfile.smart_groups || [])
+        .map((group) => String(group || "").trim())
+        .filter(Boolean),
+    ));
+    const currentGroupKey = [...currentGroups].sort().join("|");
+    const nextGroupKey = [...nextGroups].sort().join("|");
+    if (currentGroupKey === nextGroupKey) {
+      return;
+    }
+
+    const normalizedAuthorId = String(currentProfile.author_id || normalizedProfileId).trim();
+    const authorLabel = currentProfile.author || normalizedAuthorId || "该博主";
+
+    setUpdatingSharedCreatorIds((prev) => new Set(prev).add(normalizedProfileId));
+    try {
+      const nextCreatorProfiles = { ...trackerCreatorProfiles };
+      nextCreatorProfiles[normalizedProfileId] = {
+        ...(nextCreatorProfiles[normalizedProfileId] || currentProfile),
+        smart_groups: nextGroups,
+        smart_group_labels: nextGroupLabels,
+      };
+      if (normalizedAuthorId && normalizedAuthorId !== normalizedProfileId) {
+        nextCreatorProfiles[normalizedAuthorId] = {
+          ...(nextCreatorProfiles[normalizedAuthorId] || {}),
+          ...nextCreatorProfiles[normalizedAuthorId],
+          author: nextCreatorProfiles[normalizedAuthorId]?.author || currentProfile.author || normalizedAuthorId,
+          author_id: normalizedAuthorId,
+          smart_groups: nextGroups,
+          smart_group_labels: nextGroupLabels,
+        };
+      }
+
+      const baseCreatorMonitors = trackerCreatorMonitors.length > 0 ? trackerCreatorMonitors : creatorEntries;
+      const nextCreatorMonitors = baseCreatorMonitors.map((monitor) => {
+        const monitorUserId = String(monitor.user_id || "").trim();
+        if (monitorUserId !== normalizedProfileId && monitorUserId !== normalizedAuthorId) {
+          return monitor;
+        }
+        return {
+          ...monitor,
+          smart_groups: nextGroups,
+          smart_group_labels: nextGroupLabels,
+        };
+      });
+
+      await api.post("/api/modules/xiaohongshu-tracker/config", {
+        ...buildTrackerConfigPayload({
+          creator_monitors: nextCreatorMonitors,
+        }),
+        creator_profiles: nextCreatorProfiles,
+      });
+      setTrackerCreatorProfiles(nextCreatorProfiles);
+      setTrackerCreatorMonitors(nextCreatorMonitors);
+      toast.success(
+        nextGroups.length > 0 ? "共享分组已更新" : "已移到未分组",
+        nextGroups.length > 0
+          ? `${authorLabel} 已加入 ${nextGroupLabels.join("、")}`
+          : `${authorLabel} 已移到未分组`,
+      );
+    } catch (e) {
+      toast.error("调整共享分组失败", e instanceof Error ? e.message : "未知错误");
+    } finally {
+      setUpdatingSharedCreatorIds((prev) => {
+        const next = new Set(prev);
+        next.delete(normalizedProfileId);
+        return next;
+      });
+    }
+  };
+
+  const toggleSharedCreatorGroupMembership = async (profileId: string, groupValue: string) => {
+    const normalizedProfileId = String(profileId || "").trim();
+    const normalizedGroupValue = String(groupValue || "").trim();
+    if (!normalizedProfileId || !normalizedGroupValue) return;
+    const currentProfile = trackerCreatorProfiles[normalizedProfileId];
+    if (!currentProfile) {
+      toast.error("没找到这个博主的共享分组信息");
+      return;
+    }
+    const currentGroups = Array.from(new Set(
+      (currentProfile.smart_groups || [])
+        .map((group) => String(group || "").trim())
+        .filter(Boolean),
+    ));
+    const nextGroups = currentGroups.includes(normalizedGroupValue)
+      ? currentGroups.filter((group) => group !== normalizedGroupValue)
+      : [...currentGroups, normalizedGroupValue];
+    await saveSharedCreatorGroupMembership(normalizedProfileId, nextGroups);
+  };
+
+  const renderDetailDivider = () => (
+    <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+      <div style={{ flex: 1, height: "1px", background: "var(--border-light)" }} />
+      <span style={{ fontSize: "0.75rem", fontWeight: 700, letterSpacing: "0.08em", color: "var(--text-muted)" }}>
+        详细配置
+      </span>
+      <div style={{ flex: 1, height: "1px", background: "var(--border-light)" }} />
+    </div>
+  );
+
+  const toggleCreatorSelectorGroupExpanded = (groupValue: string) => {
+    setExpandedCreatorSelectorGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupValue)) next.delete(groupValue);
+      else next.add(groupValue);
+      return next;
+    });
+  };
+
+  const toggleSharedManagerGroupExpanded = (groupValue: string) => {
+    setExpandedSharedManagerGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupValue)) next.delete(groupValue);
+      else next.add(groupValue);
+      return next;
+    });
+    setSharedCreatorManagerPages((prev) => ({
+      ...prev,
+      [groupValue]: prev[groupValue] || 0,
+    }));
+  };
+
+  const toggleSharedManagerMemberExpanded = (memberKey: string) => {
+    setExpandedSharedManagerMembers((prev) => {
+      const next = new Set(prev);
+      if (next.has(memberKey)) next.delete(memberKey);
+      else next.add(memberKey);
+      return next;
+    });
+  };
+
+  const renderSharedCreatorBatchSelector = () => {
+    if (visibleSharedCreatorGroups.length === 0) {
+      return (
+        <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+          先跑一次“共享智能分组”，这里才会出现最终的小红书分组结果；到时你可以整组抓，也可以选几个博主做批量抓取。
+        </div>
+      );
+    }
+
+    return (
+      <div
+        style={{
+          padding: "14px",
+          borderRadius: "var(--radius-md)",
+          border: "1px solid rgba(255, 138, 0, 0.16)",
+          background: "linear-gradient(180deg, rgba(255, 138, 0, 0.06), rgba(255, 255, 255, 0.72))",
+          display: "flex",
+          flexDirection: "column",
+          gap: "10px",
+        }}
+      >
+        <div>
+          <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+            共享分组批量抓取
+          </div>
+          <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6, marginTop: "4px" }}>
+            这里直接复用共享智能分组的最终小红书结果。你可以整组抓，也可以勾选若干博主后统一批量抓取。
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: "12px",
+            alignItems: "center",
+            flexWrap: "wrap",
+            padding: "10px 12px",
+            borderRadius: "var(--radius-sm)",
+            border: "1px solid rgba(255, 138, 0, 0.16)",
+            background: "rgba(255, 255, 255, 0.72)",
+          }}
+        >
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "10px", fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+            <span>已选 {selectedCreatorBatchTargets.length} 位博主</span>
+            <span>共享组 {visibleSharedCreatorGroups.length} 个</span>
+            <span>抓取范围 最近 {creatorRecentDays} 天 / 每位 {creatorRecentLimit} 条</span>
+          </div>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
             <button
               type="button"
-              onClick={() => setAlbumDedicatedWindowMode((v) => !v)}
-              style={segmentedButtonStyle(albumDedicatedWindowMode)}
+              onClick={() => void handleRunSelectedCreatorBatch()}
+              disabled={selectedCreatorBatchTargets.length === 0 || creatorRecentBatchRunning}
+              style={{
+                ...segmentedButtonStyle(true),
+                opacity: selectedCreatorBatchTargets.length === 0 || creatorRecentBatchRunning ? 0.55 : 1,
+                cursor: selectedCreatorBatchTargets.length === 0 || creatorRecentBatchRunning ? "not-allowed" : "pointer",
+              }}
             >
-              {albumDedicatedWindowMode ? "当前 Edge 独立窗口" : "使用当前窗口"}
+              {creatorRecentBatchRunning ? "批量抓取中..." : "抓取已选博主"}
             </button>
-            <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-main)", fontSize: "0.875rem" }}>
-              扩展端口
-              <input
-                type="number"
-                min={1024}
-                max={65535}
-                value={albumExtensionPort}
-                onChange={(e) => setAlbumExtensionPort(Number(e.target.value || 9334))}
-                style={{ ...compactControlStyle, width: "88px" }}
-              />
-            </label>
-          </div>
-
-          <div style={{ color: "var(--text-muted)", fontSize: "0.8125rem" }}>
-            抓取链路：插件优先（端口 {albumExtensionPort}，{albumDedicatedWindowMode ? "独立窗口" : "当前窗口"}）{` -> `}Playwright 兜底
-          </div>
-
-          <div style={{ height: "1px", background: "var(--border-light)" }} />
-
-          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-            <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>关注流扫描</div>
-            <div style={{ color: "var(--text-secondary)", fontSize: "0.8125rem" }}>
-              先看关注用户最近发了什么，再按关键词过滤。
-            </div>
-          </div>
-
-          <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-main)", fontSize: "0.875rem" }}>
-            抓取上限
-            <input
-              type="number"
-              min={1}
-              max={300}
-              value={followingLimit}
-              onChange={(e) => setFollowingLimit(Number(e.target.value || 1))}
-              style={{ ...compactControlStyle, width: "88px" }}
-            />
-            条
-          </label>
-
-          <div style={{ display: "flex", gap: "12px" }}>
-            <input
-              type="text"
-              value={followingKeywords}
-              onChange={(e) => setFollowingKeywords(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleFollowingFeed()}
-              placeholder="输入关键词，多个用逗号分隔..."
-              disabled={!cookieVerified}
-              style={{
-                flex: 1,
-                padding: "12px 16px",
-                borderRadius: "var(--radius-md)",
-                border: "1px solid var(--border-light)",
-                background: "var(--bg-card)",
-                color: "var(--text-main)",
-                fontSize: "0.9375rem",
-                outline: "none",
-                opacity: cookieVerified ? 1 : 0.5,
-              }}
-            />
             <button
-              onClick={handleFollowingFeed}
-              disabled={followingRunning || !followingKeywords.trim() || !cookieVerified}
+              type="button"
+              onClick={() => setSelectedCreatorBatchIds(new Set())}
+              disabled={selectedCreatorBatchTargets.length === 0 || creatorRecentBatchRunning}
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-                padding: "12px 24px",
-                borderRadius: "var(--radius-md)",
-                border: "none",
-                background: followingRunning || !cookieVerified ? "var(--bg-hover)" : "var(--color-primary)",
-                color: "white",
-                fontSize: "0.9375rem",
-                fontWeight: 600,
-                cursor: followingRunning || !cookieVerified ? "not-allowed" : "pointer",
-                opacity: followingRunning || !cookieVerified ? 0.6 : 1,
+                ...segmentedButtonStyle(false),
+                opacity: selectedCreatorBatchTargets.length === 0 || creatorRecentBatchRunning ? 0.55 : 1,
+                cursor: selectedCreatorBatchTargets.length === 0 || creatorRecentBatchRunning ? "not-allowed" : "pointer",
               }}
             >
-              {followingRunning ? (
-                <span>⟳ 获取中...</span>
-              ) : (
-                <>
-                  <Users style={{ width: "16px", height: "16px" }} />
-                  获取
-                </>
-              )}
+              清空已选
             </button>
           </div>
         </div>
-      </Card>
 
-      {renderSearchTab()}
-
-      <Card title="关注推送" icon={<Users style={{ width: "18px", height: "18px" }} />}>
-        <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-            <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>已创建推送</div>
-            {renderTrackerPushList()}
+        {creatorBatchProgress ? (
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: "var(--radius-sm)",
+              border: "1px solid rgba(255, 138, 0, 0.16)",
+              background: "rgba(255, 138, 0, 0.08)",
+              fontSize: "0.8125rem",
+              color: "#C2410C",
+              fontWeight: 700,
+            }}
+          >
+            批量抓取进度 {creatorBatchProgress.completed}/{creatorBatchProgress.total} · 当前 {creatorBatchProgress.currentLabel}
           </div>
+        ) : null}
 
-          <div style={{ height: "1px", background: "var(--border-light)" }} />
-
-          <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-            <div>
-              <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)", marginBottom: "4px" }}>
-                收藏反推博主
-              </div>
-              <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.6 }}>
-                从已保存收藏里聚合高频作者，解析作者 ID 后并入关注推送池，后续定时任务会和关注列表监控一起跑。
-              </p>
-            </div>
-
-            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
-              <button type="button" onClick={handleAnalyzeAuthors} style={segmentedButtonStyle(true)}>
-                从本地收藏生成博主候选
-              </button>
-              <button
-                type="button"
-                onClick={handleSyncSelectedAuthors}
-                disabled={selectedAuthors.size === 0}
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          {visibleSharedCreatorGroups.map((group) => {
+            const expanded = expandedCreatorSelectorGroups.has(group.value);
+            const selectableMembers = group.members.filter((member) => String(member.authorId || member.author || "").trim());
+            const selectedMemberCount = selectableMembers.filter((member) =>
+              selectedCreatorBatchIds.has(member.profileId),
+            ).length;
+            const isUngrouped = "isUngrouped" in group && Boolean(group.isUngrouped);
+            return (
+              <div
+                key={`selector-${group.value}`}
                 style={{
-                  ...segmentedButtonStyle(false),
-                  opacity: selectedAuthors.size === 0 ? 0.5 : 1,
-                  cursor: selectedAuthors.size === 0 ? "not-allowed" : "pointer",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid rgba(255, 138, 0, 0.18)",
+                  background: selectedMemberCount > 0 ? "rgba(255, 138, 0, 0.10)" : "rgba(255, 255, 255, 0.74)",
+                  overflow: "hidden",
                 }}
               >
-                同步选中博主到关注推送
-              </button>
-            </div>
-
-            {authorCandidateMeta && (
-              <div style={{ color: "var(--text-muted)", fontSize: "0.8125rem" }}>
-                {authorCandidateMeta.message}
-              </div>
-            )}
-
-            {authorCandidates.length > 0 && (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "12px" }}>
-                {authorCandidates.slice(0, 24).map((candidate) => (
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: "12px",
+                    alignItems: "stretch",
+                    flexWrap: "wrap",
+                    padding: "10px 12px",
+                  }}
+                >
                   <button
-                    key={candidate.author}
                     type="button"
-                    onClick={() => toggleAuthorSelection(candidate.author)}
+                    onClick={() => toggleCreatorSelectorGroupExpanded(group.value)}
                     style={{
+                      flex: 1,
+                      minWidth: "220px",
+                      border: "none",
+                      background: "transparent",
+                      padding: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "10px",
                       textAlign: "left",
-                      padding: "14px",
-                      borderRadius: "var(--radius-md)",
-                      border: selectedAuthors.has(candidate.author) ? "2px solid var(--color-primary)" : "1px solid var(--border-light)",
-                      background: "var(--bg-card)",
-                      color: "var(--text-main)",
                       cursor: "pointer",
+                      color: "inherit",
+                    }}
+                  >
+                    {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                    <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: "3px" }}>
+                      <span style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+                        {group.label}
+                      </span>
+                      <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                        {group.count} 位博主 · 已选中 {selectedMemberCount} 位
+                        {isUngrouped ? " · 手动整理区" : ""}
+                      </span>
+                    </span>
+                  </button>
+
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const groupIds = selectableMembers.map((member) => member.profileId);
+                        const allSelected = groupIds.length > 0 && groupIds.every((profileId) => selectedCreatorBatchIds.has(profileId));
+                        setSelectedCreatorBatchIds((prev) => {
+                          const next = new Set(prev);
+                          groupIds.forEach((profileId) => {
+                            if (allSelected) next.delete(profileId);
+                            else next.add(profileId);
+                          });
+                          return next;
+                        });
+                      }}
+                      disabled={selectableMembers.length === 0 || creatorRecentBatchRunning}
+                      style={{
+                        alignSelf: "center",
+                        padding: "7px 10px",
+                        borderRadius: "999px",
+                        border: "1px solid var(--border-light)",
+                        background: "var(--bg-card)",
+                        color: "var(--text-secondary)",
+                        fontSize: "0.75rem",
+                        fontWeight: 700,
+                        cursor: selectableMembers.length === 0 || creatorRecentBatchRunning ? "not-allowed" : "pointer",
+                        opacity: selectableMembers.length === 0 || creatorRecentBatchRunning ? 0.55 : 1,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {selectableMembers.length > 0 && selectableMembers.every((member) => selectedCreatorBatchIds.has(member.profileId))
+                        ? "取消本组选择"
+                        : "选中本组"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleRunGroupCreatorBatch(group.label, group.value, group.members)}
+                      disabled={selectableMembers.length === 0 || creatorRecentBatchRunning}
+                      style={{
+                        ...segmentedButtonStyle(true),
+                        opacity: selectableMembers.length === 0 || creatorRecentBatchRunning ? 0.55 : 1,
+                        cursor: selectableMembers.length === 0 || creatorRecentBatchRunning ? "not-allowed" : "pointer",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      抓这一组
+                    </button>
+                  </div>
+                </div>
+
+                {expanded ? (
+                  <div
+                    style={{
+                      padding: "0 12px 12px",
+                      borderTop: "1px solid rgba(255, 138, 0, 0.12)",
                       display: "flex",
                       flexDirection: "column",
                       gap: "8px",
                     }}
                   >
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center" }}>
-                      <span style={{ fontWeight: 700, fontSize: "0.9375rem" }}>{candidate.author}</span>
-                      <span style={{ fontSize: "0.75rem", color: candidate.author_id ? "var(--color-primary)" : "var(--color-warning)" }}>
-                        {candidate.author_id ? "可同步" : "待解析ID"}
+                    <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", lineHeight: 1.6, marginTop: "10px" }}>
+                      {isUngrouped
+                        ? "这里是暂时不放进任何共享组的博主。可以先勾选再批量抓，或直接单独抓某个博主。"
+                        : "你可以勾选几个博主后统一批量抓，也可以对某个博主单独立即抓最近内容。"}
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                      {group.members.map((member) => {
+                        const memberSelected = selectedCreatorBatchIds.has(member.profileId);
+                        const canSelectIndividually = Boolean(String(member.authorId || member.author || "").trim());
+                        return (
+                          <div
+                            key={`selector-member-${group.value}-${member.authorId || member.profileId}`}
+                            style={{
+                              padding: "10px 12px",
+                              borderRadius: "var(--radius-sm)",
+                              border: "1px solid var(--border-light)",
+                              background: memberSelected ? "rgba(255, 36, 66, 0.06)" : "var(--bg-card)",
+                              display: "flex",
+                              justifyContent: "space-between",
+                              gap: "12px",
+                              alignItems: "flex-start",
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <div style={{ minWidth: 0, flex: 1, display: "flex", flexDirection: "column", gap: "6px" }}>
+                              <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                                <span style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+                                  {member.author}
+                                </span>
+                                <span style={{ fontSize: "0.6875rem", color: memberSelected ? "var(--color-primary)" : "var(--text-muted)" }}>
+                                  {memberSelected ? "已加入批量列表" : canSelectIndividually ? "未选中" : "待补 user_id"}
+                                </span>
+                                {member.inTracker ? (
+                                  <span style={{ fontSize: "0.6875rem", color: "#C2410C" }}>
+                                    已在关注推送
+                                  </span>
+                                ) : null}
+                              </div>
+                              <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                                最近：{member.latestTitle || "暂无样本标题"}
+                              </div>
+                              {member.sampleLabels.length > 0 ? (
+                                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                                  {member.sampleLabels.slice(0, 3).map((label) => (
+                                    <span
+                                      key={`selector-label-${member.authorId || member.profileId}-${label}`}
+                                      style={{
+                                        padding: "3px 6px",
+                                        borderRadius: "var(--radius-sm)",
+                                        background: "rgba(255, 138, 0, 0.08)",
+                                        color: "#C2410C",
+                                        fontSize: "0.6875rem",
+                                      }}
+                                    >
+                                      {label}
+                                    </span>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </div>
+
+                            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end" }}>
+                              <button
+                                type="button"
+                                onClick={() => toggleCreatorBatchSelection(member.profileId)}
+                                disabled={!canSelectIndividually}
+                                style={{
+                                  padding: "6px 10px",
+                                  borderRadius: "999px",
+                                  border: `1px solid ${memberSelected ? "rgba(255, 36, 66, 0.24)" : "var(--border-light)"}`,
+                                  background: memberSelected ? "rgba(255, 36, 66, 0.10)" : "var(--bg-card)",
+                                  color: memberSelected ? "var(--color-primary)" : canSelectIndividually ? "var(--text-secondary)" : "var(--text-muted)",
+                                  fontSize: "0.75rem",
+                                  fontWeight: 700,
+                                  cursor: canSelectIndividually ? "pointer" : "not-allowed",
+                                  opacity: canSelectIndividually ? 1 : 0.55,
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {!canSelectIndividually ? "待补 user_id" : memberSelected ? "取消选择" : "选中博主"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void runCreatorRecentFetch(member.authorId || member.author, {
+                                  recentDays: creatorRecentDays,
+                                  maxNotes: creatorRecentLimit,
+                                })}
+                                disabled={!canSelectIndividually || creatorRecentBatchRunning}
+                                style={{
+                                  ...segmentedButtonStyle(true),
+                                  padding: "6px 10px",
+                                  fontSize: "0.75rem",
+                                  opacity: !canSelectIndividually || creatorRecentBatchRunning ? 0.55 : 1,
+                                  cursor: !canSelectIndividually || creatorRecentBatchRunning ? "not-allowed" : "pointer",
+                                }}
+                              >
+                                单独抓取
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void openExternalUrl(member.profileUrl, `${member.author}主页`)}
+                                disabled={!member.profileUrl}
+                                style={{
+                                  ...segmentedButtonStyle(false),
+                                  padding: "6px 10px",
+                                  fontSize: "0.75rem",
+                                  opacity: member.profileUrl ? 1 : 0.55,
+                                  cursor: member.profileUrl ? "pointer" : "not-allowed",
+                                }}
+                              >
+                                主页
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  const renderSharedCreatorGroupManager = () => {
+    if (allSharedCreatorMembers.length === 0) {
+      return (
+        <div
+          style={{
+            padding: "14px",
+            borderRadius: "var(--radius-md)",
+            border: "1px dashed rgba(255, 36, 66, 0.18)",
+            background: "rgba(255, 36, 66, 0.04)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "10px",
+          }}
+        >
+          <button
+            type="button"
+            aria-expanded={showSharedCreatorGroupManager}
+            onClick={() => setShowSharedCreatorGroupManager((value) => !value)}
+            style={{
+              width: "100%",
+              padding: 0,
+              border: "none",
+              background: "transparent",
+              cursor: "pointer",
+              textAlign: "left",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+              <div>
+                <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+                  管理共享分组
+                </div>
+                <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6, marginTop: "4px" }}>
+                  还没有可管理的 UP 主成员。
+                </div>
+              </div>
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  padding: "6px 10px",
+                  borderRadius: "999px",
+                  border: "1px solid rgba(255, 36, 66, 0.16)",
+                  background: "rgba(255, 255, 255, 0.72)",
+                  color: "var(--text-secondary)",
+                  fontSize: "0.75rem",
+                  fontWeight: 700,
+                }}
+              >
+                {showSharedCreatorGroupManager ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                {showSharedCreatorGroupManager ? "收起" : "展开"}
+              </span>
+            </div>
+          </button>
+          {showSharedCreatorGroupManager ? (
+            <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+              先跑一次“共享智能分组”，这里才会出现可手动整理的小红书博主成员。
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+
+    return (
+      <div
+        style={{
+          padding: "14px",
+          borderRadius: "var(--radius-md)",
+          border: "1px solid rgba(255, 36, 66, 0.14)",
+          background: "linear-gradient(180deg, rgba(255, 36, 66, 0.04), rgba(255, 255, 255, 0.76))",
+          display: "flex",
+          flexDirection: "column",
+          gap: "12px",
+        }}
+      >
+        <button
+          type="button"
+          aria-expanded={showSharedCreatorGroupManager}
+          onClick={() => setShowSharedCreatorGroupManager((value) => !value)}
+          style={{
+            width: "100%",
+            padding: 0,
+            border: "none",
+            background: "transparent",
+            cursor: "pointer",
+            textAlign: "left",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+                管理共享分组
+              </div>
+              <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6, marginTop: "4px" }}>
+                全部博主 {allSharedCreatorMembers.length} 位 · 当前筛出 {filteredSharedCreatorMembers.length} 位 · 未分组 {ungroupedCreatorMembers.length} 位 · 共享组 {trackerCreatorGroupOptions.length} 个
+              </div>
+            </div>
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "6px 10px",
+                borderRadius: "999px",
+                border: "1px solid rgba(255, 36, 66, 0.16)",
+                background: "rgba(255, 255, 255, 0.72)",
+                color: "var(--text-secondary)",
+                fontSize: "0.75rem",
+                fontWeight: 700,
+              }}
+            >
+              {showSharedCreatorGroupManager ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              {showSharedCreatorGroupManager ? "收起" : "展开"}
+            </span>
+          </div>
+        </button>
+
+        {showSharedCreatorGroupManager ? (
+          <>
+            <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+              先点组名展开，再点具体 UP 主名字展开详情。每个博主都可以同时加入多个共享组；把所有组都移掉后，这个博主就会回到“未分组”。
+            </div>
+
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: "12px",
+            alignItems: "center",
+            flexWrap: "wrap",
+            padding: "10px 12px",
+            borderRadius: "var(--radius-sm)",
+            border: "1px solid rgba(255, 36, 66, 0.14)",
+            background: "rgba(255, 255, 255, 0.78)",
+          }}
+        >
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+            <span>全部博主 {allSharedCreatorMembers.length} 位</span>
+            <span>当前筛出 {filteredSharedCreatorMembers.length} 位</span>
+            <span>未分组 {ungroupedCreatorMembers.length} 位</span>
+            <span>共享组 {trackerCreatorGroupOptions.length} 个</span>
+          </div>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", flex: "1 1 420px", justifyContent: "flex-end" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+              每页显示
+              <select
+                value={sharedCreatorManagerPageSize}
+                onChange={(e) => setSharedCreatorManagerPageSize(Number(e.target.value) === 50 ? 50 : 20)}
+                style={{ ...compactControlStyle, padding: "8px 10px", width: "84px" }}
+              >
+                <option value={20}>20 个</option>
+                <option value={50}>50 个</option>
+              </select>
+            </label>
+            <input
+              type="text"
+              value={sharedCreatorManagerQuery}
+              onChange={(e) => {
+                setSharedCreatorManagerQuery(e.target.value);
+                setSharedCreatorManagerPages({});
+              }}
+              placeholder="搜索博主、标题或分组"
+              style={{ ...compactControlStyle, minWidth: "240px", flex: "1 1 240px", maxWidth: "360px" }}
+            />
+          </div>
+        </div>
+
+        {filteredSharedCreatorManagerGroups.length > 0 ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            {filteredSharedCreatorManagerGroups.map((group) => {
+              const isUngrouped = "isUngrouped" in group && Boolean(group.isUngrouped);
+              const expanded = expandedSharedManagerGroups.has(group.value);
+              const currentPage = Math.max(0, sharedCreatorManagerPages[group.value] || 0);
+              const pageCount = Math.max(1, Math.ceil(group.members.length / sharedCreatorManagerPageSize));
+              const normalizedPage = Math.min(currentPage, pageCount - 1);
+              const pagedMembers = group.members.slice(
+                normalizedPage * sharedCreatorManagerPageSize,
+                normalizedPage * sharedCreatorManagerPageSize + sharedCreatorManagerPageSize,
+              );
+              return (
+                <div
+                  key={`manager-group-${group.value}`}
+                  style={{
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid rgba(255, 36, 66, 0.10)",
+                    background: "var(--bg-card)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => toggleSharedManagerGroupExpanded(group.value)}
+                    aria-expanded={expanded}
+                    style={{
+                      width: "100%",
+                      padding: "12px 14px",
+                      border: "none",
+                      background: expanded ? "rgba(255, 36, 66, 0.05)" : "transparent",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "12px",
+                      textAlign: "left",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ minWidth: 0, display: "flex", alignItems: "center", gap: "10px" }}>
+                      {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+                          {group.label}
+                        </div>
+                        <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginTop: "4px", lineHeight: 1.5 }}>
+                          {group.members.length} 位 UP 主
+                          {isUngrouped ? " · 未归组成员" : ""}
+                        </div>
+                      </div>
+                    </div>
+                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", whiteSpace: "nowrap" }}>
+                      {expanded ? "收起" : "展开"}
+                    </span>
+                  </button>
+
+                  {expanded ? (
+                    <div
+                      style={{
+                        padding: "0 14px 14px",
+                        borderTop: "1px solid rgba(255, 36, 66, 0.10)",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "10px",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", flexWrap: "wrap", marginTop: "12px" }}>
+                        <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                          {isUngrouped
+                            ? "这里是已经被手动移出全部共享组的 UP 主。"
+                            : "点具体 UP 主名字展开详情，再做分组调整或单独抓取。"}
+                        </div>
+                        {pageCount > 1 ? (
+                          <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                            <button
+                              type="button"
+                              onClick={() => setSharedCreatorManagerPages((prev) => ({
+                                ...prev,
+                                [group.value]: Math.max(0, normalizedPage - 1),
+                              }))}
+                              disabled={normalizedPage === 0}
+                              style={{
+                                ...segmentedButtonStyle(false),
+                                padding: "6px 10px",
+                                fontSize: "0.75rem",
+                                opacity: normalizedPage === 0 ? 0.55 : 1,
+                                cursor: normalizedPage === 0 ? "not-allowed" : "pointer",
+                              }}
+                            >
+                              上一页
+                            </button>
+                            <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                              第 {normalizedPage + 1} / {pageCount} 页
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setSharedCreatorManagerPages((prev) => ({
+                                ...prev,
+                                [group.value]: Math.min(pageCount - 1, normalizedPage + 1),
+                              }))}
+                              disabled={normalizedPage >= pageCount - 1}
+                              style={{
+                                ...segmentedButtonStyle(false),
+                                padding: "6px 10px",
+                                fontSize: "0.75rem",
+                                opacity: normalizedPage >= pageCount - 1 ? 0.55 : 1,
+                                cursor: normalizedPage >= pageCount - 1 ? "not-allowed" : "pointer",
+                              }}
+                            >
+                              下一页
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                        {pagedMembers.map((member) => {
+                          const memberKey = `${group.value}-${member.profileId}`;
+                          const memberExpanded = expandedSharedManagerMembers.has(memberKey);
+                          const memberSelected = selectedCreatorBatchIds.has(member.profileId);
+                          const canSelectIndividually = Boolean(String(member.authorId || member.author || "").trim());
+                          const savingSharedGroup = updatingSharedCreatorIds.has(member.profileId);
+                          const currentGroups = Array.from(new Set(
+                            (member.profile.smart_groups || [])
+                              .map((item) => String(item || "").trim())
+                              .filter(Boolean),
+                          ));
+                          const currentGroupLabels = getCreatorGroupLabels(member.profile);
+                          return (
+                            <div
+                              key={`manager-member-${memberKey}`}
+                              style={{
+                                borderRadius: "var(--radius-sm)",
+                                border: "1px solid rgba(255, 36, 66, 0.10)",
+                                background: memberSelected ? "rgba(255, 36, 66, 0.05)" : "var(--bg-card)",
+                                overflow: "hidden",
+                              }}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => toggleSharedManagerMemberExpanded(memberKey)}
+                                aria-expanded={memberExpanded}
+                                style={{
+                                  width: "100%",
+                                  padding: "10px 12px",
+                                  border: "none",
+                                  background: "transparent",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "space-between",
+                                  gap: "12px",
+                                  textAlign: "left",
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <div style={{ minWidth: 0, flex: 1, display: "flex", flexDirection: "column", gap: "6px" }}>
+                                  <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                                    {memberExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                    <span style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+                                      {member.author}
+                                    </span>
+                                    <span style={{ fontSize: "0.6875rem", color: memberSelected ? "var(--color-primary)" : "var(--text-muted)" }}>
+                                      {memberSelected ? "已加入批量列表" : canSelectIndividually ? "可管理" : "待补 user_id"}
+                                    </span>
+                                    {member.inTracker ? (
+                                      <span style={{ fontSize: "0.6875rem", color: "#C2410C" }}>
+                                        已在关注推送
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                                    最近：{member.latestTitle || "暂无样本标题"}
+                                  </div>
+                                  <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                                    {currentGroupLabels.length > 0 ? currentGroupLabels.slice(0, 3).map((label) => (
+                                      <span
+                                        key={`manager-current-group-${member.profileId}-${label}`}
+                                        style={{
+                                          padding: "3px 7px",
+                                          borderRadius: "999px",
+                                          background: "rgba(255, 138, 0, 0.10)",
+                                          color: "#C2410C",
+                                          fontSize: "0.6875rem",
+                                          fontWeight: 700,
+                                        }}
+                                      >
+                                        {label}
+                                      </span>
+                                    )) : (
+                                      <span
+                                        style={{
+                                          padding: "3px 7px",
+                                          borderRadius: "999px",
+                                          background: "rgba(148, 163, 184, 0.14)",
+                                          color: "var(--text-secondary)",
+                                          fontSize: "0.6875rem",
+                                          fontWeight: 700,
+                                        }}
+                                      >
+                                        未分组
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                                <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", whiteSpace: "nowrap" }}>
+                                  {memberExpanded ? "收起详情" : "展开详情"}
+                                </span>
+                              </button>
+
+                              {memberExpanded ? (
+                                <div
+                                  style={{
+                                    padding: "0 12px 12px",
+                                    borderTop: "1px solid rgba(255, 36, 66, 0.10)",
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: "10px",
+                                  }}
+                                >
+                                  <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", lineHeight: 1.6, marginTop: "10px" }}>
+                                    {member.sourceSummary || "来源：本地收藏 / 分组整理"}
+                                  </div>
+
+                                  <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                                    {member.sampleLabels.slice(0, 5).map((label) => (
+                                      <span
+                                        key={`manager-label-${member.profileId}-${label}`}
+                                        style={{
+                                          padding: "3px 7px",
+                                          borderRadius: "999px",
+                                          background: "var(--bg-hover)",
+                                          color: "var(--text-secondary)",
+                                          fontSize: "0.6875rem",
+                                        }}
+                                      >
+                                        {label}
+                                      </span>
+                                    ))}
+                                  </div>
+
+                                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-start" }}>
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleCreatorBatchSelection(member.profileId)}
+                                      disabled={!canSelectIndividually}
+                                      style={{
+                                        padding: "6px 10px",
+                                        borderRadius: "999px",
+                                        border: `1px solid ${memberSelected ? "rgba(255, 36, 66, 0.24)" : "var(--border-light)"}`,
+                                        background: memberSelected ? "rgba(255, 36, 66, 0.10)" : "var(--bg-card)",
+                                        color: memberSelected ? "var(--color-primary)" : canSelectIndividually ? "var(--text-secondary)" : "var(--text-muted)",
+                                        fontSize: "0.75rem",
+                                        fontWeight: 700,
+                                        cursor: canSelectIndividually ? "pointer" : "not-allowed",
+                                        opacity: canSelectIndividually ? 1 : 0.55,
+                                        whiteSpace: "nowrap",
+                                      }}
+                                    >
+                                      {!canSelectIndividually ? "待补 user_id" : memberSelected ? "取消选择" : "加入批量抓取"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => void runCreatorRecentFetch(member.authorId || member.author, {
+                                        recentDays: creatorRecentDays,
+                                        maxNotes: creatorRecentLimit,
+                                      })}
+                                      disabled={!canSelectIndividually || creatorRecentBatchRunning}
+                                      style={{
+                                        ...segmentedButtonStyle(true),
+                                        padding: "6px 10px",
+                                        fontSize: "0.75rem",
+                                        opacity: !canSelectIndividually || creatorRecentBatchRunning ? 0.55 : 1,
+                                        cursor: !canSelectIndividually || creatorRecentBatchRunning ? "not-allowed" : "pointer",
+                                      }}
+                                    >
+                                      单独抓取
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => void openExternalUrl(member.profileUrl, `${member.author}主页`)}
+                                      disabled={!member.profileUrl}
+                                      style={{
+                                        ...segmentedButtonStyle(false),
+                                        padding: "6px 10px",
+                                        fontSize: "0.75rem",
+                                        opacity: member.profileUrl ? 1 : 0.55,
+                                        cursor: member.profileUrl ? "pointer" : "not-allowed",
+                                      }}
+                                    >
+                                      主页
+                                    </button>
+                                  </div>
+
+                                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                                    <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                                      共享分组
+                                    </span>
+                                    {trackerCreatorGroupOptions.map((option) => {
+                                      const active = currentGroups.includes(option.value);
+                                      return (
+                                        <button
+                                          key={`manager-group-toggle-${member.profileId}-${option.value}`}
+                                          type="button"
+                                          onClick={() => void toggleSharedCreatorGroupMembership(member.profileId, option.value)}
+                                          disabled={savingSharedGroup}
+                                          style={{
+                                            padding: "6px 10px",
+                                            borderRadius: "999px",
+                                            border: `1px solid ${active ? "rgba(255, 36, 66, 0.26)" : "var(--border-light)"}`,
+                                            background: active ? "rgba(255, 36, 66, 0.10)" : "var(--bg-card)",
+                                            color: active ? "var(--color-primary)" : "var(--text-secondary)",
+                                            fontSize: "0.75rem",
+                                            fontWeight: 700,
+                                            cursor: savingSharedGroup ? "wait" : "pointer",
+                                            opacity: savingSharedGroup ? 0.65 : 1,
+                                            whiteSpace: "nowrap",
+                                          }}
+                                        >
+                                          {active ? `已在 ${option.label}` : `加入 ${option.label}`}
+                                        </button>
+                                      );
+                                    })}
+                                    <button
+                                      type="button"
+                                      onClick={() => void saveSharedCreatorGroupMembership(member.profileId, [])}
+                                      disabled={savingSharedGroup || currentGroups.length === 0}
+                                      style={{
+                                        padding: "6px 10px",
+                                        borderRadius: "999px",
+                                        border: "1px solid var(--border-light)",
+                                        background: currentGroups.length === 0 ? "rgba(148, 163, 184, 0.10)" : "var(--bg-card)",
+                                        color: currentGroups.length === 0 ? "var(--text-muted)" : "var(--text-secondary)",
+                                        fontSize: "0.75rem",
+                                        fontWeight: 700,
+                                        cursor: savingSharedGroup || currentGroups.length === 0 ? "not-allowed" : "pointer",
+                                        opacity: savingSharedGroup || currentGroups.length === 0 ? 0.55 : 1,
+                                        whiteSpace: "nowrap",
+                                      }}
+                                    >
+                                      移到未分组
+                                    </button>
+                                    <span style={{ fontSize: "0.6875rem", color: savingSharedGroup ? "#C2410C" : "var(--text-muted)" }}>
+                                      {savingSharedGroup ? "保存中..." : "支持同时加入多个分组"}
+                                    </span>
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+            当前搜索条件下没有匹配到共享分组成员。
+          </div>
+        )}
+          </>
+        ) : null}
+      </div>
+    );
+  };
+
+  const renderFrequentAuthorQuickPicker = () => {
+    if (authorCandidates.length === 0) {
+      return (
+        <div
+          style={{
+            padding: "14px",
+            borderRadius: "var(--radius-md)",
+            border: "1px dashed var(--border-light)",
+            background: "var(--bg-hover)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "10px",
+          }}
+        >
+          <div>
+            <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+              高频博主快捷添加
+            </div>
+            <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6, marginTop: "4px" }}>
+              共享智能分组完成后，会按本地内容里作者出现次数整理高频博主，默认展示前 10 个，点圆形头像就能直接加入“指定关注爬取”。
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <button type="button" onClick={handleBuildSmartGroups} style={segmentedButtonStyle(true)}>
+              生成共享智能分组
+            </button>
+            <button type="button" onClick={handleRefreshSharedCreatorAssignments} style={segmentedButtonStyle(false)}>
+              仅整理博主 / UP
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div
+        style={{
+          padding: "14px",
+          borderRadius: "var(--radius-md)",
+          border: "1px solid rgba(255, 36, 66, 0.16)",
+          background: "linear-gradient(180deg, rgba(255, 36, 66, 0.06), rgba(255, 138, 0, 0.04))",
+          display: "flex",
+          flexDirection: "column",
+          gap: "12px",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+              高频博主快捷添加
+            </div>
+            <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6, marginTop: "4px" }}>
+              按收藏里出现次数排序。默认只显示前 10 个，点头像就直接加入指定关注爬取。
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <button type="button" onClick={handleBuildSmartGroups} style={segmentedButtonStyle(false)}>
+              刷新共享智能分组
+            </button>
+            <button type="button" onClick={handleRefreshSharedCreatorAssignments} style={segmentedButtonStyle(false)}>
+              仅整理博主 / UP
+            </button>
+          </div>
+        </div>
+
+        {authorCandidateMeta && (
+          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+            {authorCandidateMeta.message}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => setFrequentAuthorGroupFilter("all")}
+            style={segmentedButtonStyle(frequentAuthorGroupFilter === "all")}
+          >
+            全部 · {frequentAuthorCandidates.length}
+          </button>
+          {frequentAuthorGroupOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => setFrequentAuthorGroupFilter(option.value)}
+              style={segmentedButtonStyle(frequentAuthorGroupFilter === option.value)}
+            >
+              {option.label} · {frequentAuthorGroupCounts[option.value] || 0}
+            </button>
+          ))}
+        </div>
+
+        {filteredFrequentAuthorCandidates.length > 0 ? (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "10px" }}>
+            {visibleFrequentAuthorCandidates.map((candidate, index) => {
+              const alreadyTracked = Boolean(candidate.author_id) && trackerCreatorMonitors.some((monitor) => monitor.user_id === candidate.author_id);
+              const groupLabels = getCandidateGroupLabels(candidate);
+              const avatarText = (candidate.author || "?").trim().slice(0, 2) || "?";
+              return (
+                <div
+                  key={`${candidate.author}-${candidate.author_id || index}`}
+                  style={{
+                    padding: "12px",
+                    borderRadius: "var(--radius-sm)",
+                    border: alreadyTracked ? "1px solid rgba(255, 36, 66, 0.28)" : "1px solid var(--border-light)",
+                    background: alreadyTracked ? "rgba(255, 36, 66, 0.06)" : "var(--bg-card)",
+                    display: "flex",
+                    gap: "12px",
+                    alignItems: "flex-start",
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => void handleAddFrequentAuthorToCreatorMonitor(candidate)}
+                    disabled={!candidate.author_id}
+                    title={candidate.author_id ? "点头像直接加入指定关注爬取" : "这个作者还没有解析出 user_id"}
+                    style={{
+                      width: "44px",
+                      height: "44px",
+                      borderRadius: "50%",
+                      border: "none",
+                      background: alreadyTracked
+                        ? "linear-gradient(135deg, rgba(255, 36, 66, 0.92), rgba(255, 138, 0, 0.88))"
+                        : "linear-gradient(135deg, rgba(255, 36, 66, 0.16), rgba(255, 138, 0, 0.14))",
+                      color: alreadyTracked ? "white" : "var(--color-primary)",
+                      fontSize: "0.875rem",
+                      fontWeight: 800,
+                      cursor: candidate.author_id ? "pointer" : "not-allowed",
+                      opacity: candidate.author_id ? 1 : 0.45,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {avatarText}
+                  </button>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px", minWidth: 0, flex: 1 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", alignItems: "center" }}>
+                      <span style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {candidate.author}
+                      </span>
+                      <span style={{ fontSize: "0.6875rem", color: alreadyTracked ? "var(--color-primary)" : "var(--text-muted)", whiteSpace: "nowrap" }}>
+                        {alreadyTracked ? "已加入" : `TOP ${index + 1}`}
                       </span>
                     </div>
-                    <div style={{ color: "var(--text-muted)", fontSize: "0.8125rem", display: "flex", gap: "10px", flexWrap: "wrap" }}>
-                      <span>{candidate.note_count} 条</span>
-                      <span>{candidate.total_collects} 收藏</span>
-                      <span>{candidate.total_likes} 赞</span>
+                    <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                      收藏出现 {candidate.note_count} 次 · 收藏 {candidate.total_collects} · 点赞 {candidate.total_likes}
                     </div>
-                    <div style={{ color: "var(--text-secondary)", fontSize: "0.8125rem", lineHeight: 1.5 }}>
+                    <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.5 }}>
                       最近：{candidate.latest_title || "暂无"}
                     </div>
-                    <div style={{ color: "var(--text-secondary)", fontSize: "0.8125rem", lineHeight: 1.5 }}>
-                      {candidate.source_summary || "来源：本地收藏笔记"}
-                    </div>
-                    {(candidate.sample_albums?.length || candidate.sample_tags?.length) ? (
+                    {groupLabels.length > 0 ? (
                       <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                        {[...(candidate.sample_albums || []), ...(candidate.sample_tags || [])].slice(0, 5).map((label) => (
+                        {groupLabels.slice(0, 3).map((label) => (
                           <span
                             key={label}
                             style={{
-                              padding: "3px 7px",
+                              padding: "3px 6px",
                               borderRadius: "var(--radius-sm)",
-                              background: "rgba(255, 36, 66, 0.08)",
-                              color: "var(--color-primary)",
-                              fontSize: "0.72rem",
-                              fontWeight: 600,
+                              background: "rgba(255, 138, 0, 0.10)",
+                              color: "#C2410C",
+                              fontSize: "0.6875rem",
+                              fontWeight: 700,
                             }}
                           >
                             {label}
@@ -2603,201 +5011,1670 @@ export function XiaohongshuTool() {
                         ))}
                       </div>
                     ) : null}
-                    {candidate.author_id && (
-                      <div style={{ color: "var(--text-muted)", fontSize: "0.75rem", wordBreak: "break-all" }}>
-                        user_id: {candidate.author_id}
-                      </div>
-                    )}
-                  </button>
-                ))}
-              </div>
-            )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+            当前筛选条件下还没有匹配到博主。可以切回“全部”，或者先重新执行一次智能分组。
+          </div>
+        )}
+
+        {filteredFrequentAuthorCandidates.length > 10 ? (
+          <div style={{ display: "flex", justifyContent: "center" }}>
+            <button
+              type="button"
+              onClick={() => setShowAllFrequentAuthors((value) => !value)}
+              style={segmentedButtonStyle(false)}
+            >
+              {showAllFrequentAuthors
+                ? "收起高频博主"
+                : `展开剩余 ${filteredFrequentAuthorCandidates.length - 10} 个高频博主`}
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  const renderCreatorRecentWorkbenchContent = () => (
+    <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+      <button
+        type="button"
+        aria-expanded={showCreatorRecentWorkbench}
+        onClick={() => setShowCreatorRecentWorkbench((value) => !value)}
+        style={{
+          width: "100%",
+          padding: "0",
+          border: "none",
+          background: "transparent",
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+              输入博主名称、主页链接或 `user_id`，主动补抓最近动态
+            </div>
+            <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6, marginTop: "4px" }}>
+              默认折叠。展开后可直接抓最近内容；共享分组里的整组抓取和批量选中也都复用这里的链路。
+            </div>
+          </div>
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "6px",
+              padding: "6px 10px",
+              borderRadius: "999px",
+              border: "1px solid var(--border-light)",
+              background: "var(--bg-card)",
+              color: "var(--text-secondary)",
+              fontSize: "0.75rem",
+              fontWeight: 700,
+            }}
+          >
+            {showCreatorRecentWorkbench ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            {showCreatorRecentWorkbench ? "收起" : "展开"}
+          </div>
+        </div>
+      </button>
+
+      {showCreatorRecentWorkbench && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+          <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+            如果输入的是名称，会优先在本地已记录的名字到 ID 映射里匹配，再抓取最近几天内容。下面也可以直接使用共享分组结果做整组或多博主批量抓取，并手动整理分组成员。
           </div>
 
-          <div style={{ height: "1px", background: "var(--border-light)" }} />
+          <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
+            <input
+              type="text"
+              value={creatorSearchQuery}
+              onChange={(e) => setCreatorSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (isActionEnterKey(e)) {
+                  e.preventDefault();
+                  void handleFetchCreatorRecent();
+                }
+              }}
+              placeholder="输入博主名称、主页链接或 user_id"
+              style={{ ...compactControlStyle, flex: 1, minWidth: "260px" }}
+            />
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.875rem", color: "var(--text-main)" }}>
+              最近
+              <input
+                type="number"
+                min={1}
+                max={365}
+                value={creatorRecentDays}
+                onChange={(e) => setCreatorRecentDays(Number(e.target.value || 1))}
+                style={{ ...compactControlStyle, width: "88px" }}
+              />
+              天
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.875rem", color: "var(--text-main)" }}>
+              抓取
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={creatorRecentLimit}
+                onChange={(e) => setCreatorRecentLimit(Number(e.target.value || 1))}
+                style={{ ...compactControlStyle, width: "88px" }}
+              />
+              条
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.875rem", color: "var(--text-main)" }}>
+              <input
+                type="checkbox"
+                checked={creatorRecentAutoSaveAfterFetch}
+                onChange={(e) => setCreatorRecentAutoSaveAfterFetch(e.target.checked)}
+              />
+              抓取后自动一键入库
+            </label>
+            <button
+              type="button"
+              onClick={() => void handleFetchCreatorRecent()}
+              disabled={creatorRecentRunning || !creatorSearchQuery.trim()}
+              style={segmentedButtonStyle(true)}
+            >
+              {creatorRecentRunning ? "抓取中..." : "抓取最近动态"}
+            </button>
+            {creatorRecentRunning && creatorRecentTaskId ? (
+              <button
+                type="button"
+                onClick={() => void handleCancelCreatorRecent()}
+                style={segmentedButtonStyle(false)}
+              >
+                停止
+              </button>
+            ) : null}
+          </div>
+          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+            指定博主抓取使用插件 bridge 优先链路：由浏览器扩展打开博主主页并读取页面状态 / DOM，和专辑、搜索抓取保持一致。
+            当前不会静默回退 Playwright；如插件未连接、页面没有读到笔记、访问频繁、扫码或登录限制，任务会停止并提示处理。批量抓取仍建议控制频率。
+          </div>
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: "var(--radius-sm)",
+              border: "1px solid rgba(245, 158, 11, 0.45)",
+              background: "rgba(245, 158, 11, 0.12)",
+              color: "#92400e",
+              fontSize: "0.8125rem",
+              fontWeight: 700,
+              lineHeight: 1.6,
+            }}
+          >
+            风险提示：访问指定博主主页本身就可能触发小红书“访问频繁/安全验证”，即使走插件 bridge 也不稳定。建议优先使用插件路径、小批量低频执行，遇到限制立即停止并等待恢复。
+          </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+          {renderSharedCreatorBatchSelector()}
+        </div>
+      )}
+
+      {creatorBatchResults.length > 0 ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+              批量抓取结果 · 成功 {creatorBatchResults.filter((item) => item.result).length} 位 / 失败 {creatorBatchResults.filter((item) => item.error).length} 位
+            </div>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={() => void handleSaveCreatorRecentNotes(
+                  creatorBatchResults.flatMap((item) => item.result?.notes || []),
+                  "博主最近动态批量抓取",
+                  "批量抓取结果已入库",
+                )}
+                disabled={previewSaveRunning || creatorBatchResults.every((item) => !item.result?.notes?.length)}
+                style={{
+                  ...segmentedButtonStyle(true),
+                  opacity: previewSaveRunning || creatorBatchResults.every((item) => !item.result?.notes?.length) ? 0.55 : 1,
+                  cursor: previewSaveRunning || creatorBatchResults.every((item) => !item.result?.notes?.length) ? "not-allowed" : "pointer",
+                }}
+              >
+                <FolderDown style={{ width: "14px", height: "14px" }} />
+                {previewSaveRunning ? "入库中..." : "一键入库全部结果"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleRefreshCreatorBatchResults()}
+                disabled={creatorRecentBatchRunning}
+                style={{
+                  ...segmentedButtonStyle(false),
+                  opacity: creatorRecentBatchRunning ? 0.55 : 1,
+                  cursor: creatorRecentBatchRunning ? "not-allowed" : "pointer",
+                }}
+              >
+                <RefreshCw style={{ width: "14px", height: "14px" }} />
+                {creatorRecentBatchRunning ? "刷新中..." : "刷新结果"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setCreatorBatchResults([])}
+                disabled={creatorRecentBatchRunning}
+                style={{
+                  ...segmentedButtonStyle(false),
+                  opacity: creatorRecentBatchRunning ? 0.55 : 1,
+                  cursor: creatorRecentBatchRunning ? "not-allowed" : "pointer",
+                }}
+              >
+                清空结果
+              </button>
+            </div>
+          </div>
+
+          {creatorBatchResults.map((item) => (
+            <div
+              key={`creator-batch-${item.target.profileId}`}
+              style={{
+                padding: "14px",
+                borderRadius: "var(--radius-md)",
+                border: item.result ? "1px solid rgba(255, 138, 0, 0.18)" : "1px solid rgba(239, 68, 68, 0.20)",
+                background: item.result ? "var(--bg-card)" : "rgba(239, 68, 68, 0.05)",
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px",
+              }}
+            >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
+                      {item.result?.resolved_author || item.target.author}
+                    </div>
+                  <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginTop: "4px", lineHeight: 1.6 }}>
+                    {item.target.groupLabel ? `${item.target.groupLabel} · ` : ""}
+                    {item.result
+                      ? `最近 ${item.result.recent_days} 天 ${item.result.total_found} 条`
+                      : item.error || "抓取失败"}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                  {item.result ? (
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveCreatorRecentNotes(
+                        item.result?.notes || [],
+                        item.result?.resolved_author || item.target.author,
+                        `${item.result?.resolved_author || item.target.author}动态已入库`,
+                      )}
+                      disabled={previewSaveRunning || item.result.notes.length === 0}
+                      style={{
+                        ...segmentedButtonStyle(true),
+                        opacity: previewSaveRunning || item.result.notes.length === 0 ? 0.55 : 1,
+                        cursor: previewSaveRunning || item.result.notes.length === 0 ? "not-allowed" : "pointer",
+                      }}
+                    >
+                      <FolderDown style={{ width: "14px", height: "14px" }} />
+                      {previewSaveRunning ? "入库中..." : "全部入库"}
+                    </button>
+                  ) : null}
+                  {item.result?.profile_url || item.target.authorId ? (
+                    <button
+                      type="button"
+                      onClick={() => void openExternalUrl(
+                        item.result?.profile_url || buildXhsProfileUrl(item.target.authorId),
+                        `${item.result?.resolved_author || item.target.author}主页`,
+                      )}
+                      style={segmentedButtonStyle(false)}
+                    >
+                      主页
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              {item.result ? (
+                item.result.notes.length > 0 ? (
+                  renderCreatorNoteResults({
+                    notes: item.result.notes,
+                    carouselRef: creatorBatchResultCarouselRef,
+                    layout: creatorBatchResultLayout,
+                    onLayoutChange: setCreatorBatchResultLayout,
+                    expandedIds: expandedCreatorBatchNotes,
+                    onToggleExpand: (noteId) => setExpandedCreatorBatchNotes((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(noteId)) next.delete(noteId);
+                      else next.add(noteId);
+                      return next;
+                    }),
+                    sourceLabel: item.result.resolved_author || item.target.author,
+                    saveAllTitle: `${item.result.resolved_author || item.target.author}动态已入库`,
+                  })
+                ) : (
+                  <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+                    这位博主在当前时间范围内没有可用内容。
+                  </div>
+                )
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {creatorRecentResult ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ fontSize: "0.875rem", color: "var(--text-main)", fontWeight: 700 }}>
+              {creatorRecentResult.resolved_author} · 最近 {creatorRecentResult.recent_days} 天 {creatorRecentResult.total_found} 条
+            </div>
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={() => void handleSaveCreatorRecentNotes(
+                  creatorRecentResult.notes,
+                  creatorRecentResult.resolved_author || creatorRecentResult.creator_query,
+                  "博主最近动态已入库",
+                )}
+                disabled={previewSaveRunning || creatorRecentResult.notes.length === 0}
+                style={{
+                  ...segmentedButtonStyle(true),
+                  opacity: previewSaveRunning || creatorRecentResult.notes.length === 0 ? 0.55 : 1,
+                  cursor: previewSaveRunning || creatorRecentResult.notes.length === 0 ? "not-allowed" : "pointer",
+                }}
+              >
+                <FolderDown style={{ width: "14px", height: "14px" }} />
+                {previewSaveRunning ? "入库中..." : "一键入库"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleRefreshCreatorRecentResult()}
+                disabled={creatorRecentRunning}
+                style={{
+                  ...segmentedButtonStyle(false),
+                  opacity: creatorRecentRunning ? 0.55 : 1,
+                  cursor: creatorRecentRunning ? "not-allowed" : "pointer",
+                }}
+              >
+                <RefreshCw style={{ width: "14px", height: "14px" }} />
+                {creatorRecentRunning ? "刷新中..." : "刷新结果"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleAddFrequentAuthorToCreatorMonitor({
+                  author: creatorRecentResult.resolved_author,
+                  author_id: creatorRecentResult.resolved_user_id,
+                  note_count: creatorRecentResult.total_found,
+                  total_likes: creatorRecentResult.notes.reduce((sum, item) => sum + (item.likes || 0), 0),
+                  total_collects: creatorRecentResult.notes.reduce((sum, item) => sum + (item.collects || 0), 0),
+                  total_comments: creatorRecentResult.notes.reduce((sum, item) => sum + (item.comments_count || 0), 0),
+                  latest_date: creatorRecentResult.notes[0]?.published_at || "",
+                  latest_title: creatorRecentResult.notes[0]?.title || "",
+                  sample_note_urls: creatorRecentResult.notes.map((item) => item.url).filter(Boolean).slice(0, 6),
+                  sample_titles: creatorRecentResult.notes.map((item) => item.title).filter(Boolean).slice(0, 6),
+                  sample_albums: [],
+                  sample_tags: [],
+                  source_summary: `来自指定博主抓取：${creatorRecentResult.creator_query}`,
+                  score: creatorRecentResult.notes.reduce((sum, item) => sum + (item.likes || 0) + (item.collects || 0), 0),
+                })}
+                style={segmentedButtonStyle(
+                  trackerCreatorMonitors.some((monitor) => monitor.user_id === creatorRecentResult.resolved_user_id)
+                )}
+              >
+                {trackerCreatorMonitors.some((monitor) => monitor.user_id === creatorRecentResult.resolved_user_id)
+                  ? "已在特定关注"
+                  : "加入特定关注"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void openExternalUrl(
+                  creatorRecentResult.profile_url || buildXhsProfileUrl(creatorRecentResult.resolved_user_id),
+                  `${creatorRecentResult.resolved_author}主页`,
+                )}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  color: "var(--color-primary)",
+                  textDecoration: "none",
+                  fontSize: "0.8125rem",
+                  fontWeight: 700,
+                  border: "none",
+                  background: "transparent",
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                <ExternalLink size={14} />
+                打开主页
+              </button>
+            </div>
+          </div>
+          {creatorRecentResult.notes.length > 0 ? renderCreatorNoteResults({
+            notes: creatorRecentResult.notes,
+            carouselRef: creatorRecentResultCarouselRef,
+            layout: creatorRecentResultLayout,
+            onLayoutChange: setCreatorRecentResultLayout,
+            expandedIds: expandedCreatorRecentNotes,
+            onToggleExpand: (noteId) => setExpandedCreatorRecentNotes((prev) => {
+              const next = new Set(prev);
+              if (next.has(noteId)) next.delete(noteId);
+              else next.add(noteId);
+              return next;
+            }),
+            sourceLabel: creatorRecentResult.resolved_author || creatorRecentResult.creator_query,
+            saveAllTitle: "博主最近动态已入库",
+          }) : (
+            <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+              这位博主在你设定的最近天数内没有读到可用内容。
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+
+  const renderCreatorRecentPanel = () => (
+    <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+      <Card title="主动抓取 / 指定博主最近动态" icon={<Search style={{ width: "18px", height: "18px" }} />}>
+        {renderCreatorRecentWorkbenchContent()}
+      </Card>
+      {renderSharedCreatorGroupManager()}
+    </div>
+  );
+
+  const renderCreatorPushList = () => {
+    const enabledCreatorCount = creatorEntries.filter((monitor) => monitor.enabled).length;
+    const hasSmartGroups = visibleSharedCreatorGroups.length > 0;
+    const filterLabel = creatorMonitorGroupFilter === "all"
+      ? "全部"
+      : creatorMonitorGroupFilter === "__ungrouped__"
+        ? "未分组"
+        : creatorGroupLabelMap.get(creatorMonitorGroupFilter) || creatorMonitorGroupFilter;
+    const startIndex = filteredCreatorEntries.length === 0 ? 0 : safeCreatorMonitorPage * creatorMonitorPageSize + 1;
+    const endIndex = Math.min(filteredCreatorEntries.length, startIndex + visibleCreatorEntries.length - 1);
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+        {renderPushRow(
+          "creator",
+          "特定关注爬取",
+          `${creatorEntries.length} 个博主定义 · 已单独开启 ${enabledCreatorCount} 个 · 当前筛选 ${filterLabel} · 每页 8 个 · 标题开关用于一键全开/全关`,
+          trackerCreatorPushEnabled,
+          handleToggleCreatorPush,
+          handleDeleteCreatorPush,
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            <div>
+              <div style={{ fontSize: "0.8125rem", fontWeight: 700, color: "var(--text-main)" }}>
+                具体博主定义
+              </div>
+              <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", lineHeight: 1.6, marginTop: "4px" }}>
+                每个博主都可以独立开启、关闭和删除；手动添加时填写显示名称，以及主页 /user/profile/ 后面的用户号，不是小红书号。
+              </div>
+              <div
+                style={{
+                  marginTop: "8px",
+                  padding: "8px 10px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid rgba(245, 158, 11, 0.45)",
+                  background: "rgba(245, 158, 11, 0.12)",
+                  color: "#92400e",
+                  fontSize: "0.75rem",
+                  fontWeight: 700,
+                  lineHeight: 1.6,
+                }}
+              >
+                可能触发反爬，并不稳定：特定关注/指定博主会访问博主主页，频率过高时容易出现访问频繁或验证页。建议分批低频运行。
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px", padding: "10px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-light)", background: "var(--bg-card)" }}>
+              <button
+                type="button"
+                onClick={() => setShowCreatorImportPanel((value) => !value)}
+                style={{ ...segmentedButtonStyle(showCreatorImportPanel), justifyContent: "space-between", width: "100%" }}
+              >
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
+                  <FolderDown style={{ width: "14px", height: "14px" }} />
+                  从智能分组快速导入
+                </span>
+                <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{showCreatorImportPanel ? "收起" : "展开"}</span>
+              </button>
+              {showCreatorImportPanel ? (
+                <>
+                  <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                    {hasSmartGroups ? "选择分组后点击添加，会只导入未添加的博主。" : "先执行共享智能分组后可按组导入。"}
+                  </span>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    {visibleSharedCreatorGroups.map((group) => {
+                      const importableCount = group.members.filter((member) => member.authorId && !trackedCreatorUserIds.has(normalizeXhsProfileUserId(member.authorId))).length;
+                      return (
+                        <button
+                          key={`import-${group.value}`}
+                          type="button"
+                          onClick={() => void handleImportCreatorGroup(group.value)}
+                          disabled={importableCount === 0}
+                          style={segmentedButtonStyle(false)}
+                          title={importableCount === 0 ? "该组博主都已在特定关注里" : `导入 ${importableCount} 个未添加博主`}
+                        >
+                          <FolderDown style={{ width: "14px", height: "14px" }} />
+                          {group.label} · 添加 {importableCount}
+                        </button>
+                      );
+                    })}
+                    {!hasSmartGroups ? (
+                      <button type="button" onClick={handleRefreshSharedCreatorAssignments} style={segmentedButtonStyle(false)}>
+                        生成智能分组
+                      </button>
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px", padding: "10px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-light)", background: "var(--bg-card)" }}>
+              <button
+                type="button"
+                onClick={() => setShowCreatorFilterPanel((value) => !value)}
+                style={{ ...segmentedButtonStyle(showCreatorFilterPanel), justifyContent: "space-between", width: "100%" }}
+              >
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
+                  <Filter style={{ width: "14px", height: "14px" }} />
+                  标签过滤
+                </span>
+                <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{filterLabel} · {showCreatorFilterPanel ? "收起" : "展开"}</span>
+              </button>
+              {showCreatorFilterPanel ? (
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => { setCreatorMonitorGroupFilter("all"); setCreatorMonitorPage(0); }}
+                style={segmentedButtonStyle(creatorMonitorGroupFilter === "all")}
+              >
+                全部 · {creatorEntries.length}
+              </button>
+              {creatorGroupDisplayOptions.map((option) => (
+                <button
+                  key={`monitor-filter-${option.value}`}
+                  type="button"
+                  onClick={() => { setCreatorMonitorGroupFilter(option.value); setCreatorMonitorPage(0); }}
+                  style={segmentedButtonStyle(creatorMonitorGroupFilter === option.value)}
+                >
+                  {option.label} · {creatorEntries.filter((monitor) => getMonitorGroupValues(monitor).includes(option.value)).length}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => { setCreatorMonitorGroupFilter("__ungrouped__"); setCreatorMonitorPage(0); }}
+                style={segmentedButtonStyle(creatorMonitorGroupFilter === "__ungrouped__")}
+              >
+                未分组 · {creatorEntries.filter((monitor) => getMonitorGroupValues(monitor).length === 0).length}
+              </button>
+                </div>
+              ) : null}
+            </div>
+
+            {visibleCreatorEntries.length > 0 ? (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "10px" }}>
+                {visibleCreatorEntries.map((creatorMonitor) => {
+                  const userId = normalizeXhsProfileUserId(creatorMonitor.user_id);
+                  const profile = trackerCreatorProfiles[userId];
+                  const active = creatorMonitor.enabled;
+                  const source = profile?.source_summary || profile?.latest_title || "来自共享智能分组 / 手动添加";
+                  const groupLabels = getCreatorMonitorGroupLabels(creatorMonitor);
+                  return (
+                    <div
+                      key={creatorMonitor.id}
+                      style={{
+                        position: "relative",
+                        textAlign: "left",
+                        padding: "10px",
+                        borderRadius: "var(--radius-sm)",
+                        background: active ? "rgba(255, 36, 66, 0.10)" : "var(--bg-hover)",
+                        border: active ? "1px solid rgba(255, 36, 66, 0.30)" : "1px solid var(--border-light)",
+                        color: "var(--text-main)",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "6px",
+                        minWidth: 0,
+                      }}
+                    >
+                      <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                        <span
+                          style={{
+                            width: "7px",
+                            height: "7px",
+                            borderRadius: "50%",
+                            background: active ? "var(--color-primary)" : "var(--text-muted)",
+                            flexShrink: 0,
+                          }}
+                        />
+                        <strong style={{ fontSize: "0.8125rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {profile?.author || creatorMonitor.label || userId || "未设置用户号"}
+                        </strong>
+                      </div>
+                      <input
+                        type="text"
+                        value={creatorMonitor.label}
+                        onChange={(e) => setTrackerCreatorMonitors((prev) => prev.map((monitor) => (
+                          monitor.id === creatorMonitor.id
+                            ? { ...monitor, label: e.target.value, author: e.target.value || monitor.author }
+                            : monitor
+                        )))}
+                        placeholder="博主显示名称"
+                        style={{ ...compactControlStyle, width: "100%" }}
+                      />
+                      <input
+                        type="text"
+                        value={creatorMonitor.user_id}
+                        onChange={(e) => setTrackerCreatorMonitors((prev) => prev.map((monitor) => (
+                          monitor.id === creatorMonitor.id
+                            ? { ...monitor, user_id: normalizeXhsProfileUserId(e.target.value) }
+                            : monitor
+                        )))}
+                        placeholder="填写主页 /user/profile/ 后面的用户号，不是小红书号"
+                        style={{ ...compactControlStyle, width: "100%" }}
+                      />
+                      <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem", lineHeight: 1.45, minHeight: "2.1em", overflow: "hidden" }}>
+                        {source}
+                      </span>
+                      <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          onClick={() => creatorMonitor.user_id && void handleToggleCreatorUser(creatorMonitor.user_id)}
+                          disabled={!creatorMonitor.user_id}
+                          style={segmentedButtonStyle(active)}
+                        >
+                          {active ? "已开启" : "已关闭"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleRemoveCreatorMonitor(creatorMonitor)}
+                          style={{ ...segmentedButtonStyle(false), color: "var(--color-danger)" }}
+                        >
+                          删除
+                        </button>
+                      </div>
+                      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                        {resolveCreatorProfileUrl(profile, userId) ? (
+                          <button
+                            type="button"
+                            onClick={() => void openExternalUrl(resolveCreatorProfileUrl(profile, userId), `${profile?.author || userId}主页`)}
+                            style={{ ...segmentedButtonStyle(false), fontSize: "0.6875rem", padding: "5px 8px" }}
+                          >
+                            访问主页
+                            <ExternalLink size={12} />
+                          </button>
+                        ) : null}
+                        {profile?.sample_note_urls?.[0] ? (
+                          <button
+                            type="button"
+                            onClick={() => void openExternalUrl(profile.sample_note_urls?.[0], `${profile?.author || userId}样本内容`)}
+                            style={{ ...segmentedButtonStyle(false), fontSize: "0.6875rem", padding: "5px 8px" }}
+                          >
+                            预览样本
+                            <ExternalLink size={12} />
+                          </button>
+                        ) : null}
+                      </div>
+                      <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                        <label style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>每次抓取</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={20}
+                          value={creatorMonitor?.per_user_limit ?? 3}
+                          onChange={(e) => setTrackerCreatorMonitors((prev) => prev.map((monitor) => (
+                            monitor.id === creatorMonitor.id
+                              ? { ...monitor, per_user_limit: Number(e.target.value || 1) }
+                              : monitor
+                          )))}
+                          style={{ ...compactControlStyle, width: "72px" }}
+                        />
+                        <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>条</span>
+                        <label style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>最近</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={365}
+                          value={creatorMonitor?.recent_days ?? DEFAULT_XHS_RECENT_DAYS}
+                          onChange={(e) => setTrackerCreatorMonitors((prev) => prev.map((monitor) => (
+                            monitor.id === creatorMonitor.id
+                              ? { ...monitor, recent_days: Math.max(1, Math.min(365, Number(e.target.value || 1))) }
+                              : monitor
+                          )))}
+                          style={{ ...compactControlStyle, width: "72px" }}
+                        />
+                        <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>天</span>
+                      </div>
+                      <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                        <input
+                          type="checkbox"
+                          checked={creatorMonitor?.include_comments ?? false}
+                          onChange={(e) => setTrackerCreatorMonitors((prev) => prev.map((monitor) => (
+                            monitor.id === creatorMonitor.id
+                              ? { ...monitor, include_comments: e.target.checked }
+                              : monitor
+                          )))}
+                        />
+                        选爬评论
+                      </label>
+                      {groupLabels.length > 0 ? (
+                        <span style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                          {groupLabels.slice(0, 3).map((label) => (
+                            <span
+                              key={label}
+                              style={{
+                                padding: "3px 6px",
+                                borderRadius: "var(--radius-sm)",
+                                background: "rgba(255, 138, 0, 0.10)",
+                                color: "#FF8A00",
+                                fontSize: "0.6875rem",
+                                fontWeight: 700,
+                              }}
+                            >
+                              {label}
+                            </span>
+                          ))}
+                        </span>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div style={{ padding: "14px", borderRadius: "var(--radius-sm)", border: "1px dashed var(--border-light)", color: "var(--text-muted)", fontSize: "0.8125rem" }}>
+                当前筛选下还没有博主，可以从智能分组导入或手动新增。
+              </div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                {filteredCreatorEntries.length > 0 ? `第 ${startIndex}-${endIndex} 个，共 ${filteredCreatorEntries.length} 个` : "共 0 个"}
+              </span>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <button type="button" disabled={safeCreatorMonitorPage <= 0} onClick={() => setCreatorMonitorPage((page) => Math.max(0, page - 1))} style={segmentedButtonStyle(false)}>
+                  上一页
+                </button>
+                <button type="button" disabled={safeCreatorMonitorPage >= creatorMonitorPageCount - 1} onClick={() => setCreatorMonitorPage((page) => Math.min(creatorMonitorPageCount - 1, page + 1))} style={segmentedButtonStyle(false)}>
+                  下一页
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+              <button type="button" onClick={() => setTrackerCreatorMonitors((prev) => [
+                ...prev,
+                createCreatorMonitor({ label: `手动新增 ${prev.length + 1}`, enabled: true }),
+              ])} style={segmentedButtonStyle(false)}>
+                <Plus style={{ width: "14px", height: "14px" }} />
+                手动新增
+              </button>
+              <button type="button" onClick={() => persistTrackerDefinitions("特定关注定义已保存")} style={segmentedButtonStyle(true)}>
+                保存特定关注定义
+              </button>
+              <button type="button" onClick={() => void handleClearCreatorMonitors("page")} style={{ ...segmentedButtonStyle(false), color: "var(--color-danger)" }}>
+                删除本页关注
+              </button>
+              <button type="button" onClick={() => void handleClearCreatorMonitors("filtered")} style={{ ...segmentedButtonStyle(false), color: "var(--color-danger)" }}>
+                删除当前筛选
+              </button>
+              <button type="button" onClick={() => void handleClearCreatorMonitors("all")} style={{ ...segmentedButtonStyle(false), color: "var(--color-danger)" }}>
+                删除全部关注
+              </button>
+            </div>
+          </div>,
+        )}
+      </div>
+    );
+  };
+
+  const renderFollowingWorkbenchCard = () => (
+    <Card title="关注监控实验台" icon={<Users style={{ width: "18px", height: "18px" }} />}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+        <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
+          会先在搜索页搜索关键词，再自动点“筛选 -&gt; 已关注”，优先走插件 bridge 读取真实页面 state，再回退到浏览器兜底链路。
+          {!cookieVerified && (
+            <span style={{ color: "var(--color-warning)" }}>（需先配置 Cookie）</span>
+          )}
+        </p>
+
+        <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
+          <button
+            type="button"
+            onClick={() => setAlbumDedicatedWindowMode((v) => !v)}
+            style={segmentedButtonStyle(albumDedicatedWindowMode)}
+          >
+            {albumDedicatedWindowMode ? "当前 Edge 独立窗口" : "使用当前窗口"}
+          </button>
+          <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-main)", fontSize: "0.875rem" }}>
+            扩展端口
+            <input
+              type="number"
+              min={1024}
+              max={65535}
+              value={albumExtensionPort}
+              onChange={(e) => setAlbumExtensionPort(Number(e.target.value || 9334))}
+              style={{ ...compactControlStyle, width: "88px" }}
+            />
+          </label>
+        </div>
+
+        <div style={{ color: "var(--text-muted)", fontSize: "0.8125rem" }}>
+          抓取链路：插件优先（端口 {albumExtensionPort}，{albumDedicatedWindowMode ? "独立窗口" : "当前窗口"}）{` -> `}Playwright 兜底
+        </div>
+
+        <div style={{ height: "1px", background: "var(--border-light)" }} />
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>关注流关键词搜索</div>
+          <div style={{ color: "var(--text-secondary)", fontSize: "0.8125rem" }}>
+            直接按关键词搜索，再切到“已关注”筛选，只保留你已关注博主的结果。
+          </div>
+        </div>
+
+        <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-main)", fontSize: "0.875rem" }}>
+          抓取上限
+          <input
+            type="number"
+            min={1}
+            max={300}
+            value={followingLimit}
+            onChange={(e) => setFollowingLimit(normalizeFollowingLimit(e.target.value))}
+            onBlur={(e) => setFollowingLimit(normalizeFollowingLimit(e.target.value))}
+            style={{ ...compactControlStyle, width: "88px" }}
+          />
+          条
+        </label>
+
+        <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-main)", fontSize: "0.875rem" }}>
+          只保留最近
+          <input
+            type="number"
+            min={1}
+            max={365}
+            value={followingRecentDays}
+            onChange={(e) => setFollowingRecentDays(Math.max(1, Math.min(365, Number(e.target.value || 1))))}
+            style={{ ...compactControlStyle, width: "88px" }}
+          />
+          天内发布
+        </label>
+
+        <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--text-main)", fontSize: "0.875rem" }}>
+          <input
+            type="checkbox"
+            checked={followingAutoSaveAfterFetch}
+            onChange={(e) => setFollowingAutoSaveAfterFetch(e.target.checked)}
+          />
+          抓取后自动一键入库
+        </label>
+
+        <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+          <input
+            type="text"
+            value={followingKeywords}
+            onChange={(e) => setFollowingKeywords(e.target.value)}
+            onKeyDown={(e) => {
+              if (isActionEnterKey(e)) {
+                e.preventDefault();
+                handleFollowingFeed();
+              }
+            }}
+            placeholder="输入关键词，多个用逗号分隔..."
+            disabled={!cookieVerified}
+            style={{
+              flex: 1,
+              padding: "12px 16px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border-light)",
+              background: "var(--bg-card)",
+              color: "var(--text-main)",
+              fontSize: "0.9375rem",
+              outline: "none",
+              opacity: cookieVerified ? 1 : 0.5,
+            }}
+          />
+          <button
+            onClick={handleFollowingFeed}
+            disabled={followingRunning || !followingKeywords.trim() || !cookieVerified}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              padding: "12px 24px",
+              borderRadius: "var(--radius-md)",
+              border: "none",
+              background: followingRunning || !cookieVerified ? "var(--bg-hover)" : "var(--color-primary)",
+              color: "white",
+              fontSize: "0.9375rem",
+              fontWeight: 600,
+              cursor: followingRunning || !cookieVerified ? "not-allowed" : "pointer",
+              opacity: followingRunning || !cookieVerified ? 0.6 : 1,
+            }}
+          >
+            {followingRunning ? (
+              <span>⟳ 获取中...</span>
+            ) : (
+              <>
+                <Users style={{ width: "16px", height: "16px" }} />
+                获取
+              </>
+            )}
+          </button>
+          {followingRunning && followingFeedTaskId ? (
+            <button
+              type="button"
+              onClick={() => void handleCancelFollowingFeed()}
+              style={segmentedButtonStyle(false)}
+            >
+              停止
+            </button>
+            ) : null}
+        </div>
+        <div style={{ color: "var(--text-muted)", fontSize: "0.75rem", lineHeight: 1.6 }}>
+          默认只返回结果，不自动入库；勾选后会在抓取完成时把当前关注流结果整批写入情报库。
+        </div>
+      </div>
+    </Card>
+  );
+
+  const renderFollowingResultCard = () => followingResult ? (
+    <Card title={`已关注筛选结果 (${followingResult.total_found})`} icon={<BookOpen style={{ width: "18px", height: "18px" }} />}>
+      <div ref={followingResultTopRef} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: "12px",
+            alignItems: "center",
+            flexWrap: "wrap",
+            padding: "10px 12px",
+            borderRadius: "var(--radius-sm)",
+            border: "1px solid var(--border-light)",
+            background: "rgba(255, 255, 255, 0.7)",
+          }}
+        >
+          <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+            结果区已压缩。可以整块收起，也可以单条展开；需要快速定位时直接跳顶部或跳底部。
+          </div>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+            <button type="button" onClick={() => setShowFollowingResults((value) => !value)} style={segmentedButtonStyle(false)}>
+              {showFollowingResults ? "收起结果" : "展开结果"}
+            </button>
+            <button type="button" onClick={() => scrollToAnchor(followingResultTopRef)} style={segmentedButtonStyle(false)}>
+              回到顶部
+            </button>
+            <button type="button" onClick={() => scrollToAnchor(followingResultBottomRef)} style={segmentedButtonStyle(false)}>
+              跳到底部
+            </button>
+          </div>
+        </div>
+
+        {showFollowingResults ? (
+          renderHorizontalNoteResults({
+            notes: followingResult.notes,
+            carouselRef: followingResultCarouselRef,
+            layout: followingResultLayout,
+            onLayoutChange: setFollowingResultLayout,
+            expandedIds: expandedFollowingNotes,
+            onToggleExpand: (noteId) => setExpandedFollowingNotes((prev) => {
+              const next = new Set(prev);
+              if (next.has(noteId)) next.delete(noteId);
+              else next.add(noteId);
+              return next;
+            }),
+            saveSubfolder: (note) => buildFollowingSaveSubfolder(
+              note.matched_keywords?.join("，") || followingKeywords,
+            ),
+            saveSuccessTitle: "关注流搜索笔记已入库",
+            saveAllSubfolder: buildFollowingSaveSubfolder(keywordLabelFromFollowingResult(followingResult, followingKeywords)),
+            saveAllSuccessTitle: "关注流搜索结果已入库",
+            creatorSourceLabel: (note) => ({
+              tags: note.matched_keywords?.length ? note.matched_keywords : parseKeywordInput(followingKeywords),
+              summary: note.matched_keywords?.length ? `来自关注流搜索：${note.matched_keywords.join("，")}` : "来自关注流搜索",
+            }),
+            showMatchedKeywords: true,
+          })
+        ) : (
+          <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+            结果已收起。需要继续看时点上面的“展开结果”。
+          </div>
+        )}
+        <div ref={followingResultBottomRef} />
+      </div>
+    </Card>
+  ) : null;
+
+  const renderFollowingTab = () => (
+    <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+          gap: "16px",
+          alignItems: "start",
+        }}
+      >
+        <Card title="搜索关键词情报推送" icon={<Filter style={{ width: "18px", height: "18px" }} />}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
+            {renderPushRow(
+              "keyword",
+              "搜索关键词情报推送",
+              `${trackerKeywordMonitors.length} 条定义 · ${trackerEnableKeywordSearch ? "已开启" : "已关闭"}`,
+              trackerEnableKeywordSearch,
+              handleToggleKeywordPush,
+              handleDeleteKeywordPush,
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                {trackerKeywordMonitors.map((monitor) => (
+                  <div
+                    key={monitor.id}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "10px",
+                      padding: "12px",
+                      borderRadius: "var(--radius-sm)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-card)",
+                    }}
+                  >
+                    <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                      <div style={{ flex: 1, minWidth: "180px", fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                        关键词定义
+                      </div>
+                      <div style={{ display: "flex", gap: "10px", alignItems: "center", flexShrink: 0, flexWrap: "nowrap" }}>
+                        <button
+                          type="button"
+                          onClick={() => setTrackerKeywordMonitors((prev) => prev.map((item) => (
+                            item.id === monitor.id ? { ...item, enabled: !item.enabled } : item
+                          )))}
+                          style={segmentedButtonStyle(monitor.enabled)}
+                        >
+                          {monitor.enabled ? "已开启" : "已关闭"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveKeywordMonitor(monitor.id)}
+                          style={segmentedButtonStyle(false)}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      type="text"
+                      value={trackerKeywordMonitorDrafts[monitor.id] ?? (monitor.keywords[0] || "")}
+                      onChange={(e) => setTrackerKeywordMonitorDrafts((prev) => ({
+                        ...prev,
+                        [monitor.id]: e.target.value,
+                      }))}
+                      onBlur={(e) => commitKeywordMonitorDraft(monitor.id, e.target.value)}
+                      onKeyDown={(e) => {
+                        if (isActionEnterKey(e)) {
+                          e.preventDefault();
+                          commitKeywordMonitorDraft(monitor.id, (e.target as HTMLInputElement).value);
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      placeholder="例如：科研工具"
+                      style={{ ...compactControlStyle, width: "100%" }}
+                    />
+                    <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+                        最低点赞
+                        <input
+                          type="number"
+                          min={0}
+                          value={monitor.min_likes}
+                          onChange={(e) => setTrackerKeywordMonitors((prev) => prev.map((item) => (
+                            item.id === monitor.id ? { ...item, min_likes: Number(e.target.value || 0) } : item
+                          )))}
+                          style={{ ...compactControlStyle, width: "88px" }}
+                        />
+                      </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+                        每词抓取
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          value={monitor.per_keyword_limit}
+                          onChange={(e) => setTrackerKeywordMonitors((prev) => prev.map((item) => (
+                            item.id === monitor.id ? { ...item, per_keyword_limit: Number(e.target.value || 1) } : item
+                          )))}
+                          style={{ ...compactControlStyle, width: "88px" }}
+                        />
+                        条
+                      </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+                        最近
+                        <input
+                          type="number"
+                          min={1}
+                          max={365}
+                          value={monitor.recent_days}
+                          onChange={(e) => setTrackerKeywordMonitors((prev) => prev.map((item) => (
+                            item.id === monitor.id ? { ...item, recent_days: Math.max(1, Math.min(365, Number(e.target.value || 1))) } : item
+                          )))}
+                          style={{ ...compactControlStyle, width: "72px" }}
+                        />
+                        天内发布
+                      </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+                        <input
+                          type="checkbox"
+                          checked={monitor.include_comments}
+                          onChange={(e) => setTrackerKeywordMonitors((prev) => prev.map((item) => (
+                            item.id === monitor.id ? { ...item, include_comments: e.target.checked } : item
+                          )))}
+                        />
+                        选爬评论
+                      </label>
+                      {monitor.include_comments ? (
+                        <>
+                          <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+                            前
+                            <input
+                              type="number"
+                              min={1}
+                              max={100}
+                              value={monitor.comments_limit}
+                              onChange={(e) => setTrackerKeywordMonitors((prev) => prev.map((item) => (
+                                item.id === monitor.id ? { ...item, comments_limit: Number(e.target.value || 1) } : item
+                              )))}
+                              style={{ ...compactControlStyle, width: "72px" }}
+                            />
+                            条
+                          </label>
+                          <select
+                            value={monitor.comments_sort_by}
+                            onChange={(e) => setTrackerKeywordMonitors((prev) => prev.map((item) => (
+                              item.id === monitor.id ? { ...item, comments_sort_by: e.target.value as "likes" | "time" } : item
+                            )))}
+                            style={{ ...compactControlStyle, width: "120px" }}
+                          >
+                            <option value="likes">高赞优先</option>
+                            <option value="time">最新优先</option>
+                          </select>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+                {trackerKeywordMonitors.length === 0 ? (
+                  <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+                    先在下面输入关键词并保存。保存时会按“一词一条定义”生成，这样每个关键词都能单独开关、单独设置评论抓取。
+                  </div>
+                ) : null}
+                <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={() => setTrackerKeywordMonitors((prev) => [
+                      ...prev,
+                      createKeywordMonitor({
+                        min_likes: trackerKeywordMinLikes,
+                        per_keyword_limit: trackerKeywordLimit,
+                      }),
+                    ])}
+                    style={segmentedButtonStyle(false)}
+                  >
+                    <Plus style={{ width: "14px", height: "14px" }} />
+                    新增定义
+                  </button>
+                  <button type="button" onClick={handleSaveTrackerKeywords} style={segmentedButtonStyle(true)}>
+                    保存搜索关键词情报推送
+                  </button>
+                </div>
+              </div>,
+            )}
+
             <div>
               <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)", marginBottom: "4px" }}>
-                关键词推送
+                搜索关键词情报推送
               </div>
               <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.6 }}>
-                写入模块管理配置，后端按定时任务抓取高赞关键词内容。
+                这里用于快速补充关键词，会自动拆成上面的独立定义；具体赞数、抓取条数和评论策略直接在上面的定义里调整。
               </p>
             </div>
 
             <input
               type="text"
-              value={trackerKeywords.join(", ")}
-              onChange={(e) => setTrackerKeywords(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
+              value={trackerKeywordDraft}
+              onChange={(e) => setTrackerKeywordDraft(e.target.value)}
+              onBlur={(e) => {
+                applyKeywordDraftToMonitors(e.target.value);
+              }}
+              onKeyDown={(e) => {
+                if (isActionEnterKey(e)) {
+                  e.preventDefault();
+                  applyKeywordDraftToMonitors((e.target as HTMLInputElement).value);
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
               placeholder="科研工具, 论文写作, AI 工作流, 学术日常"
               style={{ ...compactControlStyle, width: "100%" }}
             />
 
             <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
-              <button type="button" onClick={() => setTrackerEnableKeywordSearch((v) => !v)} style={segmentedButtonStyle(trackerEnableKeywordSearch)}>
-                {trackerEnableKeywordSearch ? "关键词推送已开启" : "关键词推送已关闭"}
-              </button>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.875rem", color: "var(--text-main)" }}>
-                单次最多
-                <input
-                  type="number"
-                  min={1}
-                  max={300}
-                  value={trackerMaxResults}
-                  onChange={(e) => setTrackerMaxResults(Number(e.target.value || 1))}
-                  style={{ ...compactControlStyle, width: "88px" }}
-                />
-                条
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.875rem", color: "var(--text-main)" }}>
-                最低点赞
-                <input
-                  type="number"
-                  min={0}
-                  value={trackerKeywordMinLikes}
-                  onChange={(e) => setTrackerKeywordMinLikes(Number(e.target.value || 0))}
-                  style={{ ...compactControlStyle, width: "92px" }}
-                />
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.875rem", color: "var(--text-main)" }}>
-                每词抓取
-                <input
-                  type="number"
-                  min={1}
-                  value={trackerKeywordLimit}
-                  onChange={(e) => setTrackerKeywordLimit(Number(e.target.value || 1))}
-                  style={{ ...compactControlStyle, width: "88px" }}
-                />
-                条
-              </label>
-            </div>
-
-            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
-              <button type="button" onClick={() => setTrackerFollowFeed((v) => !v)} style={segmentedButtonStyle(trackerFollowFeed)}>
-                {trackerFollowFeed ? "关注流补充已开启" : "开启关注流补充"}
-              </button>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.875rem", color: "var(--text-main)" }}>
-                关注流上限
-                <input
-                  type="number"
-                  min={1}
-                  value={trackerFollowLimit}
-                  onChange={(e) => setTrackerFollowLimit(Number(e.target.value || 1))}
-                  style={{ ...compactControlStyle, width: "88px" }}
-                />
-              </label>
-              <button type="button" onClick={handleSaveTrackerKeywords} style={segmentedButtonStyle(true)}>
-                保存关键词推送
+              <button
+                type="button"
+                onClick={handleToggleKeywordPush}
+                style={segmentedButtonStyle(trackerEnableKeywordSearch)}
+              >
+                {trackerEnableKeywordSearch ? "搜索关键词情报推送已开启" : "搜索关键词情报推送已关闭"}
               </button>
               <button
                 type="button"
-                onClick={() => setTrackerKeywords(["科研工具", "论文写作", "学术日常", "AI 工作流", "知识管理", "Obsidian"])}
+                onClick={() => {
+                  const preset = ["科研工具", "论文写作", "学术日常", "AI 工作流", "知识管理", "Obsidian"];
+                  mergeKeywordsIntoKeywordMonitors(preset);
+                }}
                 style={segmentedButtonStyle(false)}
               >
                 使用推荐关键词
               </button>
             </div>
           </div>
+        </Card>
+
+        <Card title="关注流情报推送" icon={<Users style={{ width: "18px", height: "18px" }} />}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
+            {renderPushRow(
+              "following-scan",
+              "关注流情报推送",
+              `${trackerFollowingScanMonitors.length} 条定义 · 已开启 ${trackerFollowingScanMonitors.filter((monitor) => monitor.enabled).length} 条 · 已关注筛选链路 · ${trackerFollowingScan.enabled ? "已开启" : "已关闭"}`,
+              trackerFollowingScan.enabled,
+              handleToggleFollowingScanPush,
+              handleDeleteFollowingScanPush,
+              <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                {trackerFollowingScanMonitors.map((monitor) => (
+                  <div
+                    key={monitor.id}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "10px",
+                      padding: "12px",
+                      borderRadius: "var(--radius-sm)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-card)",
+                    }}
+                  >
+                    <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                      <div style={{ flex: 1, minWidth: "180px", fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                        关注流关键词
+                      </div>
+                      <div style={{ display: "flex", gap: "10px", alignItems: "center", flexShrink: 0, flexWrap: "nowrap" }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextMonitors = trackerFollowingScanMonitors.map((item) => (
+                              item.id === monitor.id ? { ...item, enabled: !item.enabled } : item
+                            ));
+                            setTrackerFollowingScanMonitors(nextMonitors);
+                            syncFollowingScanFromMonitors(nextMonitors);
+                          }}
+                          style={segmentedButtonStyle(monitor.enabled)}
+                        >
+                          {monitor.enabled ? "已开启" : "已关闭"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveFollowingScanMonitor(monitor.id)}
+                          style={segmentedButtonStyle(false)}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      type="text"
+                      value={trackerFollowingScanMonitorDrafts[monitor.id] ?? (monitor.keywords[0] || "")}
+                      onChange={(e) => setTrackerFollowingScanMonitorDrafts((prev) => ({
+                        ...prev,
+                        [monitor.id]: e.target.value,
+                      }))}
+                      onBlur={(e) => commitFollowingScanMonitorDraft(monitor.id, e.target.value)}
+                      onKeyDown={(e) => {
+                        if (isActionEnterKey(e)) {
+                          e.preventDefault();
+                          commitFollowingScanMonitorDraft(monitor.id, (e.target as HTMLInputElement).value);
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      placeholder="例如：科研工具"
+                      style={{ ...compactControlStyle, width: "100%" }}
+                    />
+                    <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+                        每词抓取
+                        <input
+                          type="number"
+                          min={1}
+                          max={200}
+                          value={monitor.fetch_limit}
+                          onChange={(e) => {
+                            const nextMonitors = trackerFollowingScanMonitors.map((item) => (
+                              item.id === monitor.id ? { ...item, fetch_limit: Number(e.target.value || 1) } : item
+                            ));
+                            setTrackerFollowingScanMonitors(nextMonitors);
+                            syncFollowingScanFromMonitors(nextMonitors);
+                          }}
+                          style={{ ...compactControlStyle, width: "88px" }}
+                        />
+                        条
+                      </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+                        只保留最近
+                        <input
+                          type="number"
+                          min={1}
+                          max={365}
+                          value={monitor.recent_days}
+                          onChange={(e) => {
+                            const nextMonitors = trackerFollowingScanMonitors.map((item) => (
+                              item.id === monitor.id
+                                ? { ...item, recent_days: Math.max(1, Math.min(365, Number(e.target.value || 1))) }
+                                : item
+                            ));
+                            setTrackerFollowingScanMonitors(nextMonitors);
+                            syncFollowingScanFromMonitors(nextMonitors);
+                          }}
+                          style={{ ...compactControlStyle, width: "72px" }}
+                        />
+                        天
+                      </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+                        <input
+                          type="checkbox"
+                          checked={monitor.include_comments}
+                          onChange={(e) => {
+                            const nextMonitors = trackerFollowingScanMonitors.map((item) => (
+                              item.id === monitor.id ? { ...item, include_comments: e.target.checked } : item
+                            ));
+                            setTrackerFollowingScanMonitors(nextMonitors);
+                            syncFollowingScanFromMonitors(nextMonitors);
+                          }}
+                        />
+                        选爬评论
+                      </label>
+                      {monitor.include_comments ? (
+                        <>
+                          <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.8125rem", color: "var(--text-secondary)" }}>
+                            前
+                            <input
+                              type="number"
+                              min={1}
+                              max={100}
+                              value={monitor.comments_limit}
+                              onChange={(e) => {
+                                const nextMonitors = trackerFollowingScanMonitors.map((item) => (
+                                  item.id === monitor.id ? { ...item, comments_limit: Number(e.target.value || 1) } : item
+                                ));
+                                setTrackerFollowingScanMonitors(nextMonitors);
+                                syncFollowingScanFromMonitors(nextMonitors);
+                              }}
+                              style={{ ...compactControlStyle, width: "72px" }}
+                            />
+                            条
+                          </label>
+                          <select
+                            value={monitor.comments_sort_by}
+                            onChange={(e) => {
+                              const nextMonitors = trackerFollowingScanMonitors.map((item) => (
+                                item.id === monitor.id ? { ...item, comments_sort_by: e.target.value as "likes" | "time" } : item
+                              ));
+                              setTrackerFollowingScanMonitors(nextMonitors);
+                              syncFollowingScanFromMonitors(nextMonitors);
+                            }}
+                            style={{ ...compactControlStyle, width: "120px" }}
+                          >
+                            <option value="likes">高赞优先</option>
+                            <option value="time">最新优先</option>
+                          </select>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+                {trackerFollowingScanMonitors.length === 0 ? (
+                  <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+                    先在下面输入关键词并保存。保存时会按“一词一条定义”生成，和搜索关键词情报推送一样，每个词都能单独开关和设置抓取参数。
+                  </div>
+                ) : null}
+                <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={() => setTrackerFollowingScanMonitors((prev) => [
+                      ...prev,
+                      createFollowingScanMonitor({
+                        fetch_limit: 20,
+                        recent_days: DEFAULT_XHS_RECENT_DAYS,
+                        keyword_filter: true,
+                      }),
+                    ])}
+                    style={segmentedButtonStyle(false)}
+                  >
+                    <Plus style={{ width: "14px", height: "14px" }} />
+                    新增定义
+                  </button>
+                  <button type="button" onClick={handleSaveFollowingScan} style={segmentedButtonStyle(true)}>
+                    保存关注流情报推送
+                  </button>
+                </div>
+              </div>,
+            )}
+
+            <div>
+              <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)", marginBottom: "4px" }}>
+                关注流情报推送
+              </div>
+              <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.6 }}>
+                这里用于快速补充关键词，会自动拆成上面的独立定义；执行时复用关注监控实验台链路，先搜索关键词，再切到“已关注”筛选。
+              </p>
+            </div>
+
+            <input
+              type="text"
+              value={trackerFollowingScanKeywordDraft}
+              onChange={(e) => setTrackerFollowingScanKeywordDraft(e.target.value)}
+              onBlur={(e) => {
+                applyFollowingScanDraftToMonitors(e.target.value);
+              }}
+              onKeyDown={(e) => {
+                if (isActionEnterKey(e)) {
+                  e.preventDefault();
+                  applyFollowingScanDraftToMonitors((e.target as HTMLInputElement).value);
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+              placeholder="科研工具, 论文写作, AI 工作流, 学术日常"
+              style={{ ...compactControlStyle, width: "100%" }}
+            />
+
+            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={handleToggleFollowingScanPush}
+                style={segmentedButtonStyle(trackerFollowingScan.enabled)}
+              >
+                {trackerFollowingScan.enabled ? "关注流情报推送已开启" : "关注流情报推送已关闭"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const preset = ["科研工具", "论文写作", "学术日常", "AI 工作流", "知识管理", "Obsidian"];
+                  mergeKeywordsIntoFollowingScanMonitors(preset);
+                }}
+                style={segmentedButtonStyle(false)}
+              >
+                使用推荐关键词
+              </button>
+            </div>
+          </div>
+        </Card>
+      </div>
+
+      <Card title="博主最新动态爬取" icon={<BookOpen style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+            这个工作台单独占一整栏，和上面的两类情报推送配置分开。这里统一处理高频博主补充、特定关注定义、共享分组批量抓取和手动分组整理。
+          </div>
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: "var(--radius-sm)",
+              border: "1px solid rgba(245, 158, 11, 0.45)",
+              background: "rgba(245, 158, 11, 0.12)",
+              color: "#92400e",
+              fontSize: "0.8125rem",
+              fontWeight: 700,
+              lineHeight: 1.6,
+            }}
+          >
+            风险提示：关注监控里的“博主最新动态爬取”会访问指定博主主页，频率过高时可能触发小红书访问频繁或安全验证，并不稳定。建议优先使用插件 bridge 路径，分批低频运行；一旦出现限制，应停止任务并等待恢复。
+          </div>
+          {renderFrequentAuthorQuickPicker()}
+          {renderCreatorPushList()}
+          <div style={{ height: "1px", background: "var(--border-light)" }} />
+          {renderCreatorRecentWorkbenchContent()}
+          {renderSharedCreatorGroupManager()}
         </div>
       </Card>
 
-      {followingResult && (
-        <Card title={`匹配结果 (${followingResult.total_found})`} icon={<BookOpen style={{ width: "18px", height: "18px" }} />}>
-          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-            {followingResult.notes.map((note) => (
-              <div
-                key={note.id}
-                style={{
-                  padding: "16px",
-                  borderRadius: "var(--radius-lg)",
-                  background: "var(--bg-hover)",
-                  border: "1px solid var(--border-light)",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                  <h4 style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)", marginBottom: "8px", flex: 1 }}>
-                    {note.title}
-                  </h4>
-                  <a
-                    href={note.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
+      {renderDetailDivider()}
+
+      <Card title="共享智能分组" icon={<Zap style={{ width: "18px", height: "18px" }} />}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+          <div>
+            <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)", marginBottom: "4px" }}>
+              共享智能分组
+            </div>
+            <p style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.6 }}>
+              完整模式会统一扫描本地 xhs + B站内容并维护共享标签库；如果标签和组别已经有了，可以直接点“仅整理博主 / UP”，只刷新作者归组。小红书只根据本地笔记映射作者，不再走网页关注列表。
+            </p>
+            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "8px", lineHeight: 1.7 }}>
+              原始标签 -&gt; 共享规则 -&gt; 共享组 -&gt; 作者入组。即博主会根据其笔记标签的分组情况加入对应共享组；这里管理的是笔记标签和分组的关系。
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+            <SmartGroupActionButton
+              onClick={handleBuildSmartGroups}
+              running={smartGroupRunning}
+              secondaryLabel="仅整理博主 / UP"
+              onSecondaryClick={handleRefreshSharedCreatorAssignments}
+              gradient="linear-gradient(135deg, #FF6B81, #FF8A00)"
+              borderColor="rgba(255, 138, 0, 0.28)"
+            />
+          </div>
+
+          <div
+            style={{
+              borderRadius: "var(--radius-md)",
+              border: "1px solid rgba(255, 138, 0, 0.18)",
+              background: "rgba(255, 138, 0, 0.08)",
+              overflow: "hidden",
+            }}
+          >
+            <button
+              type="button"
+              aria-expanded={showSharedGroupingDetail}
+              onClick={() => setShowSharedGroupingDetail((value) => !value)}
+              style={{
+                width: "100%",
+                padding: "12px 14px",
+                border: "none",
+                background: "transparent",
+                cursor: "pointer",
+                textAlign: "left",
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                <div>
+                  <div style={{ fontSize: "0.875rem", fontWeight: 800, color: "var(--text-main)" }}>
+                    {smartGroupRunning ? "正在整理共享智能分组" : smartGroupResult?.message || (Object.keys(trackerCreatorProfiles).length > 0
+                      ? "已生成共享智能分组，可直接按组管理推送。"
+                      : "先点“共享智能分组”做完整初始化；后续只想刷新作者归组时，直接点“仅整理博主 / UP”。")}
+                  </div>
+                  <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginTop: "4px", lineHeight: 1.6 }}>
+                    当前博主 {trackerUserIds.length} 个 · 共享组别 {trackerCreatorGroupOptions.length} 个 ·
+                    {vaultSignalCount > 0 ? ` 全库标签 ${vaultSignalCount} 个 · 带标签笔记 ${vaultIndexedFileCount} 篇 ·` : ""}
+                    {showSharedGroupingDetail ? " 点击收起详情" : " 点击展开详情和规则词典"}
+                  </div>
+                  {sharedTagIndexPath && (
+                    <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "4px", lineHeight: 1.5 }}>
+                      共享标签库已写入情报库：{sharedTagIndexPath}
+                    </div>
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                  {smartGroupResult && (
+                    <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                      新增 {smartGroupResult.new_profile_count} · 更新 {smartGroupResult.updated_profile_count}
+                    </div>
+                  )}
+                  <div
                     style={{
-                      display: "flex",
+                      display: "inline-flex",
                       alignItems: "center",
-                      gap: "4px",
-                      padding: "4px 8px",
-                      borderRadius: "var(--radius-sm)",
-                      background: "var(--color-primary)20",
-                      color: "var(--color-primary)",
+                      gap: "6px",
+                      padding: "6px 10px",
+                      borderRadius: "999px",
+                      border: "1px solid rgba(255, 138, 0, 0.20)",
+                      background: "rgba(255, 255, 255, 0.7)",
+                      color: "#C2410C",
                       fontSize: "0.75rem",
-                      border: "none",
-                      marginLeft: "8px",
-                      cursor: "pointer",
-                      textDecoration: "none",
+                      fontWeight: 700,
                     }}
                   >
-                    <ExternalLink style={{ width: "12px", height: "12px" }} />
-                    详情
-                  </a>
+                    {showSharedGroupingDetail ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                    {showSharedGroupingDetail ? "收起" : "展开"}
+                  </div>
                 </div>
+              </div>
+            </button>
 
-                {note.matched_keywords && note.matched_keywords.length > 0 && (
-                  <div style={{ display: "flex", gap: "4px", marginBottom: "8px", flexWrap: "wrap" }}>
-                    {note.matched_keywords.map((kw) => (
-                      <span
-                        key={kw}
+            {showSharedGroupingDetail && (
+              <div
+                style={{
+                  padding: "0 14px 14px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "12px",
+                  borderTop: "1px solid rgba(255, 138, 0, 0.12)",
+                }}
+              >
+                <div
+                  style={{
+                    borderRadius: "var(--radius-md)",
+                    border: "1px solid rgba(255, 138, 0, 0.18)",
+                    background: "rgba(255, 138, 0, 0.05)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <button
+                    type="button"
+                    aria-expanded={showSharedSignalRules}
+                    onClick={() => setShowSharedSignalRules((value) => !value)}
+                    style={{
+                      width: "100%",
+                      padding: "12px 14px",
+                      border: "none",
+                      background: "transparent",
+                      cursor: "pointer",
+                      textAlign: "left",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                      <div>
+                        <div style={{ fontSize: "0.8125rem", fontWeight: 700, color: "var(--text-main)" }}>
+                          共享分组规则词典
+                        </div>
+                        <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginTop: "4px", lineHeight: 1.6 }}>
+                          这里是“原始标签 -&gt; 共享组”的映射规则。只有分组不准时，才需要展开这里微调。
+                        </div>
+                      </div>
+                      <div
                         style={{
-                          padding: "2px 8px",
-                          borderRadius: "var(--radius-full)",
-                          background: "var(--color-primary)20",
-                          color: "var(--color-primary)",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "6px",
+                          padding: "6px 10px",
+                          borderRadius: "999px",
+                          border: "1px solid rgba(255, 138, 0, 0.18)",
+                          background: "rgba(255, 255, 255, 0.72)",
+                          color: "#C2410C",
                           fontSize: "0.75rem",
+                          fontWeight: 700,
                         }}
                       >
-                        {kw}
-                      </span>
-                    ))}
-                  </div>
-                )}
+                        {showSharedSignalRules ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                        {showSharedSignalRules ? "收起规则" : "展开规则"}
+                      </div>
+                    </div>
+                  </button>
 
-                <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", lineHeight: 1.6, marginBottom: "12px" }}>
-                  {note.content?.slice(0, 200)}{note.content?.length > 200 ? "..." : ""}
-                </p>
-
-                {renderNoteMedia(note)}
-
-                <div style={{ display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
-                  <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>作者：{note.author}</span>
-                  <span style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "0.8125rem", color: "var(--color-danger)" }}>
-                    <Heart style={{ width: "14px", height: "14px" }} />
-                    {note.likes.toLocaleString()}
-                  </span>
-                  {note.images && note.images.length > 0 && (
-                    <span style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                      <ImageIcon style={{ width: "14px", height: "14px" }} />
-                      {note.images.length} 张图
-                    </span>
-                  )}
-                  {note.video_url && (
-                    <span style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                      <PlayCircle style={{ width: "14px", height: "14px" }} />
-                      视频
-                    </span>
+                  {showSharedSignalRules && (
+                    <div style={{ padding: "0 12px 12px", borderTop: "1px solid rgba(255, 138, 0, 0.12)" }}>
+                      <SharedSignalMappingPanel
+                        title="共享分组规则"
+                        entries={sharedSignalEntries}
+                        groupOptions={trackerCreatorGroupOptions}
+                        saving={savingSignalMappings}
+                        updatedAt={sharedCreatorGrouping.updated_at}
+                        onSave={handleSaveSharedSignalMappings}
+                        description="原始标签 -> 共享规则 -> 共享组 -> 作者入组。你可以把意思接近的标签并到同一个共享组里，也可以让一个标签同时挂多个共享组。保存后，重新执行一次“仅整理博主 / UP”或“共享智能分组”，作者会按这套规则重排。"
+                      />
+                    </div>
                   )}
                 </div>
               </div>
-            ))}
+            )}
           </div>
-        </Card>
-      )}
+        </div>
+      </Card>
+
+      {renderFollowingResultCard()}
 
       {!followingResult && !followingRunning && !searchResult && !searchRunning && (
         <EmptyState
           icon={Users}
           title="关注监控"
-          description="先扫关注流，再用关键词扫描补充公开笔记"
+          description="扫描关注用户最近发布的内容，再决定哪些作者和值得长期跟踪"
         />
       )}
 
@@ -3024,17 +6901,39 @@ export function XiaohongshuTool() {
 
   const renderSearchTab = () => (
     <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      <div
+        style={{
+          padding: "12px 14px",
+          borderRadius: "var(--radius-md)",
+          border: "1px solid rgba(255, 138, 0, 0.18)",
+          background: "rgba(255, 138, 0, 0.08)",
+          fontSize: "0.8125rem",
+          color: "#C2410C",
+          lineHeight: 1.7,
+          fontWeight: 600,
+        }}
+      >
+        <div>因小红书限制，一次只能执行一个任务。请耐心等待当前任务完成后，再启动下一项抓取或入库。</div>
+        <div>需要桌面非全屏，并漏出后台浏览器的一点点像素，才能正常滚动和爬取。</div>
+      </div>
+
       <Card title="关键词扫描" icon={<Filter style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
           <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
-            作为关注监控的补充子链路，用同一套插件优先抓取配置扫描公开高赞笔记。
+            复用现有搜索链路，优先走插件 bridge 读取真实页面 state，再回退到浏览器兜底链路，扫描公开高赞笔记。
           </div>
           <div style={{ display: "flex", gap: "12px" }}>
             <input
               type="text"
               value={searchKeyword}
               onChange={(e) => setSearchKeyword(e.target.value)}
-              placeholder="输入关键词，补充扫描小红书笔记..."
+              onKeyDown={(e) => {
+                if (isActionEnterKey(e)) {
+                  e.preventDefault();
+                  handleSearch();
+                }
+              }}
+              placeholder="输入关键词，搜索小红书公开笔记..."
               disabled={!cookieVerified}
               style={{
                 flex: 1,
@@ -3094,11 +6993,8 @@ export function XiaohongshuTool() {
                   background: "transparent",
                 }}
               >
-                <button type="button" onClick={() => setSortBy("likes")} style={segmentedButtonStyle(sortBy === "likes")}>
-                  按点赞数
-                </button>
-                <button type="button" onClick={() => setSortBy("time")} style={segmentedButtonStyle(sortBy === "time")}>
-                  按发布时间
+                <button type="button" disabled style={{ ...segmentedButtonStyle(true), cursor: "default" }}>
+                  综合排序
                 </button>
               </div>
             </div>
@@ -3143,9 +7039,108 @@ export function XiaohongshuTool() {
               />
               <span style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>条</span>
             </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>只保留最近：</span>
+              <input
+                type="number"
+                value={searchRecentDays}
+                onChange={(e) => setSearchRecentDays(Math.max(1, Math.min(365, Number(e.target.value || 1))))}
+                min={1}
+                max={365}
+                style={{
+                  width: "80px",
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: "var(--text-main)",
+                  fontSize: "0.875rem",
+                }}
+              />
+              <span style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>天</span>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: "16px", alignItems: "center", flexWrap: "wrap" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.875rem", color: "var(--text-main)" }}>
+              <input
+                type="checkbox"
+                checked={searchAutoSaveAfterFetch}
+                onChange={(e) => setSearchAutoSaveAfterFetch(e.target.checked)}
+              />
+              抓取后自动一键入库
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.875rem", color: "var(--text-main)" }}>
+              <input
+                type="checkbox"
+                checked={searchSaveComments}
+                onChange={(e) => setSearchSaveComments(e.target.checked)}
+              />
+              保存时抓评论
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "0.875rem", color: "var(--text-main)" }}>
+              评论上限
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={searchSaveCommentsLimit}
+                onChange={(e) => setSearchSaveCommentsLimit(Number(e.target.value || 1))}
+                disabled={!searchSaveComments}
+                style={{
+                  width: "88px",
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: "var(--text-main)",
+                  fontSize: "0.875rem",
+                  opacity: searchSaveComments ? 1 : 0.5,
+                }}
+              />
+              条
+            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>评论排序：</span>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "6px",
+                  padding: "4px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-light)",
+                  background: "transparent",
+                  opacity: searchSaveComments ? 1 : 0.5,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => setSearchSaveCommentsSortBy("likes")}
+                  disabled={!searchSaveComments}
+                  style={segmentedButtonStyle(searchSaveCommentsSortBy === "likes")}
+                >
+                  高赞优先
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSearchSaveCommentsSortBy("time")}
+                  disabled={!searchSaveComments}
+                  style={segmentedButtonStyle(searchSaveCommentsSortBy === "time")}
+                >
+                  最新优先
+                </button>
+              </div>
+            </div>
+            <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
+              不勾选时只抓结果不入库。仅单条入库时额外抓评论；批量“全部入库”或自动一键入库默认不抓评论。
+            </span>
           </div>
         </div>
       </Card>
+
+      {renderFollowingWorkbenchCard()}
+      {renderFollowingResultCard()}
 
       {/* Search Results */}
       {searchResult && (
@@ -3154,189 +7149,132 @@ export function XiaohongshuTool() {
           icon={<BookOpen style={{ width: "18px", height: "18px" }} />}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center" }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: "12px",
+                alignItems: "center",
+                flexWrap: "wrap",
+                padding: "10px 12px",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--border-light)",
+                background: "rgba(255, 255, 255, 0.72)",
+              }}
+            >
               <span style={{ color: "var(--text-muted)", fontSize: "0.875rem" }}>
-                可直接把当前搜索结果全部保存到情报库 xhs。
+                会按统一入库格式保存到当前关键词文件夹；短文本笔记会优先补本地图片。
               </span>
-              <button
-                onClick={() => handleSavePreviewNotes(searchResult.notes)}
-                disabled={previewSaveRunning || searchResult.notes.length === 0}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  padding: "8px 14px",
-                  borderRadius: "var(--radius-sm)",
-                  border: "none",
-                  background: previewSaveRunning ? "var(--bg-hover)" : "var(--color-primary)",
-                  color: "white",
-                  fontSize: "0.8125rem",
-                  fontWeight: 600,
-                  cursor: previewSaveRunning ? "not-allowed" : "pointer",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                <FolderDown style={{ width: "14px", height: "14px" }} />
-                {previewSaveRunning ? "保存中..." : "全部入库"}
-              </button>
-            </div>
-            {searchResult.notes.map((note) => (
-              <div
-                key={note.id}
-                style={{
-                  padding: "16px",
-                  borderRadius: "var(--radius-lg)",
-                  background: "var(--bg-hover)",
-                  border: "1px solid var(--border-light)",
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                  <h4
-                    style={{
-                      fontSize: "0.9375rem",
-                      fontWeight: 600,
-                      color: "var(--text-main)",
-                      marginBottom: "8px",
-                      flex: 1,
-                    }}
-                  >
-                    {note.title}
-                  </h4>
-                  <a
-                    href={note.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "4px",
-                      padding: "4px 8px",
-                      borderRadius: "var(--radius-sm)",
-                      background: "var(--color-primary)20",
-                      color: "var(--color-primary)",
-                      fontSize: "0.75rem",
-                      border: "none",
-                      marginLeft: "8px",
-                      cursor: "pointer",
-                      textDecoration: "none",
-                    }}
-                  >
-                    <ExternalLink style={{ width: "12px", height: "12px" }} />
-                    详情
-                  </a>
-                </div>
-
-                <p
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                <button type="button" onClick={() => setShowSearchResults((value) => !value)} style={segmentedButtonStyle(false)}>
+                  {showSearchResults ? "收起结果" : "展开结果"}
+                </button>
+                <button
+                  onClick={() => void handleSaveSearchResults(searchResult.notes, searchResult.keyword)}
+                  disabled={previewSaveRunning || searchResult.notes.length === 0}
                   style={{
-                    fontSize: "0.875rem",
-                    color: "var(--text-secondary)",
-                    lineHeight: 1.6,
-                    marginBottom: "12px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "8px 14px",
+                    borderRadius: "var(--radius-sm)",
+                    border: "none",
+                    background: previewSaveRunning ? "var(--bg-hover)" : "var(--color-primary)",
+                    color: "white",
+                    fontSize: "0.8125rem",
+                    fontWeight: 600,
+                    cursor: previewSaveRunning ? "not-allowed" : "pointer",
+                    whiteSpace: "nowrap",
                   }}
                 >
-                  {expandedNotes.has(note.id)
-                    ? note.content
-                    : note.content.slice(0, 150) + (note.content.length > 150 ? "..." : "")}
-                </p>
-
-                {renderNoteMedia(note)}
-
-                {note.content.length > 150 && (
-                  <button
-                    onClick={() => toggleNoteExpand(note.id)}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "4px",
-                      padding: "4px 0",
-                      background: "none",
-                      border: "none",
-                      color: "var(--color-primary)",
-                      fontSize: "0.8125rem",
-                      cursor: "pointer",
-                      marginBottom: "12px",
-                    }}
-                  >
-                    {expandedNotes.has(note.id) ? (
-                      <>
-                        <ChevronUp style={{ width: "14px", height: "14px" }} />
-                        收起
-                      </>
-                    ) : (
-                      <>
-                        <ChevronDown style={{ width: "14px", height: "14px" }} />
-                        展开
-                      </>
-                    )}
-                  </button>
-                )}
-
-                <div style={{ display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
-                  <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                    作者：{note.author}
-                  </span>
-                  <span
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "4px",
-                      fontSize: "0.8125rem",
-                      color: "var(--color-danger)",
-                    }}
-                  >
-                    <Heart style={{ width: "14px", height: "14px" }} />
-                    {note.likes.toLocaleString()}
-                  </span>
-                  <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                    收藏：{note.collects.toLocaleString()}
-                  </span>
-                  <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                    评论：{note.comments_count.toLocaleString()}
-                  </span>
-                  {note.published_at && (
-                    <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                      {new Date(note.published_at).toLocaleDateString("zh-CN")}
-                    </span>
-                  )}
-                  {note.images && note.images.length > 0 && (
-                    <span style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                      <ImageIcon style={{ width: "14px", height: "14px" }} />
-                      {note.images.length}
-                    </span>
-                  )}
-                  {note.video_url && (
-                    <span style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-                      <PlayCircle style={{ width: "14px", height: "14px" }} />
-                      视频
-                    </span>
-                  )}
-                  <button
-                    onClick={() => handleSavePreviewNotes([note])}
-                    disabled={previewSaveRunning}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "4px",
-                      padding: "4px 12px",
-                      borderRadius: "var(--radius-sm)",
-                      border: "1px solid var(--border-light)",
-                      background: "var(--bg-card)",
-                      color: "var(--color-primary)",
-                      fontSize: "0.75rem",
-                      cursor: previewSaveRunning ? "not-allowed" : "pointer",
-                      opacity: previewSaveRunning ? 0.6 : 1,
-                      marginLeft: "auto",
-                    }}
-                  >
-                    <Save style={{ width: "12px", height: "12px" }} />
-                    入库
-                  </button>
-                </div>
+                  <FolderDown style={{ width: "14px", height: "14px" }} />
+                  {previewSaveRunning ? "保存中..." : "全部入库"}
+                </button>
               </div>
-            ))}
+            </div>
+            {showSearchResults ? (
+              renderHorizontalNoteResults({
+                notes: searchResult.notes,
+                carouselRef: searchResultCarouselRef,
+                layout: searchResultLayout,
+                onLayoutChange: setSearchResultLayout,
+                expandedIds: expandedNotes,
+                onToggleExpand: toggleNoteExpand,
+                saveSubfolder: () => buildKeywordSaveSubfolder(searchResult.keyword),
+                saveSuccessTitle: "关键词笔记已入库",
+                saveAllSubfolder: buildKeywordSaveSubfolder(searchResult.keyword),
+                saveAllSuccessTitle: "关键词结果已入库",
+                creatorSourceLabel: () => ({
+                  tags: searchResult.keyword ? [searchResult.keyword] : [],
+                  summary: searchResult.keyword ? `来自关键词搜索：${searchResult.keyword}` : "来自关键词搜索",
+                }),
+              })
+            ) : (
+              <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+                关键词扫描结果已收起。需要继续查看时点上面的“展开结果”。
+              </div>
+            )}
           </div>
         </Card>
       )}
+      {renderCreatorRecentPanel()}
+    </div>
+  );
+
+  const renderManualCrawlWorkbench = () => (
+    <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+      <div
+        style={{
+          borderRadius: "var(--radius-md)",
+          border: "1px solid var(--border-light)",
+          background: "var(--bg-card)",
+          overflow: "hidden",
+        }}
+      >
+        <button
+          type="button"
+          aria-expanded={showManualCrawlWorkbench}
+          onClick={() => setShowManualCrawlWorkbench((value) => !value)}
+          style={{
+            width: "100%",
+            padding: "14px 16px",
+            border: "none",
+            background: "transparent",
+            cursor: "pointer",
+            textAlign: "left",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: "0.9375rem", fontWeight: 700, color: "var(--text-main)" }}>
+                主动爬取 / 手动入库工具
+              </div>
+              <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", marginTop: "4px", lineHeight: 1.6 }}>
+                单条入库、批量入库、评论抓取都收在这里。默认折叠，避免长期占页面空间。
+              </div>
+            </div>
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "6px 10px",
+                borderRadius: "999px",
+                border: "1px solid var(--border-light)",
+                background: "var(--bg-hover)",
+                color: "var(--text-secondary)",
+                fontSize: "0.75rem",
+                fontWeight: 700,
+              }}
+            >
+              {showManualCrawlWorkbench ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              {showManualCrawlWorkbench ? "收起工具" : "展开工具"}
+            </div>
+          </div>
+        </button>
+      </div>
+
+      {showManualCrawlWorkbench && renderManualCrawlTools()}
     </div>
   );
 
@@ -3349,7 +7287,12 @@ export function XiaohongshuTool() {
             type="text"
             value={noteId}
             onChange={(e) => setNoteId(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleComments()}
+            onKeyDown={(e) => {
+              if (isActionEnterKey(e)) {
+                e.preventDefault();
+                handleComments();
+              }
+            }}
             placeholder="输入小红书笔记 ID 或完整链接..."
             style={{
               flex: 1,
@@ -3550,7 +7493,7 @@ export function XiaohongshuTool() {
       {renderCookieConfigModal()}
       <PageHeader
         title="小红书分析工具"
-        subtitle="关注监控（含关键词扫描）、收藏专辑抓取，一键获取 Cookie 并保存到情报库 xhs"
+        subtitle="收藏专辑抓取、主动爬取、关注监控，一键获取 Cookie 并保存到情报库 xhs"
         icon={Search}
         actions={
           <button
@@ -3865,9 +7808,14 @@ export function XiaohongshuTool() {
             </Card>
           )}
 
-          {activeTab === "collections" && renderCollectionsTab()}
+          {activeTab === "collections" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+              {renderManualCrawlWorkbench()}
+              {renderCollectionsTab()}
+            </div>
+          )}
+          {activeTab === "search" && renderSearchTab()}
           {activeTab === "following" && renderFollowingTab()}
-          {false && renderManualCrawlTools()}
           {false && renderCommentsTab()}
         </div>
       </PageContent>

@@ -5,6 +5,7 @@ All scores are 0-100 integers.
 from datetime import date, timedelta
 from pathlib import Path
 
+from ..health.store import summarize_health
 from ..store.cards import CardStore
 from .store import get_san_7d_avg, get_happiness_today, get_energy_today
 
@@ -55,8 +56,9 @@ def calculate_stats(vault_path: str | None, card_store: CardStore) -> dict:
     idea_count = _count_idea_nodes(vault_path)
     output_raw = min(100, meeting_count * 10 + idea_count * 5)
 
-    # ── 健康力 (health module not yet implemented → 0) ─────────────
-    health_raw = 0
+    # ── 健康力 ──────────────────────────────────────────────────────
+    health_summary = summarize_health(14)
+    health_raw = int(health_summary["health_score"])
 
     # ── 学习力 ────────────────────────────────────────────────────
     podcast_done = card_store.count_feedback(module_id="podcast-digest", action="save")
@@ -65,8 +67,7 @@ def calculate_stats(vault_path: str | None, card_store: CardStore) -> dict:
 
     # ── SAN 值 ────────────────────────────────────────────────────
     san_avg = get_san_7d_avg()
-    # san_avg is already 0-100 scale (from san_log.json values)
-    san_raw = min(100, int(san_avg))
+    san_raw = min(100, int(san_avg * 10))
 
     # ── 幸福指数 ──────────────────────────────────────────────────
     happiness_today = get_happiness_today()
@@ -79,7 +80,12 @@ def calculate_stats(vault_path: str | None, card_store: CardStore) -> dict:
     return {
         "research":  dim(research_raw,  {"lit_count": lit_count, "arxiv_stars": arxiv_stars}),
         "output":    dim(output_raw,    {"meeting_count": meeting_count, "idea_count": idea_count}),
-        "health":    dim(health_raw,    {"note": "health module pending"}),
+        "health":    dim(health_raw,    {
+            "streak_days": health_summary["streak_days"],
+            "avg_sleep_7d": health_summary["avg_sleep_7d"],
+            "habit_completion_rate_7d": health_summary["habit_completion_rate_7d"],
+            "exercise_days_7d": health_summary["exercise_days_7d"],
+        }),
         "learning":  dim(learning_raw,  {"podcast_done": podcast_done, "trend_deep": trend_deep}),
         "san":       dim(san_raw,       {"san_7d_avg": round(san_avg, 1)}),
         "happiness": dim(happiness_raw, {"happiness_today": happiness_today, "energy_today": energy_today}),

@@ -82,7 +82,7 @@ class TestProfileSAN:
         store.append_san(9)
         avg = store.get_san_7d_avg()
 
-        assert avg == 8.5
+        assert avg == 9.0
 
 
 class TestProfileHappiness:

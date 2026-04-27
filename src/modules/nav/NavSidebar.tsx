@@ -1,10 +1,12 @@
 import { useStore, ActiveTab } from "../../core/store";
+import { useThemeMode } from "../../core/theme";
 import { filterModulesForManagement } from "../../core/moduleVisibility";
 import AvatarDisplay from "../profile/AvatarDisplay";
+import { normalizeFeedPreferences } from "../feed/intelligence";
 import {
   Inbox, BookOpen, FileText,
   Rss, Heart, Settings, Zap, User, Menu, X, Moon, Sun, LayoutGrid, FolderOpen,
-  ChevronDown, BookHeart, Tv, BarChart3
+  ChevronDown, BookHeart, Tv, BarChart3, Bot
 } from "lucide-react";
 import { useState, useEffect } from "react";
 
@@ -12,6 +14,7 @@ type NavItem = { id: ActiveTab; label: string; Icon: React.FC<{ className?: stri
 
 const MAIN: NavItem[] = [
   { id: "profile",    label: "角色主页",   Icon: User },
+  { id: "assistant",  label: "助手",       Icon: Bot },
   { id: "overview",   label: "今日情报",   Icon: Inbox },
   { id: "dashboard",  label: "数据洞察",   Icon: BarChart3 },
   { id: "vault",      label: "情报库",     Icon: FolderOpen },
@@ -23,10 +26,8 @@ const MAIN: NavItem[] = [
 export default function NavSidebar() {
   const [isMobile, setIsMobile] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
-  const [isDark, setIsDark] = useState(() =>
-    document.documentElement.classList.contains("dark")
-  );
   const [modulesExpanded, setModulesExpanded] = useState(false);
+  const { isDark, toggleTheme } = useThemeMode();
 
   useEffect(() => {
     const checkMobile = () => {
@@ -38,23 +39,6 @@ export default function NavSidebar() {
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
-  useEffect(() => {
-    // Sync with system preference on mount
-    const systemPrefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    const hasStoredPreference = localStorage.getItem("abo-theme");
-    if (!hasStoredPreference) {
-      setIsDark(systemPrefersDark);
-      document.documentElement.classList.toggle("dark", systemPrefersDark);
-    }
-  }, []);
-
-  function toggleTheme() {
-    const newDark = !isDark;
-    setIsDark(newDark);
-    document.documentElement.classList.toggle("dark", newDark);
-    localStorage.setItem("abo-theme", newDark ? "dark" : "light");
-  }
-
   const {
     activeTab, setActiveTab,
     unreadCounts, config, feedModules,
@@ -62,7 +46,11 @@ export default function NavSidebar() {
     setModuleToConfigure,
     showcaseMode,
   } = useStore();
-  const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0);
+  const hiddenTodayIds = normalizeFeedPreferences(config?.feed_preferences).hidden_module_ids;
+  const totalUnread = Object.entries(unreadCounts).reduce(
+    (sum, [moduleId, count]) => hiddenTodayIds.includes(moduleId) ? sum : sum + count,
+    0,
+  );
   const vaultOk = Boolean(config?.vault_path);
   const managementModules = filterModulesForManagement(feedModules);
 

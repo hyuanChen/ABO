@@ -60,35 +60,82 @@ function CodeBlock({
   );
 }
 
-/**
- * 工具调用显示组件
- */
-function ToolCallDisplay({
-  toolName,
-  toolInput,
-}: {
-  toolName?: string;
-  toolInput?: Record<string, unknown>;
-}) {
+function processText(value: unknown, fallback = ''): string {
+  return String(value ?? fallback).trim();
+}
+
+function processJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {}, null, 2);
+  } catch {
+    return '{}';
+  }
+}
+
+function splitToolContent(message: Message) {
+  const command = processText(message.metadata?.command ?? message.metadata?.toolName);
+  const raw = message.content.trim();
+  return {
+    command,
+    output: command && raw.startsWith(command) ? raw.slice(command.length).trim() : raw,
+  };
+}
+
+function ProcessDisplay({ message }: { message: Message }) {
+  const isTool = message.contentType === 'tool_call';
+  const { command, output } = isTool ? splitToolContent(message) : { command: '', output: message.content.trim() };
+  const label = isTool
+    ? processText(message.metadata?.label, message.status === 'completed' ? '命令完成' : '命令执行中')
+    : message.status === 'completed' ? '思考过程' : '正在思考';
+  const metadata = processJson(message.metadata);
+
   return (
-    <div className="flex items-center gap-2 text-sm text-[#666666] bg-[#F5F5F0] px-3 py-2 rounded-md my-2">
-      <span>🔧</span>
-      <span className="font-medium">{toolName || '工具调用'}</span>
-      {toolInput && (
-        <code className="text-xs text-[#999999] truncate max-w-[200px]">
-          {JSON.stringify(toolInput).slice(0, 50)}
-          {JSON.stringify(toolInput).length > 50 ? '...' : ''}
-        </code>
-      )}
-    </div>
+    <details open={message.status !== 'completed'} className="my-2 rounded-md bg-[#F5F5F0] px-3 py-2 text-sm text-[#666666]">
+      <summary className="cursor-pointer list-none font-medium text-[#4A3A5E]">
+        {label}
+      </summary>
+      <div className="mt-2 space-y-2">
+        {command && (
+          <div>
+            <div className="mb-1 text-xs font-semibold text-[#777777]">命令</div>
+            <pre className="whitespace-pre-wrap break-words rounded-md bg-white/70 p-2 text-xs leading-relaxed text-[#555555]">
+              {command}
+            </pre>
+          </div>
+        )}
+        {output ? (
+          <div>
+            <div className="mb-1 text-xs font-semibold text-[#777777]">{isTool ? 'Output' : '思考'}</div>
+            <pre className="whitespace-pre-wrap break-words rounded-md bg-white/70 p-2 text-xs leading-relaxed text-[#555555]">
+              {output}
+            </pre>
+          </div>
+        ) : (
+          <div className="text-xs text-[#777777]">等待输出...</div>
+        )}
+        {metadata !== '{}' && (
+          <details>
+            <summary className="cursor-pointer text-xs font-semibold text-[#777777]">原始事件</summary>
+            <pre className="mt-2 whitespace-pre-wrap break-words rounded-md bg-white/70 p-2 text-xs leading-relaxed text-[#777777]">
+              {metadata}
+            </pre>
+          </details>
+        )}
+      </div>
+    </details>
   );
 }
 
 export function MessageItem({ message, isStreaming }: MessageItemProps) {
   const isUser = message.role === 'user';
   const isToolCall = message.contentType === 'tool_call';
+  const isThinking = message.contentType === 'thinking';
   const isError = message.contentType === 'error';
   const timestamp = formatTimestamp(message.createdAt);
+
+  if (!isUser && !isError && !isToolCall && !isThinking && !message.content.trim()) {
+    return null;
+  }
 
   return (
     <div
@@ -104,13 +151,7 @@ export function MessageItem({ message, isStreaming }: MessageItemProps) {
             : 'bg-white border border-[#E6DDF2]'
         }`}
       >
-        {/* 工具调用显示 */}
-        {isToolCall && (
-          <ToolCallDisplay
-            toolName={message.metadata?.toolName}
-            toolInput={message.metadata?.toolInput}
-          />
-        )}
+        {(isToolCall || isThinking) && <ProcessDisplay message={message} />}
 
         {/* 错误显示 */}
         {isError && (
@@ -119,16 +160,18 @@ export function MessageItem({ message, isStreaming }: MessageItemProps) {
 
         {/* 消息内容 */}
         <div className="prose prose-sm max-w-none">
-          <ReactMarkdown
-            components={{
-              code: CodeBlock,
-            }}
-          >
-            {message.content}
-          </ReactMarkdown>
+          {!isToolCall && !isThinking && (
+            <ReactMarkdown
+              components={{
+                code: CodeBlock,
+              }}
+            >
+              {message.content}
+            </ReactMarkdown>
+          )}
 
           {/* 流式光标 */}
-          {isStreaming && (
+          {isStreaming && !isToolCall && !isThinking && (
             <span className="inline-block w-2 h-5 ml-1 bg-[#7B5EA7] animate-pulse">
               ▋
             </span>

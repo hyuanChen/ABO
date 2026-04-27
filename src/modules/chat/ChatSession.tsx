@@ -3,11 +3,12 @@
  * 显示历史消息 + 输入框，支持流式打字机效果
  */
 import { useRef, useEffect, useCallback } from 'react';
-import { Send, Loader2, Bot, User, ArrowLeft, Trash2, MessageSquare } from 'lucide-react';
+import { Send, Bot, User, ArrowLeft, Trash2, MessageSquare, Square } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Message, CliConfig, Conversation } from '../../types/chat';
 import { PageContainer, PageHeader, PageContent, Card } from '../../components/Layout';
+import { isActionEnterKey, isComposingKeyboardEvent } from '../../core/keyboard';
 
 interface ChatSessionProps {
   cli: CliConfig;
@@ -18,6 +19,7 @@ interface ChatSessionProps {
   input: string;
   onInputChange: (value: string) => void;
   onSend: () => void;
+  onStop: () => void;
   onBack: () => void;
   onClear: () => void;
 }
@@ -31,6 +33,7 @@ export function ChatSession({
   input,
   onInputChange,
   onSend,
+  onStop,
   onBack,
   onClear,
 }: ChatSessionProps) {
@@ -45,7 +48,9 @@ export function ChatSession({
   }, [messages, isStreaming]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (isComposingKeyboardEvent(e)) return;
+
+    if (isActionEnterKey(e) && !e.shiftKey) {
       e.preventDefault();
       onSend();
     }
@@ -127,15 +132,16 @@ export function ChatSession({
                 style={{ minHeight: '40px', maxHeight: '120px' }}
               />
               <button
-                onClick={onSend}
-                disabled={!input.trim() || !isConnected || isStreaming}
+                onClick={isStreaming ? onStop : onSend}
+                disabled={isStreaming ? false : (!input.trim() || !isConnected)}
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl
                   bg-[var(--color-primary)] text-white
                   transition-all hover:bg-[var(--color-primary-dark)] hover:scale-105
                   disabled:opacity-40 disabled:cursor-not-allowed"
+                title={isStreaming ? "终止当前回复" : "发送"}
               >
                 {isStreaming ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <Square className="h-4 w-4 fill-current" />
                 ) : (
                   <Send className="h-4 w-4" />
                 )}
@@ -160,6 +166,75 @@ function TypingCursor() {
   );
 }
 
+function processText(value: unknown, fallback = ''): string {
+  return String(value ?? fallback).trim();
+}
+
+function processJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {}, null, 2);
+  } catch {
+    return '{}';
+  }
+}
+
+function splitToolContent(message: Message) {
+  const command = processText(message.metadata?.command ?? message.metadata?.toolName);
+  const raw = message.content.trim();
+  return {
+    command,
+    output: command && raw.startsWith(command) ? raw.slice(command.length).trim() : raw,
+  };
+}
+
+function ProcessMessage({ message }: { message: Message }) {
+  const isTool = message.contentType === 'tool_call';
+  const { command, output } = isTool ? splitToolContent(message) : { command: '', output: message.content.trim() };
+  const label = isTool
+    ? processText(message.metadata?.label, message.status === 'completed' ? '命令完成' : '命令执行中')
+    : message.status === 'completed' ? '思考过程' : '正在思考';
+  const metadata = processJson(message.metadata);
+
+  return (
+    <details open={message.status !== 'completed'} className="group">
+      <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-semibold text-[var(--color-primary)]">
+        <span>{label}</span>
+      </summary>
+
+      <div className="mt-3 space-y-3">
+        {command && (
+          <div>
+            <div className="mb-1 text-xs font-semibold text-[var(--text-muted)]">命令</div>
+            <pre className="whitespace-pre-wrap break-words rounded-lg border border-[var(--border-color)] bg-blue-50/50 p-2 text-xs leading-relaxed text-slate-700">
+              {command}
+            </pre>
+          </div>
+        )}
+
+        {output ? (
+          <div>
+            <div className="mb-1 text-xs font-semibold text-[var(--text-muted)]">{isTool ? 'Output' : '思考'}</div>
+            <pre className="whitespace-pre-wrap break-words rounded-lg border border-[var(--border-color)] bg-slate-50 p-2 text-xs leading-relaxed text-slate-700">
+              {output}
+            </pre>
+          </div>
+        ) : (
+          <div className="text-xs text-[var(--text-muted)]">等待输出...</div>
+        )}
+
+        {metadata !== '{}' && (
+          <details>
+            <summary className="cursor-pointer text-xs font-semibold text-[var(--text-muted)]">原始事件</summary>
+            <pre className="mt-2 whitespace-pre-wrap break-words rounded-lg border border-[var(--border-color)] bg-slate-50 p-2 text-xs leading-relaxed text-[var(--text-muted)]">
+              {metadata}
+            </pre>
+          </details>
+        )}
+      </div>
+    </details>
+  );
+}
+
 // Message bubble component with streaming support
 function MessageBubble({
   message,
@@ -171,6 +246,11 @@ function MessageBubble({
 }) {
   const isUser = message.role === 'user';
   const isError = message.contentType === 'error';
+  const isProcess = message.contentType === 'tool_call' || message.contentType === 'thinking';
+
+  if (!isUser && !isError && !isProcess && !message.content.trim()) {
+    return null;
+  }
 
   return (
     <div className={`flex gap-3 ${isUser ? 'flex-row-reverse' : ''}`}>
@@ -200,6 +280,8 @@ function MessageBubble({
       >
         {isUser ? (
           <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+        ) : isProcess ? (
+          <ProcessMessage message={message} />
         ) : (
           <div className="prose prose-sm max-w-none text-[var(--text-main)]">
             <ReactMarkdown

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Search, FileText } from "lucide-react";
 import { api } from "../../core/api";
+import { isActionEnterKey, isComposingKeyboardEvent } from "../../core/keyboard";
 import type { WikiType } from "./Wiki";
 
 interface WikiPageInfo {
@@ -59,13 +60,15 @@ export default function WikiSearch({ wikiType, onSelectPage }: Props) {
   }, [query, wikiType]);
 
   function handleKeyDown(e: React.KeyboardEvent) {
+    if (isComposingKeyboardEvent(e)) return;
+
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setFocusedIndex((prev) => Math.min(prev + 1, results.length - 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setFocusedIndex((prev) => Math.max(prev - 1, -1));
-    } else if (e.key === "Enter" && focusedIndex >= 0 && results[focusedIndex]) {
+    } else if (isActionEnterKey(e) && focusedIndex >= 0 && results[focusedIndex]) {
       e.preventDefault();
       onSelectPage(results[focusedIndex].slug);
     }

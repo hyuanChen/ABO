@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useStore } from '../../core/store';
 import { api } from '../../core/api';
+import { isActionEnterKey, isComposingKeyboardEvent } from '../../core/keyboard';
 import {
   LayoutDashboard,
   User,
   BookOpen,
   Settings,
+  Bot,
   Play,
   PlayCircle,
   Lightbulb,
@@ -70,6 +72,15 @@ export function useCommandPalette(): UseCommandPaletteReturn {
   // Define all available commands
   const commands: Command[] = useMemo(() => [
     // Navigation commands
+    {
+      id: 'goto-assistant',
+      title: '打开助手',
+      subtitle: '用 Codex 串联情报、Wiki 和对话',
+      shortcut: 'G A',
+      icon: Bot,
+      keywords: ['assistant', '助手', 'codex', '对话', 'wiki', '情报'],
+      action: () => setActiveTab('assistant'),
+    },
     {
       id: 'goto-feed',
       title: '打开 Feed',
@@ -317,6 +328,7 @@ export function useCommandPalette(): UseCommandPaletteReturn {
 
       // Only handle these shortcuts when palette is open
       if (!isOpen) return;
+      if (isComposingKeyboardEvent(e)) return;
 
       // Escape to close
       if (e.key === 'Escape') {
@@ -339,7 +351,7 @@ export function useCommandPalette(): UseCommandPaletteReturn {
       }
 
       // Enter to execute
-      if (e.key === 'Enter') {
+      if (isActionEnterKey(e)) {
         e.preventDefault();
         executeSelected();
         return;

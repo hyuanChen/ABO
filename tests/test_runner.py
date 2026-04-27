@@ -125,6 +125,76 @@ class PaperModule(Module):
         ]
 
 
+class ArxivTrackingModule(Module):
+    id = "arxiv-tracker"
+    name = "Arxiv Tracking Module"
+    schedule = "0 8 * * *"
+
+    async def fetch(self):
+        return [Item(id="2604.00001", raw={})]
+
+    async def process(self, items, prefs):
+        return [
+            Card(
+                id="arxiv-monitor:2604.00001",
+                title="Tracked Arxiv Paper",
+                summary="Tracked summary",
+                score=0.95,
+                tags=["robotics"],
+                source_url="https://arxiv.org/abs/2604.00001",
+                obsidian_path="Literature/arXiv/robotics/Tracked Arxiv Paper/Tracked Arxiv Paper.md",
+                metadata={
+                    "abo-type": "arxiv-paper",
+                    "paper_tracking_type": "keyword",
+                    "paper_tracking_role": "keyword",
+                    "arxiv-id": "2604.00001",
+                    "authors": ["Alice Author"],
+                    "published": "2026-04-25",
+                    "abstract": "Full abstract",
+                    "keywords": ["robotics"],
+                },
+            )
+        ]
+
+
+class DuplicateXhsModule(Module):
+    id = "xiaohongshu-tracker"
+    name = "Duplicate XHS Module"
+    schedule = "0 8 * * *"
+
+    def __init__(self, *, source: str):
+        self.source = source
+
+    async def fetch(self):
+        return [Item(id="note-1", raw={})]
+
+    async def process(self, items, prefs):
+        return [
+            Card(
+                id=f"xhs-{self.source}-note-1",
+                title="重复笔记",
+                summary=f"{self.source} 抓取版本",
+                score=0.88,
+                tags=["科研"],
+                source_url="https://www.xiaohongshu.com/explore/note-1",
+                obsidian_path=f"xhs/{self.source}/note-1.md",
+                metadata={
+                    "note_id": "note-1",
+                    "platform": "xiaohongshu",
+                },
+            )
+        ]
+
+
+class RecordingBroadcaster(Broadcaster):
+    def __init__(self):
+        super().__init__()
+        self.sent_cards: list[str] = []
+
+    async def send_card(self, card: Card):
+        self.sent_cards.append(card.id)
+
+
 @pytest.mark.anyio
 async def test_runner_executes_full_pipeline(tmp_path):
     """Test that runner calls fetch and process in sequence."""
@@ -197,6 +267,29 @@ async def test_runner_respects_score_threshold(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_runner_skips_broadcast_for_already_processed_duplicate_content(tmp_path):
+    db_path = tmp_path / "cards.db"
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+
+    store = CardStore(db_path=db_path)
+    prefs = PreferenceEngine()
+    broadcaster = RecordingBroadcaster()
+    runner = ModuleRunner(store, prefs, broadcaster, vault_path=vault_path)
+
+    first_module = DuplicateXhsModule(source="keyword")
+    second_module = DuplicateXhsModule(source="following")
+
+    await runner.run(first_module)
+    affected_ids = store.record_feedback("xhs-keyword-note-1", "skip")
+    await runner.run(second_module)
+
+    assert affected_ids == ["xhs-keyword-note-1"]
+    assert broadcaster.sent_cards == ["xhs-keyword-note-1"]
+    assert store.list(unread_only=True, limit=10) == []
+
+
+@pytest.mark.anyio
 async def test_runner_respects_max_cards(tmp_path, monkeypatch):
     """Test that only max_cards highest scored cards are kept."""
     # Create dependencies with tmp_path for isolation
@@ -260,3 +353,33 @@ async def test_runner_persists_normalized_paper_records(tmp_path):
     assert record["title"] == "Follow-up Paper"
     assert record["source_modules"] == ["paper-module"]
     assert record["citation_count"] == 12
+
+
+@pytest.mark.anyio
+async def test_runner_does_not_auto_save_tracking_cards_to_literature(tmp_path, monkeypatch):
+    import abo.main as main_module
+
+    db_path = tmp_path / "cards.db"
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+
+    store = CardStore(db_path=db_path)
+    prefs = PreferenceEngine()
+    broadcaster = Broadcaster()
+
+    async def fail_save_arxiv_to_literature(data):
+        raise AssertionError("scheduled tracker runs should not auto-save into literature")
+
+    monkeypatch.setattr(main_module, "save_arxiv_to_literature", fail_save_arxiv_to_literature)
+
+    runner = ModuleRunner(store, prefs, broadcaster, vault_path=vault_path)
+    count = await runner.run(ArxivTrackingModule())
+
+    assert count == 1
+
+    saved = store.get("arxiv-monitor:2604.00001")
+    assert saved is not None
+    assert saved.obsidian_path == "Literature/arXiv/robotics/Tracked Arxiv Paper/Tracked Arxiv Paper.md"
+    assert saved.metadata.get("saved_to_literature") is not True
+    assert saved.metadata.get("literature_path") in (None, "")
+    assert list(vault_path.rglob("*.md")) == []

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Plus, X } from "lucide-react";
+import { isActionEnterKey } from "../core/keyboard";
 
 export interface SubType {
   type: string;
@@ -100,7 +101,12 @@ export default function SubscriptionManager({ types, subscriptions, onChange, di
                 disabled={disabled || false}
                 value={adding[subType.type] || ""}
                 onChange={(e) => setAdding((prev) => ({ ...prev, [subType.type]: e.target.value }))}
-                onKeyDown={(e) => e.key === "Enter" && add(subType)}
+                onKeyDown={(e) => {
+                  if (isActionEnterKey(e)) {
+                    e.preventDefault();
+                    add(subType);
+                  }
+                }}
                 placeholder={subType.placeholder || `添加 ${subType.label}`}
                 style={{
                   flex: 1,

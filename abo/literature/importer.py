@@ -10,6 +10,7 @@ import httpx
 from abo.literature.indexer import index_paper
 from abo.game.skills import award_xp
 from abo.game.state import load_state
+from abo.vault.unified_entry import UnifiedVaultEntry
 
 
 # ── PDF text extraction ───────────────────────────────────────────────────────
@@ -156,6 +157,22 @@ def _write_paper_note(vault_path: str, paper_id: str, metadata: dict, content: s
     lit_dir.mkdir(parents=True, exist_ok=True)
     md_path = lit_dir / f"{paper_id}.md"
     post = frontmatter.Post(content, **metadata)
+    post.metadata.update(
+        UnifiedVaultEntry(
+            entry_id=paper_id,
+            entry_type="paper",
+            title=str(metadata.get("title", "") or paper_id),
+            summary="",
+            source_url=str(metadata.get("doi", "") or ""),
+            source_platform="literature",
+            source_module="literature-importer",
+            authors=[str(metadata.get("authors", "")).strip()] if isinstance(metadata.get("authors"), str) else metadata.get("authors", []),
+            published=str(metadata.get("year", "") or ""),
+            tags=metadata.get("tags", []),
+            obsidian_path=f"Literature/{paper_id}.md",
+            metadata={"abo-type": str(metadata.get("abo-type", "literature"))},
+        ).to_metadata()
+    )
     md_path.write_text(frontmatter.dumps(post), encoding="utf-8")
 
 

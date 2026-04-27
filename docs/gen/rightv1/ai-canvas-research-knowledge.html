@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ABO · 研究与知识系统</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f1ea;
+      --paper: rgba(255, 252, 248, 0.94);
+      --paper-strong: rgba(255, 253, 250, 0.98);
+      --ink: #2b2722;
+      --muted: #6d665f;
+      --line: #ddd3c7;
+      --input-bg: #edf6f0;
+      --input-line: #cae2d4;
+      --input-ink: #2f6652;
+      --process-bg: #eef4fb;
+      --process-line: #c9dcef;
+      --process-ink: #355c83;
+      --judge-bg: #fbf4e7;
+      --judge-line: #ead7b6;
+      --judge-ink: #855e23;
+      --knowledge-bg: #f2eefc;
+      --knowledge-line: #d7cef3;
+      --knowledge-ink: #54418a;
+      --output-bg: #edf5f4;
+      --output-line: #c8e0dd;
+      --output-ink: #2d665f;
+      --shadow: 0 16px 38px rgba(53, 44, 34, 0.06);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(to bottom, rgba(255,255,255,0.42), rgba(255,255,255,0.42)),
+        repeating-linear-gradient(to right, rgba(221, 211, 199, 0.18) 0, rgba(221, 211, 199, 0.18) 1px, transparent 1px, transparent 104px),
+        repeating-linear-gradient(to bottom, rgba(221, 211, 199, 0.12) 0, rgba(221, 211, 199, 0.12) 1px, transparent 1px, transparent 104px),
+        var(--bg);
+      color: var(--ink);
+      font-family: "Noto Sans SC", sans-serif;
+    }
+
+    .frame {
+      width: min(1120px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 42px;
+      display: grid;
+      gap: 18px;
+    }
+
+    .panel {
+      border-radius: 28px;
+      border: 1px solid rgba(221, 211, 199, 0.92);
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .hero {
+      padding: 30px;
+      display: grid;
+      gap: 22px;
+    }
+
+    .hero-grid {
+      display: grid;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: fit-content;
+      padding: 7px 12px;
+      border-radius: 999px;
+      background: rgba(84, 65, 138, 0.08);
+      border: 1px solid rgba(84, 65, 138, 0.16);
+      color: var(--knowledge-ink);
+      font: 700 12px/1 "Plus Jakarta Sans", sans-serif;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font: 800 clamp(34px, 5vw, 58px)/1 "Plus Jakarta Sans", "Noto Sans SC", sans-serif;
+    }
+
+    .lead {
+      margin: 14px 0 0;
+      max-width: 56ch;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.8;
+    }
+
+    .path {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .path-item {
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--paper-strong);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .signal-grid,
+    .stage-grid,
+    .focus-grid {
+      display: grid;
+      gap: 14px;
+    }
+
+    .signal,
+    .stage,
+    .focus-card,
+    .result-strip {
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: var(--paper-strong);
+    }
+
+    .signal {
+      padding: 18px;
+    }
+
+    .signal strong,
+    .focus-card strong,
+    .result-strip strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+
+    .signal span,
+    .focus-card p,
+    .result-strip p {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.76;
+    }
+
+    .section {
+      padding: 24px;
+    }
+
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+      margin-bottom: 16px;
+    }
+
+    .section-copy small {
+      display: block;
+      margin-bottom: 4px;
+      font: 700 12px/1 "Plus Jakarta Sans", sans-serif;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .section-copy h2 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.2;
+    }
+
+    .section-copy p {
+      margin: 10px 0 0;
+      max-width: 54ch;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.74;
+    }
+
+    .stage {
+      min-height: 100%;
+      padding: 20px;
+    }
+
+    .stage-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .stage-step {
+      font: 700 12px/1 "Plus Jakarta Sans", sans-serif;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .stage-label {
+      font-size: 12px;
+      font-weight: 700;
+      opacity: 0.8;
+    }
+
+    .stage h3 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.32;
+    }
+
+    .stage p {
+      margin: 10px 0 0;
+      font-size: 13px;
+      line-height: 1.74;
+      opacity: 0.94;
+    }
+
+    .tag-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .tag {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.58);
+      border: 1px solid rgba(255, 255, 255, 0.82);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .focus-card {
+      padding: 18px;
+    }
+
+    .focus-card ul {
+      margin: 10px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.72;
+    }
+
+    .result-strip {
+      padding: 22px 24px;
+    }
+
+    .theme-input { background: var(--input-bg); border-color: var(--input-line); color: var(--input-ink); }
+    .theme-process { background: var(--process-bg); border-color: var(--process-line); color: var(--process-ink); }
+    .theme-judge { background: var(--judge-bg); border-color: var(--judge-line); color: var(--judge-ink); }
+    .theme-knowledge { background: var(--knowledge-bg); border-color: var(--knowledge-line); color: var(--knowledge-ink); }
+    .theme-output { background: var(--output-bg); border-color: var(--output-line); color: var(--output-ink); }
+
+    @media (min-width: 900px) {
+      .hero-grid {
+        grid-template-columns: minmax(0, 1.3fr) minmax(300px, 0.92fr);
+      }
+
+      .signal-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .stage-grid,
+      .focus-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 720px) {
+      .frame {
+        width: min(100vw - 20px, 1120px);
+        padding: 10px 0 24px;
+      }
+
+      .hero,
+      .section,
+      .result-strip {
+        padding: 20px;
+      }
+
+      .section-head {
+        align-items: start;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <section class="panel hero">
+      <div class="eyebrow">ABO Core 01</div>
+      <div class="hero-grid">
+        <div>
+          <h1>研究与知识系统</h1>
+          <p class="lead">
+            把论文发现、判断、沉淀和写作放进一条研究链。
+            用户最终拿到的不是论文仓库，而是一个会持续帮你筛重点、留下 digest、写回 Wiki、再推动下一步跟进的研究工作台。
+          </p>
+          <div class="path">
+            <span class="path-item">发现入口</span>
+            <span class="path-item">digest 中间层</span>
+            <span class="path-item">研究知识结构</span>
+            <span class="path-item">写作与回流</span>
+          </div>
+        </div>
+        <div class="signal-grid">
+          <div class="signal theme-input">
+            <strong>直接感受</strong>
+            <span>新论文会先到研究入口，不需要每天从零搜一遍。</span>
+          </div>
+          <div class="signal theme-judge">
+            <strong>真正关键</strong>
+            <span>摘要、intro、评分和日报会被保留成稳定中间层，后续 agent 直接接着用。</span>
+          </div>
+          <div class="signal theme-knowledge">
+            <strong>最后留下来</strong>
+            <span>Wiki、技能地图、写作草稿和下一轮待办会连成闭环。</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel section">
+      <div class="section-head">
+        <div class="section-copy">
+          <small>Core Flow</small>
+          <h2>核心链路压缩成 4 步</h2>
+          <p>只保留用户需要快速理解的骨架，不再展开冗长说明。</p>
+        </div>
+      </div>
+      <div class="stage-grid">
+        <article class="stage theme-input">
+          <div class="stage-meta">
+            <span class="stage-step">Step 01</span>
+            <span class="stage-label">发现</span>
+          </div>
+          <h3>先把值得看的论文带到面前</h3>
+          <p>用 arXiv、Semantic Scholar 和历史主题推送稳定覆盖方向更新，先解决“不漏”和“不知道先看什么”。</p>
+          <div class="tag-list">
+            <span class="tag">关键词追踪</span>
+            <span class="tag">引用链延伸</span>
+            <span class="tag">主题推送</span>
+          </div>
+        </article>
+
+        <article class="stage theme-judge">
+          <div class="stage-meta">
+            <span class="stage-step">Step 02</span>
+            <span class="stage-label">判断</span>
+          </div>
+          <h3>先做成可消费的 digest</h3>
+          <p>raw/ 保底保存原文，摘要和 intro 抽成 digest，再用 AI 辅助排优先级，让用户先看重点。</p>
+          <div class="tag-list">
+            <span class="tag">raw/ 入库</span>
+            <span class="tag">摘要 + intro</span>
+            <span class="tag">AI 辅助排序</span>
+          </div>
+        </article>
+
+        <article class="stage theme-knowledge">
+          <div class="stage-meta">
+            <span class="stage-step">Step 03</span>
+            <span class="stage-label">沉淀</span>
+          </div>
+          <h3>把单篇论文编进研究结构</h3>
+          <p>Wiki、技能地图和 Obsidian 可视化把论文从资料变成节点，让综述、related work 和研究空白逐渐长出来。</p>
+          <div class="tag-list">
+            <span class="tag">研究 Wiki</span>
+            <span class="tag">技能地图</span>
+            <span class="tag">图谱可视化</span>
+          </div>
+        </article>
+
+        <article class="stage theme-output">
+          <div class="stage-meta">
+            <span class="stage-step">Step 04</span>
+            <span class="stage-label">产出</span>
+          </div>
+          <h3>知识直接进入写作和行动</h3>
+          <p>digest、日报和 Wiki 直接喂给助手写作，产出 paper note、比较写作和下一轮跟进清单。</p>
+          <div class="tag-list">
+            <span class="tag">研究日报</span>
+            <span class="tag">写作草稿</span>
+            <span class="tag">下一步任务</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel section">
+      <div class="section-head">
+        <div class="section-copy">
+          <small>Key Points</small>
+          <h2>这页真正要传达的重点</h2>
+          <p>核心不在“工具很多”，而在这条链把研究输入变成了稳定可复用的推进材料。</p>
+        </div>
+      </div>
+      <div class="focus-grid">
+        <div class="focus-card theme-judge">
+          <strong>真正值钱的中间层</strong>
+          <p>不是收论文，而是把最有判断价值的部分固定成可复用原料。这样后续摘要、写作和讨论都不用再从 PDF 重来。</p>
+        </div>
+        <div class="focus-card theme-output">
+          <strong>用户最后拿到什么</strong>
+          <ul>
+            <li>今天该先看什么</li>
+            <li>今天能直接写出什么</li>
+            <li>明天继续跟进什么</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="result-strip theme-output">
+      <strong>一句话总结</strong>
+      <p>先发现，再压成 digest，再编进 Wiki，最后直接回到写作与下一轮研究节奏。</p>
+    </section>
+  </div>
+</body>
+</html>

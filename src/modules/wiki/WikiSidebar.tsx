@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { ArrowLeft, ChevronDown, ChevronRight, Eye, Search, Users, Lightbulb, FileText, Tag } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Eye, Search, Users, Lightbulb, FileText, Tag, FolderOpen } from "lucide-react";
 import { api } from "../../core/api";
 import type { WikiType } from "./Wiki";
 import WikiSearch from "./WikiSearch";
@@ -19,16 +19,18 @@ interface Props {
   onBack: () => void;
 }
 
-// Category metadata for intel wiki (生活相关)
+// Category metadata for internet wiki
 const INTEL_CATEGORIES = [
-  { key: "entity", label: "兴趣技能", Icon: Users, description: "日语 · 吉他 · 摄影 · 运动" },
-  { key: "concept", label: "思考笔记", Icon: Lightbulb, description: "生活方式 · 读书 · 个人思考" },
+  { key: "collection", label: "文件夹 VKI", Icon: FolderOpen, description: "每个素材文件夹自己的整理页" },
+  { key: "entity", label: "对象页", Icon: Users, description: "作者 · 工具 · 项目 · 平台" },
+  { key: "concept", label: "主题页", Icon: Lightbulb, description: "工作流 · 观点 · 方法 · 线索" },
 ];
 
-// Category metadata for lit wiki
+// Category metadata for literature wiki
 const LIT_CATEGORIES = [
-  { key: "paper", label: "论文", Icon: FileText, description: "单篇论文摘要" },
-  { key: "topic", label: "主题", Icon: Tag, description: "方法 · 问题 · 领域" },
+  { key: "collection", label: "文件夹 VKI", Icon: FolderOpen, description: "每个资料夹内部自己的脉络页" },
+  { key: "paper", label: "论文页", Icon: FileText, description: "单篇论文摘要与结论" },
+  { key: "topic", label: "主题页", Icon: Tag, description: "方法 · 问题 · 研究主线" },
 ];
 
 export default function WikiSidebar({ wikiType, activePage, onSelectPage, onBack }: Props) {
@@ -38,7 +40,7 @@ export default function WikiSidebar({ wikiType, activePage, onSelectPage, onBack
   const [showSearch, setShowSearch] = useState(false);
 
   const categories = wikiType === "intel" ? INTEL_CATEGORIES : LIT_CATEGORIES;
-  const wikiTitle = wikiType === "intel" ? "情报库" : "文献库";
+  const wikiTitle = wikiType === "intel" ? "Internet Wiki" : "Literature Wiki";
 
   // Initialize expanded state for all categories
   useEffect(() => {
@@ -173,7 +175,7 @@ export default function WikiSidebar({ wikiType, activePage, onSelectPage, onBack
           }}
         >
           <Search style={{ width: "14px", height: "14px" }} />
-          <span>搜索页面...</span>
+          <span>找页面或关键词</span>
         </button>
       </div>
 

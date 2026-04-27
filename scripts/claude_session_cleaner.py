@@ -208,7 +208,58 @@ def _build_session_timeline(session_id: str) -> list[dict]:
     return []
 
 
-def parse_sessions() -> list[dict]:
+def parse_sessions(
+    history_path: Path | None = None,
+    file_history_dir: Path | None = None,
+) -> list[dict]:
+    """Return sessions from legacy history.jsonl input or live Claude projects data."""
+    if history_path is not None:
+        if not history_path.exists():
+            return []
+
+        grouped: dict[str, dict] = {}
+        for line in history_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            session_id = str(obj.get("sessionId") or "").strip()
+            if not session_id:
+                continue
+
+            timestamp = int(obj.get("timestamp") or 0)
+            session = grouped.setdefault(
+                session_id,
+                {
+                    "sessionId": session_id,
+                    "msgCount": 0,
+                    "firstDisplay": "",
+                    "project": str(obj.get("project") or ""),
+                    "firstTs": timestamp,
+                    "lastTs": timestamp,
+                    "hasFileHistory": False,
+                    "hasSubdir": False,
+                    "fileSize": 0,
+                },
+            )
+            session["msgCount"] += 1
+            if not session["firstDisplay"]:
+                session["firstDisplay"] = str(obj.get("display") or "")
+            if not session["project"]:
+                session["project"] = str(obj.get("project") or "")
+            session["firstTs"] = min(int(session["firstTs"] or timestamp), timestamp)
+            session["lastTs"] = max(int(session["lastTs"] or timestamp), timestamp)
+
+        history_dirs = file_history_dir if file_history_dir is not None else FILE_HISTORY_DIR
+        for session in grouped.values():
+            session_id = session["sessionId"]
+            session["hasFileHistory"] = bool(history_dirs and (history_dirs / session_id).is_dir())
+
+        return sorted(grouped.values(), key=lambda item: item["lastTs"], reverse=True)
+
     """Scan ~/.claude/projects/*/*.jsonl to build session list (matches /resume)."""
     sessions = []
     if not PROJECTS_DIR.exists():
@@ -240,11 +291,50 @@ def parse_sessions() -> list[dict]:
     return sessions
 
 
-def delete_sessions(session_ids: list[str]) -> dict:
-    """Delete sessions from all locations."""
+def delete_sessions(
+    session_ids: list[str],
+    history_path: Path | None = None,
+    file_history_dir: Path | None = None,
+) -> dict:
+    """Delete sessions from legacy test paths or live Claude locations."""
     ids_set = set(session_ids)
     files_removed = 0
     dirs_removed = 0
+
+    if history_path is not None or file_history_dir is not None:
+        target_history = history_path or HISTORY_FILE
+        target_file_history = file_history_dir or FILE_HISTORY_DIR
+        history_lines_removed = 0
+
+        if target_history.exists():
+            kept_lines = []
+            for line in target_history.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if obj.get("sessionId", "") in ids_set:
+                        history_lines_removed += 1
+                        continue
+                except json.JSONDecodeError:
+                    pass
+                kept_lines.append(line)
+            tmp = target_history.with_suffix(".tmp")
+            tmp.write_text("\n".join(kept_lines) + ("\n" if kept_lines else ""), encoding="utf-8")
+            os.replace(tmp, target_history)
+
+        for sid in session_ids:
+            d = target_file_history / sid
+            if d.is_dir():
+                shutil.rmtree(d)
+                dirs_removed += 1
+
+        return {
+            "filesRemoved": files_removed,
+            "dirsRemoved": dirs_removed,
+            "historyLinesRemoved": history_lines_removed,
+            "linesRemoved": history_lines_removed,
+        }
 
     # 1. Remove session .jsonl files and subdirs from projects/
     if PROJECTS_DIR.exists():
@@ -293,6 +383,7 @@ def delete_sessions(session_ids: list[str]) -> dict:
         "filesRemoved": files_removed,
         "dirsRemoved": dirs_removed,
         "historyLinesRemoved": history_lines_removed,
+        "linesRemoved": history_lines_removed,
     }
 
 

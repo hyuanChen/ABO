@@ -19,7 +19,7 @@ class TestZhihuTrackerCreation:
 
         assert tracker.id == "zhihu-tracker"
         assert tracker.name == "知乎"
-        assert tracker.schedule == "0 13 * * *"
+        assert tracker.schedule == "0 9 * * *"
         assert tracker.icon == "help-circle"
 
     def test_tracker_has_subscription_types(self):

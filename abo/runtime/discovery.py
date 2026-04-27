@@ -7,6 +7,8 @@ from ..sdk.base import Module
 
 
 class ModuleRegistry:
+    _SKIPPED_BUILTIN_PACKAGES = {"semantic_scholar"}
+
     def __init__(self):
         self._modules: dict[str, Module] = {}
 
@@ -14,14 +16,16 @@ class ModuleRegistry:
         # 内置模块
         builtin_dir = Path(__file__).parent.parent / "default_modules"
         if builtin_dir.exists():
-            for pkg in builtin_dir.iterdir():
+            for pkg in sorted(builtin_dir.iterdir(), key=lambda item: item.name):
+                if pkg.name in self._SKIPPED_BUILTIN_PACKAGES:
+                    continue
                 if pkg.is_dir() and (pkg / "__init__.py").exists():
                     self._load_pkg(pkg)
 
         # 用户自定义模块
         user_dir = Path.home() / ".abo" / "modules"
         user_dir.mkdir(parents=True, exist_ok=True)
-        for pkg in user_dir.iterdir():
+        for pkg in sorted(user_dir.iterdir(), key=lambda item: item.name):
             if pkg.is_dir() and (pkg / "__init__.py").exists():
                 self._load_pkg(pkg)
 

@@ -24,7 +24,13 @@ class KeywordPreference:
 
     @classmethod
     def from_dict(cls, data: dict) -> "KeywordPreference":
-        return cls(**data)
+        payload = dict(data or {})
+        payload.setdefault("keyword", "")
+        payload.setdefault("score", 0.0)
+        payload.setdefault("count", 0)
+        payload.setdefault("source_modules", [])
+        payload.setdefault("last_updated", "")
+        return cls(**payload)
 
 _DEFAULTS: dict = {
     "global": {
@@ -41,18 +47,18 @@ _DEFAULTS: dict = {
 _WEIGHT_RULES = {
     "star":      lambda tags: {t: 1.1 for t in tags},
     "save":      lambda tags: {t: 1.05 for t in tags},
-    "skip":      lambda tags: {tags[0]: 0.85} if tags else {},
     "deep_dive": lambda tags: {t: 1.1 for t in tags},
-    # 三级打分系统
-    "like":      lambda tags: {t: 1.15 for t in tags},      # 👍 喜欢 - 大幅提升权重
-    "neutral":   lambda tags: {t: 1.0 for t in tags},       # 😐 中立 - 保持权重
-    "dislike":   lambda tags: {t: 0.6 for t in tags},       # 👎 不喜欢 - 大幅降低权重
+    # 偏好系统当前只使用正反馈，负反馈暂不纳入排序权重。
+    "like":      lambda tags: {t: 1.15 for t in tags},
+    "neutral":   lambda tags: {},
+    "skip":      lambda tags: {},
+    "dislike":   lambda tags: {},
 }
 
 
 class PreferenceEngine:
     def __init__(self):
-        self._data = self._load()
+        self._data: dict | None = None
 
     def _load(self) -> dict:
         if _PREFS_PATH.exists():
@@ -62,25 +68,34 @@ class PreferenceEngine:
                 for k, v in _DEFAULTS.items()}
 
     def _save(self):
+        data = self._ensure_data()
         _PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _PREFS_PATH.write_text(json.dumps(self._data, indent=2, ensure_ascii=False))
+        _PREFS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+    def _ensure_data(self) -> dict:
+        if self._data is None:
+            self._data = self._load()
+        return self._data
 
     def get_prefs_for_module(self, module_id: str) -> dict:
+        data = self._ensure_data()
         return {
-            **self._data,
-            "module": self._data["modules"].get(module_id, {}),
+            **data,
+            "module": data["modules"].get(module_id, {}),
         }
 
     def threshold(self, module_id: str) -> float:
-        return self._data["modules"].get(module_id, {}).get(
+        data = self._ensure_data()
+        return data["modules"].get(module_id, {}).get(
             "score_threshold",
-            self._data["global"]["score_threshold"]
+            data["global"]["score_threshold"]
         )
 
     def max_cards(self, module_id: str) -> int:
-        return self._data["modules"].get(module_id, {}).get(
+        data = self._ensure_data()
+        return data["modules"].get(module_id, {}).get(
             "max_cards_per_run",
-            self._data["global"]["max_cards_per_run"]
+            data["global"]["max_cards_per_run"]
         )
 
     def record_feedback(self, card_tags: list[str], action: str):
@@ -89,7 +104,8 @@ class PreferenceEngine:
         if not rule or not card_tags:
             return
         updates = rule(card_tags)
-        weights = self._data["derived_weights"]
+        data = self._ensure_data()
+        weights = data["derived_weights"]
         for tag, factor in updates.items():
             current = weights.get(tag, 1.0)
             weights[tag] = max(0.1, min(5.0, current * factor))
@@ -175,10 +191,11 @@ class PreferenceEngine:
             return None
 
     def all_data(self) -> dict:
-        return self._data
+        return self._ensure_data()
 
     def update(self, data: dict):
-        self._data.update(data)
+        current = self._ensure_data()
+        current.update(data)
         self._save()
 
     # ── Keyword Preference System (Phase 2) ─────────────────────────
@@ -187,7 +204,12 @@ class PreferenceEngine:
         """Load keyword preferences from disk."""
         if _KEYWORDS_PATH.exists():
             data = json.loads(_KEYWORDS_PATH.read_text(encoding="utf-8"))
-            return {k: KeywordPreference.from_dict(v) for k, v in data.items()}
+            prefs: dict[str, KeywordPreference] = {}
+            for key, value in data.items():
+                payload = dict(value or {})
+                payload.setdefault("keyword", str(key))
+                prefs[str(key)] = KeywordPreference.from_dict(payload)
+            return prefs
         return {}
 
     def _save_keyword_prefs(self, prefs: dict[str, KeywordPreference]):
@@ -211,8 +233,8 @@ class PreferenceEngine:
             "star": 0.5,
             "deep_dive": 0.35,
             "neutral": 0.0,
-            "skip": -0.1,
-            "dislike": -0.3,
+            "skip": 0.0,
+            "dislike": 0.0,
         }
 
         delta = action_deltas.get(action, 0)
@@ -244,25 +266,32 @@ class PreferenceEngine:
         self._save_keyword_prefs(prefs)
 
     def get_keyword_score(self, tag: str) -> float:
-        """Get preference score for a keyword (-1.0 to 1.0)."""
+        """Get positive-only preference score for a keyword."""
         prefs = self._load_keyword_prefs()
-        return prefs.get(tag.lower(), KeywordPreference(tag.lower(), 0, 0, [], "")).score
+        score = prefs.get(tag.lower(), KeywordPreference(tag.lower(), 0, 0, [], "")).score
+        return max(0.0, score)
 
-    def get_all_keyword_prefs(self) -> dict[str, KeywordPreference]:
-        """Get all keyword preferences."""
-        return self._load_keyword_prefs()
+    def get_all_keyword_prefs(self, positive_only: bool = False) -> dict[str, KeywordPreference]:
+        """Get keyword preferences, optionally filtered to active positive signals."""
+        prefs = self._load_keyword_prefs()
+        if not positive_only:
+            return prefs
+        return {
+            keyword: pref
+            for keyword, pref in prefs.items()
+            if pref.score > 0 and pref.count > 0
+        }
 
     def get_top_keywords(self, n: int = 20) -> list[tuple[str, float]]:
         """Get top N liked keywords by score."""
-        prefs = self._load_keyword_prefs()
+        prefs = self.get_all_keyword_prefs(positive_only=True)
         sorted_prefs = sorted(
             prefs.items(),
-            key=lambda x: (x[1].score, x[1].count),
+            key=lambda x: (x[1].score, x[1].count, x[1].last_updated),
             reverse=True
         )
-        return [(k, v.score) for k, v in sorted_prefs[:n] if v.score > 0]
+        return [(k, v.score) for k, v in sorted_prefs[:n]]
 
     def get_disliked_keywords(self) -> list[str]:
-        """Get list of disliked keywords (score < -0.2)."""
-        prefs = self._load_keyword_prefs()
-        return [k for k, v in prefs.items() if v.score < -0.2]
+        """Negative keyword feedback is temporarily disabled in the preference layer."""
+        return []

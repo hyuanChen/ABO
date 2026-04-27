@@ -1,17 +1,19 @@
 // src/modules/profile/Profile.tsx
 import { useEffect, useState } from "react";
-import { User, Sparkles, Clock, ChevronDown, ChevronRight } from "lucide-react";
+import { User, Sparkles, Clock } from "lucide-react";
 import { api } from "../../core/api";
 import { useStore, ProfileStats } from "../../core/store";
 import { PageContainer, PageHeader, PageContent, Card, Grid } from "../../components/Layout";
 import RoleCard from "./RoleCard";
 import DailyTodo from "./DailyTodo";
+import PersonaStudio from "./PersonaStudio";
+import IntelligencePlanner from "./IntelligencePlanner";
+import WorkdayWorkbench from "./WorkdayWorkbench";
 import HexagonRadar from "./HexagonRadar";
 import SkillGrid from "./SkillGrid";
 import AchievementGallery from "./AchievementGallery";
 import DailyCheckInModal from "./DailyCheckInModal";
 import GamePanel from "../../components/GamePanel";
-import KeywordPreferences from "../../components/KeywordPreferences";
 import ModuleConfigPanel from "../../components/ModuleConfigPanel";
 import TimelineView from "../../components/TimelineView";
 
@@ -19,6 +21,60 @@ interface Todo {
   id: string;
   text: string;
   done: boolean;
+  started_at?: number | null;
+  duration_ms?: number | null;
+  source?: string;
+  priority?: string;
+  reason?: string;
+  evidence?: string[];
+}
+
+interface PersonaData {
+  source_text: string;
+  summary: string;
+  homepage: {
+    codename: string;
+    long_term_goal: string;
+    one_liner: string;
+    narrative: string;
+    strengths: string[];
+    working_style: string[];
+    preferred_topics: string[];
+    next_focus: string[];
+  };
+  sbti: {
+    type: string;
+    label?: string;
+    confidence: number;
+    reasoning: string[];
+  };
+  generated_at: string;
+}
+
+interface DailyBriefing {
+  date: string;
+  summary: string;
+  focus: string;
+  preferred_keywords: Array<{ keyword: string; score: number; count: number }>;
+  suggested_todos: Todo[];
+  intel_cards: Array<{
+    id: string;
+    module_id: string;
+    title: string;
+    summary: string;
+    tags: string[];
+    score: number;
+    source_url?: string;
+    created_at?: number;
+  }>;
+  generated_at: string;
+}
+
+interface WorkbenchData {
+  score: { value: number; label: string; summary: string };
+  metrics: Array<{ id: string; label: string; value: number; detail: string }>;
+  top_topics: Array<{ tag: string; count: number; preferred: boolean }>;
+  recent_activity: Array<{ id: string; time: string; label: string; title: string }>;
 }
 
 interface ProfileData {
@@ -29,6 +85,9 @@ interface ProfileData {
   achievements: Array<{ id: string; name: string; unlocked_at: string }>;
   energy: number;
   todos: Todo[];
+  persona?: PersonaData;
+  daily_briefing?: DailyBriefing;
+  workbench?: WorkbenchData;
 }
 
 const CHECKIN_KEY = "abo_last_checkin";
@@ -43,8 +102,6 @@ export default function Profile() {
   const [data, setData] = useState<ProfileData | null>(null);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [showCheckin, setShowCheckin] = useState(false);
-  const [prefsOpen, setPrefsOpen] = useState(false);
-  const [modulesOpen, setModulesOpen] = useState(false);
   const { setProfileEnergy, setProfileSan, setProfileMotto, setProfileCodename, setProfileStats } = useStore();
 
   useEffect(() => {
@@ -88,6 +145,15 @@ export default function Profile() {
   }
 
   const sanForAvatar = Math.round((data.stats?.san?.score ?? 0) / 10);
+  const completedTodos = todos.filter((todo) => todo.done).length;
+  const todoProgress = todos.length > 0 ? Math.round((completedTodos / todos.length) * 100) : 0;
+  const unlockedSkillCount = Object.keys(data.skills ?? {}).length;
+  const achievementCount = data.achievements?.length ?? 0;
+  const personaSummary = data.persona?.homepage?.one_liner || data.persona?.summary || "根据你的 wiki 与经历生成角色画像";
+  const briefingSummary = data.daily_briefing?.focus || "把今天的情报整理成能执行的消化任务";
+  const workbenchSummary = data.workbench
+    ? `${Math.round(data.workbench.score.value)} 分 · ${data.workbench.score.label}`
+    : "等待今日量化数据";
 
   return (
     <PageContainer>
@@ -96,7 +162,7 @@ export default function Profile() {
         subtitle="追踪你的研究成长与能力进化"
         icon={User}
       />
-      <PageContent maxWidth="1000px">
+      <PageContent maxWidth="1280px">
         {/* Role Card - Full Width */}
         <RoleCard
           codename={data.identity.codename}
@@ -105,18 +171,30 @@ export default function Profile() {
           description={data.daily_motto.description}
           energy={data.energy}
           san={sanForAvatar}
+          predictedSbti={data.persona?.sbti?.type ?? null}
           onUpdated={load}
+          defaultExpanded
         />
 
         {/* Daily Todo */}
-        <div style={{ marginTop: "clamp(20px, 3vw, 28px)" }}>
-          <DailyTodo todos={todos} onChange={setTodos} />
-        </div>
-
-        {/* Phase 3: Gamification Panel */}
         <Card
-          title="游戏状态"
+          title="今日待办"
+          icon={<span style={{ fontSize: "1rem" }}>🗂️</span>}
+          collapsible
+          defaultExpanded
+          summary={`${completedTodos}/${todos.length} · 完成率 ${todoProgress}%`}
+          style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
+        >
+          <DailyTodo todos={todos} onChange={setTodos} showHeader={false} />
+        </Card>
+
+        {/* Daily Status */}
+        <Card
+          title="今日状态"
           icon={<Sparkles style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
+          collapsible
+          defaultExpanded
+          summary="查看今天的能量、SAN 与整体状态"
           style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
         >
           <GamePanel />
@@ -126,15 +204,38 @@ export default function Profile() {
         <Card
           title="今日时间线"
           icon={<Clock style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
+          collapsible
+          defaultExpanded
+          summary="今天发生了什么，按时间顺序展开"
           style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
         >
           <TimelineView />
         </Card>
 
+        <IntelligencePlanner
+          briefing={data.daily_briefing}
+          onRefresh={load}
+          currentTodos={todos}
+          onTodosChange={(nextTodos) => setTodos(nextTodos as Todo[])}
+          collapsible
+          defaultExpanded={false}
+          summary={briefingSummary}
+        />
+
+        <WorkdayWorkbench
+          workbench={data.workbench}
+          collapsible
+          defaultExpanded={false}
+          summary={workbenchSummary}
+        />
+
         {/* Hexagon Radar */}
         <Card
           title="六维能力评估"
           icon={<Sparkles style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
+          collapsible
+          defaultExpanded={false}
+          summary="查看六项核心能力的当前状态"
           style={{ marginTop: "clamp(20px, 3vw, 28px)" }}
         >
           <div style={{ display: "flex", justifyContent: "center", padding: "clamp(16px, 3vw, 32px) 0" }}>
@@ -147,6 +248,9 @@ export default function Profile() {
           <Card
             title="技能树"
             icon={<span style={{ fontSize: "1rem" }}>🌳</span>}
+            collapsible
+            defaultExpanded={false}
+            summary={`已解锁 ${unlockedSkillCount} 项技能`}
           >
             <SkillGrid unlockedSkills={data.skills} />
           </Card>
@@ -154,78 +258,33 @@ export default function Profile() {
           <Card
             title="成就徽章"
             icon={<span style={{ fontSize: "1rem" }}>🏆</span>}
+            collapsible
+            defaultExpanded={false}
+            summary={`已解锁 ${achievementCount} 枚徽章`}
           >
-            <AchievementGallery achievements={data.achievements} />
+            <AchievementGallery achievements={data.achievements} showHeader={false} />
           </Card>
         </Grid>
 
-        {/* Keyword Preferences - collapsible */}
-        <div style={{
-          marginTop: "clamp(20px, 3vw, 28px)",
-          background: "var(--bg-card)", borderRadius: "var(--radius-md)",
-          border: "1px solid var(--border-light)", boxShadow: "var(--shadow-soft)",
-          overflow: "hidden",
-        }}>
-          <button
-            onClick={() => setPrefsOpen(!prefsOpen)}
-            style={{
-              width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
-              padding: "14px 18px", background: "var(--bg-hover)",
-              border: "none", borderBottom: prefsOpen ? "1px solid var(--border-light)" : "none",
-              cursor: "pointer",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span style={{ fontSize: "0.9375rem" }}>📊</span>
-              <span style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>
-                偏好学习
-              </span>
-            </div>
-            {prefsOpen
-              ? <ChevronDown style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
-              : <ChevronRight style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
-            }
-          </button>
-          {prefsOpen && (
-            <div style={{ padding: "clamp(14px, 2vw, 20px)" }}>
-              <KeywordPreferences />
-            </div>
-          )}
-        </div>
+        <PersonaStudio
+          persona={data.persona}
+          onRefresh={load}
+          collapsible
+          defaultExpanded={false}
+          summary={personaSummary}
+        />
 
-        {/* Module Configuration - collapsible */}
-        <div style={{
-          marginTop: "clamp(16px, 2vw, 20px)",
-          background: "var(--bg-card)", borderRadius: "var(--radius-md)",
-          border: "1px solid var(--border-light)", boxShadow: "var(--shadow-soft)",
-          overflow: "hidden",
-        }}>
-          <button
-            onClick={() => setModulesOpen(!modulesOpen)}
-            style={{
-              width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
-              padding: "14px 18px", background: "var(--bg-hover)",
-              border: "none", borderBottom: modulesOpen ? "1px solid var(--border-light)" : "none",
-              cursor: "pointer",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span style={{ fontSize: "0.9375rem" }}>🔧</span>
-              <span style={{ fontSize: "0.9375rem", fontWeight: 600, color: "var(--text-main)" }}>
-                爬虫模块管理
-              </span>
-            </div>
-            {modulesOpen
-              ? <ChevronDown style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
-              : <ChevronRight style={{ width: "16px", height: "16px", color: "var(--text-muted)" }} />
-            }
-          </button>
-          {modulesOpen && (
-            <div style={{ padding: "clamp(14px, 2vw, 20px)" }}>
-              <ModuleConfigPanel />
-            </div>
-          )}
-        </div>
+        <Card
+          title="爬虫模块管理"
+          icon={<span style={{ fontSize: "0.9375rem" }}>🔧</span>}
+          collapsible
+          defaultExpanded={false}
+          lazyMount
+          summary="查看模块运行状态，偏好学习可单独点击加载"
+          style={{ marginTop: "clamp(16px, 2vw, 20px)" }}
+        >
+          <ModuleConfigPanel />
+        </Card>
       </PageContent>
 
       {showCheckin && <DailyCheckInModal onClose={handleCheckinClose} />}

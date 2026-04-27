@@ -6,6 +6,7 @@ import json
 import asyncio
 import hashlib
 import math
+import os
 import re
 import subprocess
 import time
@@ -16,16 +17,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import frontmatter
 import httpx
 import websockets
 
 from abo.config import get_vault_path, load as load_config
+from abo.creator_smart_groups import extract_signal_tokens, unique_strings
 from abo.tools.bilibili_favorite_renamer import rename_favorite_markdown_files
 from abo.tools.bilibili_video_meta import (
     extract_bvid,
     fetch_bilibili_video_metadata,
     merge_tags,
 )
+from abo.vault.unified_entry import UnifiedVaultEntry, first_non_empty, normalize_string_list, safe_load_frontmatter
+from abo.vault.writer import write_unified_note
 
 
 USER_AGENT = (
@@ -79,13 +84,16 @@ class BilibiliNote:
 @dataclass
 class BilibiliFavoriteAuthorAggregate:
     author: str
+    author_id: str = ""
     note_count: int = 0
     latest_date: str = ""
     latest_title: str = ""
     sample_titles: list[str] = field(default_factory=list)
     sample_tags: list[str] = field(default_factory=list)
     sample_folders: list[str] = field(default_factory=list)
+    sample_oids: list[str] = field(default_factory=list)
     sample_urls: list[str] = field(default_factory=list)
+    sample_content_signals: list[str] = field(default_factory=list)
     signal_weights: Counter = field(default_factory=Counter)
     matched_mid: str = ""
     matched_uname: str = ""
@@ -639,6 +647,8 @@ def _favorite_media_to_note(media: dict, folder: dict) -> BilibiliNote:
     bvid = media.get("bvid") or ""
     upper = media.get("upper") or {}
     folder_name = folder.get("title") or folder.get("name") or f"folder-{folder.get('id')}"
+    author_id = str(upper.get("mid") or upper.get("id") or "")
+    oid = str(media.get("id") or media.get("oid") or media.get("aid") or bvid or "")
     return BilibiliNote(
         source_type="favorite",
         title=media.get("title") or "B站收藏视频",
@@ -653,6 +663,8 @@ def _favorite_media_to_note(media: dict, folder: dict) -> BilibiliNote:
         metadata={
             "folder_id": str(folder.get("id") or ""),
             "media_id": str(media.get("id") or media.get("aid") or bvid or ""),
+            "oid": oid,
+            "author_id": author_id,
             "fav_time_ts": int(media.get("fav_time") or 0),
             "fav_time": _format_ts(media.get("fav_time")),
             "cnt_info": media.get("cnt_info") or {},
@@ -1246,7 +1258,9 @@ def _render_favorite(note: BilibiliNote) -> str:
 > [!info]- 笔记属性
 > - **来源**: Bilibili 收藏夹 · {note.folder_name}
 > - **UP主**: {note.author}
+> - **UP主UID**: {note.metadata.get("author_id", "") or "未知"}
 > - **BV号**: {note.bvid}
+> - **OID**: {note.metadata.get("oid", "") or note.metadata.get("media_id", "") or "未知"}
 > - **链接**: {note.url}
 > - **收藏时间**: {note.metadata.get("fav_time", "")}
 > - **标签**: {_render_tags(note)}
@@ -1320,7 +1334,118 @@ def _split_saved_bilibili_tags(raw: str) -> list[str]:
     return cleaned
 
 
+def _extract_saved_bilibili_excerpt(text: str) -> str:
+    lines: list[str] = []
+    capture = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("> 原视频标题：") or line.startswith("> 原动态标题："):
+            capture = True
+            continue
+        if not capture:
+            continue
+        if line.startswith("> [!info]") or line.startswith("> - **来源**:"):
+            break
+        if line.startswith("> ![") or line in {">", ""}:
+            continue
+        clean = line.lstrip("> ").strip()
+        if clean:
+            lines.append(clean)
+        if len(lines) >= 4:
+            break
+    return " ".join(lines)[:240]
+
+
+def _extract_saved_bilibili_signal_chunks(*values: str) -> list[str]:
+    return [_clean_group_signal(chunk) for chunk in extract_signal_tokens(*values)]
+
+
+def _parse_saved_bilibili_entry(path: Path) -> dict[str, Any] | None:
+    note = _parse_saved_bilibili_favorite(path)
+    if note:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        title = str(note.get("title") or path.stem)
+        excerpt = _extract_saved_bilibili_excerpt(text)
+        note["source_type"] = "favorite"
+        note["content_excerpt"] = excerpt
+        note["content_signals"] = _extract_saved_bilibili_signal_chunks(title, excerpt)
+        return note
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+
+    title_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+    title = (title_match.group(1).strip() if title_match else path.stem) or path.stem
+    link_match = re.search(r"\*\*链接\*\*\s*:\s*(https?://\S+)", text)
+    tag_match = re.search(r"\*\*标签\*\*\s*:\s*(.+)", text)
+    author_match = re.search(r"\*\*UP主\*\*\s*:\s*(.+)", text)
+    excerpt = _extract_saved_bilibili_excerpt(text)
+
+    if "Bilibili 稍后再看" in text and author_match:
+        published_match = re.search(r"\*\*发布时间\*\*\s*:\s*([0-9:\-\s]+)", text)
+        return {
+            "source_type": "watch_later",
+            "title": title,
+            "author": author_match.group(1).strip(),
+            "url": link_match.group(1).strip() if link_match else "",
+            "favorite_time": published_match.group(1).strip() if published_match else "",
+            "favorite_date": (published_match.group(1).strip()[:10] if published_match else ""),
+            "folder_name": "稍后再看",
+            "author_id": "",
+            "oid": "",
+            "tags": _split_saved_bilibili_tags(tag_match.group(1) if tag_match else ""),
+            "path": str(path),
+            "content_excerpt": excerpt,
+            "content_signals": _extract_saved_bilibili_signal_chunks(title, excerpt),
+        }
+
+    dynamic_author_match = re.search(r"\*\*来源\*\*\s*:\s*Bilibili\s*·\s*(.+)", text)
+    if dynamic_author_match:
+        date_match = re.search(r"\*\*日期\*\*\s*:\s*([0-9:\-\s]+)", text)
+        return {
+            "source_type": "dynamic",
+            "title": title,
+            "author": dynamic_author_match.group(1).strip(),
+            "url": link_match.group(1).strip() if link_match else "",
+            "favorite_time": date_match.group(1).strip() if date_match else "",
+            "favorite_date": (date_match.group(1).strip()[:10] if date_match else ""),
+            "folder_name": "动态",
+            "author_id": "",
+            "oid": "",
+            "tags": _split_saved_bilibili_tags(tag_match.group(1) if tag_match else ""),
+            "path": str(path),
+            "content_excerpt": excerpt,
+            "content_signals": _extract_saved_bilibili_signal_chunks(title, excerpt),
+        }
+
+    return None
+
+
 def _parse_saved_bilibili_favorite(path: Path) -> dict[str, Any] | None:
+    meta, content = safe_load_frontmatter(path)
+    platform = first_non_empty(meta.get("source-platform"), meta.get("platform")).lower()
+    entry_type = first_non_empty(meta.get("entry-type")).lower()
+    if platform == "bilibili" and entry_type in {"social-favorite", "bilibili-favorite"}:
+        favorite_time = first_non_empty(meta.get("fav_time"), meta.get("favorite-time"), meta.get("published"))
+        author = first_non_empty(meta.get("author"))
+        if not author:
+            return None
+        return {
+            "title": first_non_empty(meta.get("title")) or path.stem,
+            "author": author,
+            "url": first_non_empty(meta.get("source-url"), meta.get("url")),
+            "favorite_time": favorite_time,
+            "favorite_date": favorite_time[:10] if favorite_time else "",
+            "folder_name": _clean_group_signal(first_non_empty(meta.get("folder-name"), meta.get("folder_name"))) or path.parent.name,
+            "author_id": first_non_empty(meta.get("author-id"), meta.get("author_id")),
+            "oid": first_non_empty(meta.get("oid"), meta.get("media_id")),
+            "bvid": extract_bvid(first_non_empty(meta.get("source-url"), meta.get("url"))),
+            "tags": normalize_string_list(meta.get("tags")),
+            "path": str(path),
+        }
+
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except Exception:
@@ -1329,7 +1454,7 @@ def _parse_saved_bilibili_favorite(path: Path) -> dict[str, Any] | None:
     if "Bilibili 收藏夹" not in text:
         return None
 
-    title_match = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+    title_match = re.search(r"^#\s+(.+)$", content or text, re.MULTILINE)
     author_match = re.search(r"\*\*UP主\*\*\s*:\s*(.+)", text)
     if not author_match:
         return None
@@ -1338,21 +1463,448 @@ def _parse_saved_bilibili_favorite(path: Path) -> dict[str, Any] | None:
     link_match = re.search(r"\*\*链接\*\*\s*:\s*(https?://\S+)", text)
     favorite_time_match = re.search(r"\*\*收藏时间\*\*\s*:\s*([0-9:\-\s]+)", text)
     tag_match = re.search(r"\*\*标签\*\*\s*:\s*(.+)", text)
+    author_id_match = re.search(r"\*\*UP主UID\*\*\s*:\s*(.+)", text)
+    oid_match = re.search(r"\*\*(?:OID|媒体ID)\*\*\s*:\s*(.+)", text)
+    bvid_match = re.search(r"\*\*BV号\*\*\s*:\s*(BV[0-9A-Za-z]+)", text)
 
     folder_name = _clean_group_signal(folder_match.group(1) if folder_match else path.parent.name)
     author = author_match.group(1).strip()
     title = (title_match.group(1).strip() if title_match else path.stem) or path.stem
+    link_url = link_match.group(1).strip() if link_match else ""
     favorite_time = favorite_time_match.group(1).strip() if favorite_time_match else ""
     favorite_date = favorite_time[:10] if favorite_time else ""
     return {
         "title": title,
         "author": author,
-        "url": link_match.group(1).strip() if link_match else "",
+        "url": link_url,
         "favorite_time": favorite_time,
         "favorite_date": favorite_date,
         "folder_name": folder_name or path.parent.name,
+        "author_id": (author_id_match.group(1).replace("未知", "").strip() if author_id_match else ""),
+        "oid": (oid_match.group(1).replace("未知", "").strip() if oid_match else ""),
+        "bvid": extract_bvid(bvid_match.group(1) if bvid_match else link_url),
         "tags": _split_saved_bilibili_tags(tag_match.group(1) if tag_match else ""),
         "path": str(path),
+    }
+
+
+def _build_saved_bilibili_author_lookup_maps(
+    *,
+    followed_ups: list[dict[str, Any]] | None = None,
+    creator_profiles: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], set[str]]:
+    profile_name_map: dict[str, str] = {}
+    profile_oid_map: dict[str, str] = {}
+    followed_name_map: dict[str, str] = {}
+    followed_uid_set: set[str] = set()
+
+    for mid, profile in (creator_profiles or {}).items():
+        author_id = str(mid or profile.get("author_id") or "").strip()
+        if not author_id:
+            continue
+        for raw_name in (
+            profile.get("matched_author"),
+            profile.get("author"),
+        ):
+            normalized_name = _normalize_match_name(str(raw_name or ""))
+            if normalized_name and normalized_name not in profile_name_map:
+                profile_name_map[normalized_name] = author_id
+        for raw_oid in profile.get("sample_oids") or []:
+            oid = str(raw_oid or "").strip()
+            if oid and oid not in profile_oid_map:
+                profile_oid_map[oid] = author_id
+
+    for item in followed_ups or []:
+        author_id = str(item.get("mid") or "").strip()
+        if author_id:
+            followed_uid_set.add(author_id)
+        normalized_name = _normalize_match_name(str(item.get("uname") or ""))
+        if author_id and normalized_name and normalized_name not in followed_name_map:
+            followed_name_map[normalized_name] = author_id
+
+    return profile_name_map, profile_oid_map, followed_name_map, followed_uid_set
+
+
+def _resolve_saved_bilibili_author_id(
+    note: dict[str, Any],
+    *,
+    profile_name_map: dict[str, str],
+    profile_oid_map: dict[str, str],
+    followed_name_map: dict[str, str],
+    bvid_author_id_map: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    author_id = str(note.get("author_id") or "").strip()
+    if author_id:
+        return author_id, "note"
+
+    oid = str(note.get("oid") or "").strip()
+    if oid and oid in profile_oid_map:
+        return profile_oid_map[oid], "profile-oid"
+
+    normalized_name = _normalize_match_name(str(note.get("author") or ""))
+    if normalized_name:
+        if normalized_name in profile_name_map:
+            return profile_name_map[normalized_name], "profile-name"
+        if normalized_name in followed_name_map:
+            return followed_name_map[normalized_name], "followed-name"
+
+    bvid = extract_bvid(note.get("bvid") or note.get("url"))
+    if bvid and bvid_author_id_map and bvid in bvid_author_id_map:
+        return str(bvid_author_id_map[bvid] or "").strip(), "video-meta"
+
+    return "", ""
+
+
+def _write_saved_bilibili_author_id(path: Path, author_id: str) -> bool:
+    if not author_id:
+        return False
+
+    meta, _content = safe_load_frontmatter(path)
+    if first_non_empty(meta.get("source-platform"), meta.get("platform")).lower() == "bilibili":
+        try:
+            post = frontmatter.load(str(path))
+            post.metadata["author-id"] = author_id
+            post.metadata["author_id"] = author_id
+            path.write_text(frontmatter.dumps(post), encoding="utf-8")
+            return True
+        except Exception:
+            pass
+
+    try:
+        original = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+
+    if re.search(r"^\s*>?\s*-\s*\*\*UP主UID\*\*:\s*.+$", original, re.MULTILINE):
+        updated = re.sub(
+            r"(^\s*>?\s*-\s*\*\*UP主UID\*\*:\s*).+$",
+            rf"\1{author_id}",
+            original,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    else:
+        updated = re.sub(
+            r"(^\s*>?\s*-\s*\*\*UP主\*\*:\s*.+$)",
+            rf"\1\n> - **UP主UID**: {author_id}",
+            original,
+            count=1,
+            flags=re.MULTILINE,
+        )
+
+    if updated == original:
+        return False
+
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def backfill_saved_bilibili_favorite_author_ids(
+    *,
+    vault_path: str | Path | None = None,
+    followed_ups: list[dict[str, Any]] | None = None,
+    creator_profiles: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    bilibili_dir = _vault_bilibili_dir(vault_path)
+    favorites_dir = bilibili_dir / "favorites"
+    if not favorites_dir.exists():
+        return {
+            "success": True,
+            "bilibili_dir": str(bilibili_dir),
+            "favorites_dir": str(favorites_dir),
+            "scanned_files": 0,
+            "missing_author_id_count": 0,
+            "updated_count": 0,
+            "updated_files": [],
+            "unresolved": [],
+            "message": "还没有本地 B 站收藏结果，请先执行收藏入库。",
+        }
+
+    profile_name_map, profile_oid_map, followed_name_map, _followed_uid_set = (
+        _build_saved_bilibili_author_lookup_maps(
+            followed_ups=followed_ups,
+            creator_profiles=creator_profiles,
+        )
+    )
+
+    scanned_files = 0
+    missing_author_id_count = 0
+    updated_files: list[str] = []
+    unresolved: list[dict[str, str]] = []
+
+    for path in sorted(favorites_dir.rglob("*.md")):
+        note = _parse_saved_bilibili_favorite(path)
+        if not note:
+            continue
+        scanned_files += 1
+        if note.get("author_id"):
+            continue
+
+        missing_author_id_count += 1
+        author = str(note.get("author") or "").strip()
+        matched_author_id, _resolved_via = _resolve_saved_bilibili_author_id(
+            note,
+            profile_name_map=profile_name_map,
+            profile_oid_map=profile_oid_map,
+            followed_name_map=followed_name_map,
+        )
+        if not matched_author_id:
+            unresolved.append({"author": author, "path": str(path)})
+            continue
+
+        if not _write_saved_bilibili_author_id(path, matched_author_id):
+            unresolved.append({"author": author, "path": str(path)})
+            continue
+        updated_files.append(str(path))
+
+    return {
+        "success": True,
+        "bilibili_dir": str(bilibili_dir),
+        "favorites_dir": str(favorites_dir),
+        "scanned_files": scanned_files,
+        "missing_author_id_count": missing_author_id_count,
+        "updated_count": len(updated_files),
+        "updated_files": updated_files,
+        "unresolved": unresolved[:24],
+        "message": f"扫描 {scanned_files} 个收藏文件，回填 {len(updated_files)} 个缺失的 UP主UID。",
+    }
+
+
+async def build_saved_bilibili_favorite_up_pool(
+    *,
+    vault_path: str | Path | None = None,
+    followed_ups: list[dict[str, Any]] | None = None,
+    creator_profiles: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    bilibili_dir = _vault_bilibili_dir(vault_path)
+    favorites_dir = bilibili_dir / "favorites"
+    if not favorites_dir.exists():
+        return {
+            "success": True,
+            "bilibili_dir": str(bilibili_dir),
+            "favorites_dir": str(favorites_dir),
+            "scanned_files": 0,
+            "candidate_author_count": 0,
+            "missing_author_id_count": 0,
+            "resolved_author_count": 0,
+            "already_followed_count": 0,
+            "favorite_up_count": 0,
+            "favorite_up_uids": [],
+            "favorite_up_profiles": {},
+            "updated_count": 0,
+            "updated_files": [],
+            "unresolved": [],
+            "message": "还没有本地 B 站收藏夹结果，请先执行收藏入库。",
+        }
+
+    notes: list[dict[str, Any]] = []
+    for path in sorted(favorites_dir.rglob("*.md")):
+        note = _parse_saved_bilibili_favorite(path)
+        if not note:
+            continue
+        note["bvid"] = extract_bvid(note.get("bvid") or note.get("url"))
+        notes.append(note)
+
+    if not notes:
+        return {
+            "success": True,
+            "bilibili_dir": str(bilibili_dir),
+            "favorites_dir": str(favorites_dir),
+            "scanned_files": 0,
+            "candidate_author_count": 0,
+            "missing_author_id_count": 0,
+            "resolved_author_count": 0,
+            "already_followed_count": 0,
+            "favorite_up_count": 0,
+            "favorite_up_uids": [],
+            "favorite_up_profiles": {},
+            "updated_count": 0,
+            "updated_files": [],
+            "unresolved": [],
+            "message": "收藏夹目录里还没有可识别的收藏文件。",
+        }
+
+    profile_name_map, profile_oid_map, followed_name_map, followed_uid_set = (
+        _build_saved_bilibili_author_lookup_maps(
+            followed_ups=followed_ups,
+            creator_profiles=creator_profiles,
+        )
+    )
+
+    candidate_author_keys = {
+        _normalize_match_name(str(note.get("author") or "")) or str(note.get("author") or "").strip()
+        for note in notes
+        if str(note.get("author") or "").strip()
+    }
+    missing_author_id_count = sum(1 for note in notes if not str(note.get("author_id") or "").strip())
+
+    unresolved_bvids: list[str] = []
+    for note in notes:
+        resolved_author_id, resolved_via = _resolve_saved_bilibili_author_id(
+            note,
+            profile_name_map=profile_name_map,
+            profile_oid_map=profile_oid_map,
+            followed_name_map=followed_name_map,
+        )
+        note["resolved_author_id"] = resolved_author_id
+        note["resolved_via"] = resolved_via
+        if not resolved_author_id:
+            bvid = extract_bvid(note.get("bvid") or note.get("url"))
+            if bvid:
+                unresolved_bvids.append(bvid)
+
+    bvid_author_id_map: dict[str, str] = {}
+    unresolved_bvid_list = unique_strings(unresolved_bvids)
+    if unresolved_bvid_list:
+        async with httpx.AsyncClient(
+            timeout=15,
+            follow_redirects=True,
+            headers={"User-Agent": USER_AGENT},
+        ) as client:
+            for index, bvid in enumerate(unresolved_bvid_list, start=1):
+                try:
+                    metadata = await fetch_bilibili_video_metadata(
+                        client,
+                        bvid=bvid,
+                        headers={"User-Agent": USER_AGENT},
+                    )
+                except Exception:
+                    metadata = {}
+                author_id = str(metadata.get("author_id") or "").strip()
+                author_name = str(metadata.get("author") or "").strip()
+                if author_id:
+                    bvid_author_id_map[bvid] = author_id
+                    normalized_name = _normalize_match_name(author_name)
+                    if normalized_name:
+                        profile_name_map.setdefault(normalized_name, author_id)
+                if index % 12 == 0:
+                    await asyncio.sleep(0)
+
+    updated_files: list[str] = []
+    unresolved: list[dict[str, str]] = []
+    resolved_author_ids: set[str] = set()
+    already_followed_uids: set[str] = set()
+    favorite_up_profiles: dict[str, dict[str, Any]] = {}
+
+    for note in notes:
+        resolved_author_id, resolved_via = _resolve_saved_bilibili_author_id(
+            note,
+            profile_name_map=profile_name_map,
+            profile_oid_map=profile_oid_map,
+            followed_name_map=followed_name_map,
+            bvid_author_id_map=bvid_author_id_map,
+        )
+        note["resolved_author_id"] = resolved_author_id
+        note["resolved_via"] = resolved_via
+
+        if not resolved_author_id:
+            unresolved.append(
+                {
+                    "author": str(note.get("author") or "").strip(),
+                    "path": str(note.get("path") or ""),
+                }
+            )
+            continue
+
+        resolved_author_ids.add(resolved_author_id)
+        if not str(note.get("author_id") or "").strip():
+            target_path = Path(str(note.get("path") or ""))
+            if target_path.exists() and _write_saved_bilibili_author_id(target_path, resolved_author_id):
+                updated_files.append(str(target_path))
+
+        if resolved_author_id in followed_uid_set:
+            already_followed_uids.add(resolved_author_id)
+            continue
+
+        profile = favorite_up_profiles.setdefault(
+            resolved_author_id,
+            {
+                "author": str(note.get("author") or resolved_author_id).strip() or resolved_author_id,
+                "author_id": resolved_author_id,
+                "pending_author_id": False,
+                "favorite_note_count": 0,
+                "sample_titles": [],
+                "sample_tags": [],
+                "sample_folders": [],
+                "sample_oids": [],
+                "sample_urls": [],
+                "source_summary": "",
+                "resolved_via": resolved_via,
+            },
+        )
+        if not str(profile.get("author") or "").strip():
+            profile["author"] = str(note.get("author") or resolved_author_id).strip() or resolved_author_id
+        profile["favorite_note_count"] = int(profile.get("favorite_note_count") or 0) + 1
+        profile["sample_titles"] = unique_strings(
+            [*(profile.get("sample_titles") or []), str(note.get("title") or "").strip()],
+            limit=4,
+        )
+        profile["sample_tags"] = unique_strings(
+            [*(profile.get("sample_tags") or []), *(note.get("tags") or [])],
+            limit=8,
+        )
+        profile["sample_folders"] = unique_strings(
+            [*(profile.get("sample_folders") or []), str(note.get("folder_name") or "").strip()],
+            limit=4,
+        )
+        profile["sample_oids"] = unique_strings(
+            [*(profile.get("sample_oids") or []), str(note.get("oid") or "").strip()],
+            limit=6,
+        )
+        profile["sample_urls"] = unique_strings(
+            [*(profile.get("sample_urls") or []), str(note.get("url") or "").strip()],
+            limit=4,
+        )
+        if not profile.get("resolved_via"):
+            profile["resolved_via"] = resolved_via
+
+    ordered_profiles = dict(
+        sorted(
+            favorite_up_profiles.items(),
+            key=lambda item: (
+                -int((item[1] or {}).get("favorite_note_count") or 0),
+                str((item[1] or {}).get("author") or ""),
+            ),
+        )
+    )
+    for profile in ordered_profiles.values():
+        folders = profile.get("sample_folders") or []
+        tags = profile.get("sample_tags") or []
+        titles = profile.get("sample_titles") or []
+        if folders:
+            profile["source_summary"] = "来自收藏夹：" + "、".join(folders[:3])
+        elif tags:
+            profile["source_summary"] = "来自标签：" + "、".join(tags[:4])
+        elif titles:
+            profile["source_summary"] = "来自收藏视频：" + "、".join(titles[:2])
+        else:
+            profile["source_summary"] = "来自本地收藏"
+
+    unresolved_preview = unresolved[:24]
+    message = (
+        f"扫描 {len(notes)} 个收藏文件，识别 {len(resolved_author_ids)} 位收藏作者；"
+        f"其中 {len(already_followed_uids)} 位已在真实关注里，"
+        f"新增 {len(ordered_profiles)} 位进入收藏夹UP。"
+    )
+    if unresolved:
+        message += f" 仍有 {len(unresolved)} 位作者暂未解析到 UID。"
+
+    return {
+        "success": True,
+        "bilibili_dir": str(bilibili_dir),
+        "favorites_dir": str(favorites_dir),
+        "scanned_files": len(notes),
+        "candidate_author_count": len(candidate_author_keys),
+        "missing_author_id_count": missing_author_id_count,
+        "resolved_author_count": len(resolved_author_ids),
+        "already_followed_count": len(already_followed_uids),
+        "favorite_up_count": len(ordered_profiles),
+        "favorite_up_uids": list(ordered_profiles.keys()),
+        "favorite_up_profiles": ordered_profiles,
+        "updated_count": len(updated_files),
+        "updated_files": updated_files,
+        "unresolved": unresolved_preview,
+        "message": message,
     }
 
 
@@ -1370,6 +1922,11 @@ def _pick_followed_match(
     candidate: BilibiliFavoriteAuthorAggregate,
     followed_ups: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
+    if candidate.author_id:
+        for item in followed_ups:
+            if str(item.get("mid") or "").strip() == candidate.author_id:
+                return item
+
     exact_name = candidate.author.strip()
     normalized = _normalize_match_name(exact_name)
     if not normalized:
@@ -1493,12 +2050,12 @@ async def analyze_saved_bilibili_favorites(
     progress_callback=None,
 ) -> dict[str, Any]:
     bilibili_dir = _vault_bilibili_dir(vault_path)
-    favorites_dir = bilibili_dir / "favorites"
-    if not favorites_dir.exists():
+    content_dirs = [bilibili_dir / "favorites", bilibili_dir / "watch_later", bilibili_dir / "dynamic"]
+    if not any(path.exists() for path in content_dirs):
         return {
             "success": True,
             "bilibili_dir": str(bilibili_dir),
-            "favorites_dir": str(favorites_dir),
+            "favorites_dir": str(bilibili_dir / "favorites"),
             "total_files": 0,
             "total_notes": 0,
             "total_authors": 0,
@@ -1506,10 +2063,13 @@ async def analyze_saved_bilibili_favorites(
             "unmatched_author_count": 0,
             "group_options": [],
             "profiles": {},
-            "message": "还没有本地 B 站收藏结果，请先执行收藏入库。",
+            "message": "还没有本地 B 站内容，请先执行收藏 / 稍后再看 / 动态入库。",
         }
 
-    paths = sorted(favorites_dir.rglob("*.md"))
+    paths: list[Path] = []
+    for source_dir in content_dirs:
+        if source_dir.exists():
+            paths.extend(sorted(source_dir.rglob("*.md")))
     total_files = len(paths)
     aggregates: dict[str, BilibiliFavoriteAuthorAggregate] = {}
     total_notes = 0
@@ -1527,12 +2087,14 @@ async def analyze_saved_bilibili_favorites(
         )
 
     for index, path in enumerate(paths, start=1):
-        note = _parse_saved_bilibili_favorite(path)
+        note = _parse_saved_bilibili_entry(path)
         if note:
             total_notes += 1
             author = note["author"]
             candidate = aggregates.setdefault(author, BilibiliFavoriteAuthorAggregate(author=author))
             candidate.note_count += 1
+            if note.get("author_id") and not candidate.author_id:
+                candidate.author_id = str(note.get("author_id") or "").strip()
             if note["favorite_date"] and note["favorite_date"] >= candidate.latest_date:
                 candidate.latest_date = note["favorite_date"]
                 candidate.latest_title = note["title"]
@@ -1540,6 +2102,8 @@ async def analyze_saved_bilibili_favorites(
                 candidate.sample_titles.append(note["title"])
             if note["url"] and note["url"] not in candidate.sample_urls and len(candidate.sample_urls) < 3:
                 candidate.sample_urls.append(note["url"])
+            if note.get("oid") and note["oid"] not in candidate.sample_oids and len(candidate.sample_oids) < 4:
+                candidate.sample_oids.append(str(note["oid"]))
             folder_name = note["folder_name"]
             if folder_name and folder_name not in candidate.sample_folders and len(candidate.sample_folders) < 4:
                 candidate.sample_folders.append(folder_name)
@@ -1550,6 +2114,11 @@ async def analyze_saved_bilibili_favorites(
                     candidate.sample_tags.append(tag)
                 if tag and not _is_generic_group_signal(tag):
                     candidate.signal_weights[tag] += 1.0
+            for signal in note.get("content_signals") or []:
+                if signal and not _is_generic_group_signal(signal):
+                    candidate.signal_weights[signal] += 0.45
+                if signal and signal not in candidate.sample_content_signals and len(candidate.sample_content_signals) < 8:
+                    candidate.sample_content_signals.append(signal)
 
         if progress_callback and (index == total_files or index == 1 or index % 5 == 0):
             progress_callback(
@@ -1583,17 +2152,56 @@ async def analyze_saved_bilibili_favorites(
                 "total_groups": 0,
             }
         )
-    for candidate in ordered:
+    total_authors = len(ordered)
+    for index, candidate in enumerate(ordered, start=1):
         candidate.source_summary = _build_author_source_summary(candidate)
         match = _pick_followed_match(candidate, followed_ups or [])
         if not match:
-            continue
-        candidate.matched_mid = str(match.get("mid") or "")
-        candidate.matched_uname = str(match.get("uname") or candidate.author)
-        if candidate.matched_mid:
-            matched_candidates.append(candidate)
+            pass
+        else:
+            candidate.matched_mid = str(match.get("mid") or "")
+            candidate.matched_uname = str(match.get("uname") or candidate.author)
+            if candidate.matched_mid and not candidate.author_id:
+                candidate.author_id = candidate.matched_mid
+            if candidate.matched_mid:
+                matched_candidates.append(candidate)
+        if progress_callback and (index == total_authors or index <= 3 or index % 10 == 0):
+            progress_callback(
+                {
+                    "stage": f"正在匹配关注作者 {index}/{max(total_authors, 1)}",
+                    "progress": min(82, 58 + int(index / max(total_authors, 1) * 24)),
+                    "total_files": total_files,
+                    "processed_files": total_files,
+                    "total_authors": total_authors,
+                    "processed_authors": index,
+                    "current_author": candidate.author,
+                    "matched_followed_count": len(matched_candidates),
+                    "total_groups": 0,
+                }
+            )
+        if index % 25 == 0:
+            await asyncio.sleep(0)
 
     group_options = _build_smart_group_options(matched_candidates)
+    all_candidates = [
+        {
+            "author": candidate.author,
+            "author_id": candidate.author_id or candidate.matched_mid,
+            "matched_mid": candidate.matched_mid,
+            "matched_uname": candidate.matched_uname,
+            "note_count": candidate.note_count,
+            "latest_date": candidate.latest_date,
+            "latest_title": candidate.latest_title,
+            "sample_titles": candidate.sample_titles,
+            "sample_tags": candidate.sample_tags,
+            "sample_folders": candidate.sample_folders,
+            "sample_oids": candidate.sample_oids,
+            "sample_urls": candidate.sample_urls,
+            "content_signals": candidate.sample_content_signals,
+            "source_summary": candidate.source_summary,
+        }
+        for candidate in ordered
+    ]
     profiles = {
         candidate.matched_mid: {
             "author": candidate.matched_uname or candidate.author,
@@ -1606,6 +2214,8 @@ async def analyze_saved_bilibili_favorites(
             "sample_titles": candidate.sample_titles,
             "sample_tags": candidate.sample_tags,
             "sample_folders": candidate.sample_folders,
+            "sample_oids": candidate.sample_oids,
+            "sample_urls": candidate.sample_urls,
             "source_summary": candidate.source_summary,
         }
         for candidate in matched_candidates
@@ -1615,10 +2225,12 @@ async def analyze_saved_bilibili_favorites(
     if progress_callback:
         progress_callback(
             {
-                "stage": "智能分组完成",
+                "stage": "本地 B站标签分析完成",
                 "progress": 100,
                 "total_files": total_files,
                 "processed_files": total_files,
+                "total_authors": total_authors,
+                "processed_authors": total_authors,
                 "matched_followed_count": len(profiles),
                 "total_groups": len(group_options),
             }
@@ -1627,22 +2239,26 @@ async def analyze_saved_bilibili_favorites(
     return {
         "success": True,
         "bilibili_dir": str(bilibili_dir),
-        "favorites_dir": str(favorites_dir),
+        "favorites_dir": str(bilibili_dir / "favorites"),
         "total_files": total_files,
         "total_notes": total_notes,
         "total_authors": len(ordered),
         "matched_followed_count": len(profiles),
         "unmatched_author_count": max(0, len(ordered) - len(profiles)),
+        "all_candidates": all_candidates,
         "group_options": group_options,
         "profiles": profiles,
-        "message": f"从 {total_notes} 条本地收藏中匹配到 {len(profiles)} 个已关注 UP，整理出 {len(group_options)} 个智能分组。",
+        "message": f"从 {total_notes} 条本地 B 站内容中匹配到 {len(profiles)} 个已关注 UP，整理出 {len(group_options)} 个智能分组。",
     }
 
 
 def _note_path(base: Path, note: BilibiliNote) -> Path:
     date = _today()
     if note.source_type == "dynamic":
-        return base / "dynamic" / f"{date} 动态 {_safe_filename(note.title)}.md"
+        folder_path = base / "dynamic"
+        for part in [segment for segment in str(note.folder_name or "").split("/") if str(segment or "").strip()]:
+            folder_path = folder_path / _safe_filename(part, "监控")
+        return folder_path / f"{date} 动态 {_safe_filename(note.title)}.md"
     if note.source_type == "favorite":
         folder = _safe_filename(note.folder_name, "默认收藏夹")
         suffix = f" {note.bvid}" if note.bvid else ""
@@ -1651,6 +2267,105 @@ def _note_path(base: Path, note: BilibiliNote) -> Path:
         suffix = f" {note.bvid}" if note.bvid else ""
         return base / "watch_later" / f"{date} 稍后再看 {_safe_filename(note.title)}{suffix}.md"
     return base / f"{date} {_safe_filename(note.title)}.md"
+
+
+def _resolve_output_dir(base: Path, notes: list[BilibiliNote]) -> Path:
+    if not notes:
+        return base
+    parent_dirs = [_note_path(base, note).parent.resolve() for note in notes]
+    common_dir = Path(os.path.commonpath([str(path) for path in parent_dirs]))
+    try:
+        common_dir.relative_to(base.resolve())
+    except ValueError:
+        return base
+    return common_dir
+
+
+def _build_bilibili_unified_entry(
+    note: BilibiliNote,
+    *,
+    obsidian_path: str,
+    source_module: str = "bilibili-crawler",
+) -> UnifiedVaultEntry:
+    entry_type_map = {
+        "dynamic": "social-dynamic",
+        "favorite": "social-favorite",
+        "watch_later": "social-watch-later",
+    }
+    abo_type_map = {
+        "dynamic": "bilibili-dynamic",
+        "favorite": "bilibili-favorite",
+        "watch_later": "bilibili-watch-later",
+    }
+    summary = (note.content or "").strip().splitlines()[0][:160] if note.content else ""
+    return UnifiedVaultEntry(
+        entry_id=first_non_empty(note.dynamic_id, note.bvid, note.metadata.get("oid"), note.url, note.title),
+        entry_type=entry_type_map.get(note.source_type, "social-entry"),
+        title=note.title,
+        summary=summary,
+        source_url=note.url,
+        source_platform="bilibili",
+        source_module=source_module,
+        author=note.author,
+        author_id=first_non_empty(note.metadata.get("author_id")),
+        published=note.published_at,
+        tags=note.tags,
+        obsidian_path=obsidian_path,
+        metadata={
+            "abo-type": abo_type_map.get(note.source_type, "bilibili-entry"),
+            "platform": "bilibili",
+            "folder-name": note.folder_name,
+            "dynamic-id": note.dynamic_id,
+            "bvid": note.bvid,
+            "item-type": note.item_type,
+            "images": note.images,
+            **dict(note.metadata or {}),
+        },
+    )
+
+
+def build_bilibili_dynamic_obsidian_path(
+    item: dict[str, Any],
+    *,
+    vault_path: str | Path | None = None,
+) -> str:
+    """Return the same relative markdown path used by selected/manual Bilibili saves."""
+    title = str(item.get("title") or "").strip() or "B站动态"
+    dynamic_id = str(item.get("dynamic_id") or item.get("id") or "").strip()
+    url = str(item.get("url") or "").strip() or (
+        f"https://t.bilibili.com/{dynamic_id}" if dynamic_id else ""
+    )
+    dynamic_type = str(item.get("dynamic_type") or "text").strip() or "text"
+    note = BilibiliNote(
+        source_type="dynamic",
+        title=title,
+        content=str(item.get("content") or item.get("description") or "").strip(),
+        url=url,
+        author=str(item.get("author") or item.get("up_name") or "").strip(),
+        published_at=str(item.get("published_at") or item.get("published") or ""),
+        dynamic_id=dynamic_id,
+        bvid=extract_bvid(item.get("bvid") or item.get("url")),
+        item_type=dynamic_type,
+        images=[],
+        tags=merge_tags(item.get("tags") or []),
+        folder_name=str(
+            item.get("monitor_subfolder")
+            or item.get("subfolder")
+            or item.get("folder_name")
+            or ""
+        ).strip(),
+        metadata={
+            "author_id": str(item.get("author_id") or item.get("up_uid") or "").strip(),
+            "matched_keywords": normalize_string_list(item.get("matched_keywords")),
+            "matched_tags": normalize_string_list(item.get("matched_tags")),
+            "monitor_label": str(item.get("monitor_label") or "").strip(),
+            "crawl_source": str(item.get("crawl_source") or "").strip(),
+            "crawl_source_label": str(item.get("crawl_source_label") or "").strip(),
+        },
+    )
+    vault = _vault_root(vault_path)
+    base = vault / "bilibili"
+    return _note_path(base, note).relative_to(vault).as_posix()
 
 
 def write_notes_to_vault(
@@ -1662,6 +2377,7 @@ def write_notes_to_vault(
     vault = _vault_root(vault_path)
     base = vault / "bilibili"
     base.mkdir(parents=True, exist_ok=True)
+    output_dir = _resolve_output_dir(base, notes)
 
     written: list[str] = []
     favorite_written: list[str] = []
@@ -1676,7 +2392,12 @@ def write_notes_to_vault(
             content = _render_watch_later(note)
         else:
             content = f"# {note.title}\n\n{note.content}\n"
-        path.write_text(content, encoding="utf-8")
+        obsidian_path = path.relative_to(vault).as_posix()
+        write_unified_note(
+            path,
+            _build_bilibili_unified_entry(note, obsidian_path=obsidian_path),
+            content,
+        )
         written.append(str(path))
         if note.source_type == "favorite":
             favorite_written.append(str(path))
@@ -1730,7 +2451,7 @@ def write_notes_to_vault(
     return {
         "success": True,
         "vault_path": str(vault),
-        "output_dir": str(base),
+        "output_dir": str(output_dir),
         "written_count": len(written),
         "written_files": written,
         "renamed_favorite_count": rename_result["renamed_count"],
@@ -1776,8 +2497,19 @@ async def save_selected_dynamics_to_vault(
                 item_type=dynamic_type,
                 images=images,
                 tags=merge_tags(item.get("tags") or []),
+                folder_name=str(
+                    item.get("monitor_subfolder")
+                    or item.get("subfolder")
+                    or item.get("folder_name")
+                    or ""
+                ).strip(),
                 metadata={
                     "author_id": str(item.get("author_id") or ""),
+                    "matched_keywords": normalize_string_list(item.get("matched_keywords")),
+                    "matched_tags": normalize_string_list(item.get("matched_tags")),
+                    "monitor_label": str(item.get("monitor_label") or "").strip(),
+                    "crawl_source": str(item.get("crawl_source") or "").strip(),
+                    "crawl_source_label": str(item.get("crawl_source_label") or "").strip(),
                 },
             )
         )

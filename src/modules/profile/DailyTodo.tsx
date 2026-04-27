@@ -2,6 +2,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Plus, X, Check, Play } from "lucide-react";
 import { api } from "../../core/api";
+import { isActionEnterKey, isComposingKeyboardEvent } from "../../core/keyboard";
 
 interface Todo {
   id: string;
@@ -9,11 +10,17 @@ interface Todo {
   done: boolean;
   started_at?: number | null;   // unix seconds when started (in_progress)
   duration_ms?: number | null;  // total duration in ms once completed
+  source?: string;
+  priority?: string;
+  reason?: string;
+  evidence?: string[];
+  generated_at?: string;
 }
 
 interface Props {
   todos: Todo[];
   onChange: (todos: Todo[]) => void;
+  showHeader?: boolean;
 }
 
 // Default target duration: 25 min pomodoro
@@ -29,7 +36,13 @@ function formatDuration(ms: number): string {
   return `${s} 秒`;
 }
 
-export default function DailyTodo({ todos, onChange }: Props) {
+function getPriorityBadge(priority?: string) {
+  if (priority === "high") return { label: "高优先", color: "#D66B6B", bg: "rgba(214, 107, 107, 0.12)" };
+  if (priority === "low") return { label: "低优先", color: "#5D89C7", bg: "rgba(93, 137, 199, 0.12)" };
+  return { label: "中优先", color: "#A47A2A", bg: "rgba(245, 200, 140, 0.18)" };
+}
+
+export default function DailyTodo({ todos, onChange, showHeader = true }: Props) {
   const [newText, setNewText] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
@@ -120,12 +133,14 @@ export default function DailyTodo({ todos, onChange }: Props) {
 
   return (
     <div style={{ background: "var(--bg-card)", borderRadius: "var(--radius-lg)", padding: "16px", border: "1px solid var(--border-light)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
-        <h3 style={{ fontSize: "0.875rem", fontWeight: 500, color: "var(--text-main)" }}>今日待办</h3>
-        <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-          {done}/{todos.length} · 完成率 {pct}%
-        </span>
-      </div>
+      {showHeader && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }}>
+          <h3 style={{ fontSize: "0.875rem", fontWeight: 500, color: "var(--text-main)" }}>今日待办</h3>
+          <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+            {done}/{todos.length} · 完成率 {pct}%
+          </span>
+        </div>
+      )}
 
       {todos.length > 0 && (
         <div style={{ height: "4px", background: "var(--bg-hover)", borderRadius: "var(--radius-full)", overflow: "hidden", marginBottom: "12px" }}>
@@ -148,6 +163,11 @@ export default function DailyTodo({ todos, onChange }: Props) {
           const elapsedMs = inProgress ? Date.now() - (todo.started_at as number) * 1000 : todo.duration_ms ?? 0;
           const progressPct = inProgress ? Math.min(100, (elapsedMs / TARGET_MS) * 100) : 0;
           const over = inProgress && elapsedMs > TARGET_MS;
+          const priorityBadge = getPriorityBadge(todo.priority);
+          const metaItems = [
+            todo.source === "agent" ? "AI" : "",
+            todo.reason ?? "",
+          ].filter(Boolean);
 
           return (
             <div
@@ -232,7 +252,8 @@ export default function DailyTodo({ todos, onChange }: Props) {
                     onChange={(e) => setEditText(e.target.value)}
                     onBlur={commitEdit}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") commitEdit();
+                      if (isComposingKeyboardEvent(e)) return;
+                      if (isActionEnterKey(e)) commitEdit();
                       else if (e.key === "Escape") cancelEdit();
                     }}
                     style={{
@@ -247,21 +268,57 @@ export default function DailyTodo({ todos, onChange }: Props) {
                     }}
                   />
                 ) : (
-                  <span
-                    onDoubleClick={() => startEdit(todo)}
-                    title="双击修改"
-                    style={{
-                      flex: 1,
-                      fontSize: "0.875rem",
-                      color: todo.done ? "var(--text-muted)" : "var(--text-main)",
-                      textDecoration: todo.done ? "line-through" : "none",
-                      cursor: "text",
-                      userSelect: "none",
-                      fontWeight: inProgress ? 600 : 400,
-                    }}
-                  >
-                    {todo.text}
-                  </span>
+                  <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <span
+                      onDoubleClick={() => startEdit(todo)}
+                      title="双击修改"
+                      style={{
+                        fontSize: "0.875rem",
+                        color: todo.done ? "var(--text-muted)" : "var(--text-main)",
+                        textDecoration: todo.done ? "line-through" : "none",
+                        cursor: "text",
+                        userSelect: "none",
+                        fontWeight: inProgress ? 600 : 400,
+                        lineHeight: 1.55,
+                      }}
+                    >
+                      {todo.text}
+                    </span>
+                    {(todo.source === "agent" || todo.reason || todo.priority) && (
+                      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px" }}>
+                        {todo.priority && (
+                          <span
+                            style={{
+                              padding: "2px 7px",
+                              borderRadius: "999px",
+                              background: priorityBadge.bg,
+                              color: priorityBadge.color,
+                              fontSize: "0.625rem",
+                              fontWeight: 700,
+                            }}
+                          >
+                            {priorityBadge.label}
+                          </span>
+                        )}
+                        {metaItems.length > 0 && (
+                          <span
+                            style={{
+                              fontSize: "0.6875rem",
+                              color: "var(--text-light)",
+                              lineHeight: 1.5,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                              minWidth: 0,
+                            }}
+                            title={metaItems.join(" · ")}
+                          >
+                            {metaItems.join(" · ")}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 )}
                 {/* Status label */}
                 {inProgress && (
@@ -346,7 +403,12 @@ export default function DailyTodo({ todos, onChange }: Props) {
         <input
           value={newText}
           onChange={(e) => setNewText(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && addTodo()}
+          onKeyDown={(e) => {
+            if (isActionEnterKey(e)) {
+              e.preventDefault();
+              addTodo();
+            }
+          }}
           placeholder="添加今日任务..."
           style={{
             flex: 1,

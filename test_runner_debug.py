@@ -1,8 +1,11 @@
 import asyncio
 import sys
+import pytest
 sys.path.insert(0, '.')
 from abo.cli.runner import RawRunner, StreamEvent
 from abo.cli.detector import CliInfo
+
+pytestmark = pytest.mark.skip(reason="manual debug script, not part of automated pytest suite")
 
 events = []
 async def on_event(e):

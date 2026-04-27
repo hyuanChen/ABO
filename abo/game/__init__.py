@@ -132,6 +132,6 @@ def get_daily_stats() -> dict:
         "happiness": profile_store.get_happiness_today(),
         "san_7d_avg": profile_store.get_san_7d_avg(),
         "energy": profile_store.get_energy_today(),
-        "todos_completed": len([t for t in profile_store.get_todos_today() if t.get("done")]),
+        "todos_completed": len([t for t in profile_store.get_manual_todos_today() if t.get("done")]),
         "achievements": profile_store.get_achievements(),
     }

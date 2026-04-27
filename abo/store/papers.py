@@ -360,6 +360,41 @@ def _normalize_payload(payload: Mapping[str, Any], source_module: str | None = N
     }
 
 
+def _has_paper_tracking_metadata(metadata: Mapping[str, Any]) -> bool:
+    if _clean_str(metadata.get("paper_tracking_type")):
+        return True
+    if _clean_str(metadata.get("paper_tracking_role")):
+        return True
+    if _clean_str(metadata.get("paper_tracking_label")):
+        return True
+    if _clean_str(metadata.get("source_paper_title")):
+        return True
+    return bool(_normalize_string_list(metadata.get("paper_tracking_labels")))
+
+
+def _is_legacy_semantic_scholar_tracker_record(row: sqlite3.Row) -> bool:
+    source_module = _clean_str(row["source_module"])
+    source_modules = _normalize_string_list(_json_loads(row["source_modules"], []))
+    if source_module != "semantic-scholar-tracker" and "semantic-scholar-tracker" not in source_modules:
+        return False
+
+    metadata = _json_loads(row["metadata"], {})
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+
+    if _has_paper_tracking_metadata(metadata):
+        return False
+
+    literature_path = _clean_str(row["literature_path"])
+    paper_key = _clean_str(row["paper_key"])
+    s2_paper_id = _clean_str(row["s2_paper_id"])
+    return (
+        literature_path.startswith("FollowUps/Unknown/")
+        or paper_key.startswith("s2:")
+        or bool(s2_paper_id)
+    )
+
+
 class PaperStore:
     def __init__(self, db_path: Path = _DB_PATH):
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -439,6 +474,14 @@ class PaperStore:
             ).fetchone()
         return self._row_to_record(row) if row else None
 
+    def get_by_s2_paper_id(self, s2_paper_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM papers WHERE s2_paper_id=? ORDER BY updated_at DESC LIMIT 1",
+                (s2_paper_id,),
+            ).fetchone()
+        return self._row_to_record(row) if row else None
+
     def list(
         self,
         limit: int = 50,
@@ -460,7 +503,13 @@ class PaperStore:
         return [self._row_to_record(row) for row in rows]
 
     def existing_identifiers(self, source_module: str | None = None) -> set[str]:
-        sql = "SELECT paper_key, canonical_id, arxiv_id, s2_paper_id FROM papers WHERE 1=1"
+        sql = """
+            SELECT
+                paper_key, canonical_id, arxiv_id, s2_paper_id,
+                source_module, source_modules, literature_path, metadata
+            FROM papers
+            WHERE 1=1
+        """
         params: list[Any] = []
         if source_module:
             sql += " AND source_modules LIKE ?"
@@ -471,6 +520,8 @@ class PaperStore:
             rows = conn.execute(sql, params).fetchall()
 
         for row in rows:
+            if _is_legacy_semantic_scholar_tracker_record(row):
+                continue
             for key in ["paper_key", "canonical_id", "arxiv_id", "s2_paper_id"]:
                 value = _clean_str(row[key])
                 if value:

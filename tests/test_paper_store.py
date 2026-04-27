@@ -91,3 +91,72 @@ def test_paper_store_ignores_non_paper_cards(tmp_path):
 
     assert record is None
     assert store.list() == []
+
+
+def test_paper_store_get_by_s2_paper_id(tmp_path):
+    store = PaperStore(db_path=tmp_path / "papers.db")
+
+    store.upsert_from_payload(
+        {
+            "id": "s2_source-paper-id",
+            "title": "Source Paper",
+            "summary": "Source abstract",
+            "source_url": "https://www.semanticscholar.org/paper/source-paper-id",
+            "metadata": {
+                "abo-type": "semantic-scholar-paper",
+                "paper_id": "source-paper-id",
+                "authors": ["Alice Author"],
+                "year": 2025,
+            },
+        },
+        source_module="semantic-scholar-tracker",
+    )
+
+    record = store.get_by_s2_paper_id("source-paper-id")
+
+    assert record is not None
+    assert record["title"] == "Source Paper"
+
+
+def test_existing_identifiers_ignores_legacy_semantic_scholar_tracker_records(tmp_path):
+    store = PaperStore(db_path=tmp_path / "papers.db")
+
+    store.upsert_from_payload(
+        {
+            "id": "legacy-s2-paper",
+            "title": "Legacy Follow Up",
+            "source_url": "https://www.semanticscholar.org/paper/legacy-s2-paper",
+            "path": "FollowUps/Unknown/Legacy Follow Up/Legacy Follow Up.md",
+            "saved_to_literature": True,
+            "metadata": {
+                "abo-type": "semantic-scholar-paper",
+                "paper_id": "legacy-s2-paper",
+                "authors": ["Legacy Author"],
+            },
+        },
+        source_module="semantic-scholar-tracker",
+    )
+    store.upsert_from_payload(
+        {
+            "id": "current-s2-paper",
+            "title": "Current Follow Up",
+            "source_url": "https://www.semanticscholar.org/paper/current-s2-paper",
+            "metadata": {
+                "abo-type": "semantic-scholar-paper",
+                "paper_id": "current-s2-paper",
+                "authors": ["Current Author"],
+                "paper_tracking_type": "followup",
+                "paper_tracking_role": "followup",
+                "paper_tracking_label": "Source Paper",
+                "source_paper_title": "Source Paper",
+            },
+        },
+        source_module="semantic-scholar-tracker",
+    )
+
+    identifiers = store.existing_identifiers(source_module="semantic-scholar-tracker")
+
+    assert "s2:legacy-s2-paper" not in identifiers
+    assert "legacy-s2-paper" not in identifiers
+    assert "s2:current-s2-paper" in identifiers
+    assert "current-s2-paper" in identifiers

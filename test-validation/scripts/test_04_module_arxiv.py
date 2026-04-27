@@ -19,7 +19,7 @@ class TestArxivTrackerCreation:
 
         assert tracker.id == "arxiv-tracker"
         assert tracker.name == "arXiv 论文追踪"
-        assert tracker.schedule == "0 8 * * *"
+        assert tracker.schedule == "0 9 * * *"
         assert tracker.icon == "book-open"
 
     def test_tracker_output_includes_obsidian_and_ui(self):

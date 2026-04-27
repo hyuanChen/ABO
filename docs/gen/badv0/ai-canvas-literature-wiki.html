@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ABO · 文献检索与 Literature Wiki 工作流</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f7f5f0;
+      --paper: rgba(255, 252, 247, 0.9);
+      --ink: #28261f;
+      --muted: #6b675d;
+      --line: #dcd4c7;
+      --green-bg: #edf5e9;
+      --green-line: #c7dfbf;
+      --green-ink: #2f5d3c;
+      --lavender-bg: #f1edfb;
+      --lavender-line: #d5ccf3;
+      --lavender-ink: #4f3d86;
+      --amber-bg: #fcf4e9;
+      --amber-line: #efd8ba;
+      --amber-ink: #865a1f;
+      --slate-bg: #f1f1ef;
+      --slate-line: #ddd9d2;
+      --slate-ink: #464238;
+      --rose-bg: #faefec;
+      --rose-line: #efcdc7;
+      --rose-ink: #8b4b4a;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(to bottom, rgba(255,255,255,0.42), rgba(255,255,255,0.42)),
+        repeating-linear-gradient(
+          to right,
+          rgba(220, 212, 199, 0.18) 0,
+          rgba(220, 212, 199, 0.18) 1px,
+          transparent 1px,
+          transparent 96px
+        ),
+        repeating-linear-gradient(
+          to bottom,
+          rgba(220, 212, 199, 0.12) 0,
+          rgba(220, 212, 199, 0.12) 1px,
+          transparent 1px,
+          transparent 96px
+        ),
+        var(--bg);
+      color: var(--ink);
+      font-family: "Noto Sans SC", sans-serif;
+    }
+
+    .frame {
+      width: min(1280px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 32px 0 48px;
+    }
+
+    .hero {
+      background: var(--paper);
+      border: 1px solid rgba(220, 212, 199, 0.85);
+      border-radius: 28px;
+      padding: 28px 30px;
+      box-shadow: 0 18px 38px rgba(79, 61, 134, 0.08);
+      backdrop-filter: blur(10px);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--lavender-ink);
+      background: rgba(241, 237, 251, 0.9);
+      border: 1px solid rgba(213, 204, 243, 0.9);
+      text-transform: uppercase;
+      font-family: "Plus Jakarta Sans", sans-serif;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.35fr 0.95fr;
+      gap: 24px;
+      align-items: end;
+      margin-top: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(34px, 5vw, 62px);
+      line-height: 1.02;
+      font-weight: 800;
+      letter-spacing: 0;
+      font-family: "Plus Jakarta Sans", "Noto Sans SC", sans-serif;
+    }
+
+    .hero p {
+      margin: 14px 0 0;
+      font-size: 15px;
+      line-height: 1.8;
+      color: var(--muted);
+      max-width: 60ch;
+    }
+
+    .hero-side {
+      display: grid;
+      gap: 12px;
+    }
+
+    .signal {
+      border-radius: 18px;
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      background: #fffdfa;
+    }
+
+    .signal strong {
+      display: block;
+      font-size: 13px;
+      color: var(--ink);
+      margin-bottom: 4px;
+    }
+
+    .signal span {
+      display: block;
+      font-size: 13px;
+      line-height: 1.7;
+      color: var(--muted);
+    }
+
+    .section {
+      margin-top: 18px;
+      border-radius: 28px;
+      border: 1px solid rgba(220, 212, 199, 0.9);
+      background: rgba(255, 252, 247, 0.92);
+      padding: 24px;
+      box-shadow: 0 12px 28px rgba(40, 38, 31, 0.04);
+    }
+
+    .section-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 16px;
+    }
+
+    .section-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .section-label strong {
+      font-size: 16px;
+      color: var(--ink);
+    }
+
+    .section-note {
+      font-size: 12px;
+      color: var(--muted);
+      text-align: right;
+      max-width: 280px;
+      line-height: 1.6;
+    }
+
+    .grid-3, .grid-4, .grid-core, .grid-prompt {
+      display: grid;
+      gap: 14px;
+    }
+
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .grid-core { grid-template-columns: 0.95fr 1.1fr 1.05fr; }
+    .grid-prompt { grid-template-columns: 1fr 1fr; }
+
+    .card {
+      border-radius: 20px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      background: #fffdfa;
+      min-height: 100%;
+    }
+
+    .theme-green { background: var(--green-bg); border-color: var(--green-line); color: var(--green-ink); }
+    .theme-lavender { background: var(--lavender-bg); border-color: var(--lavender-line); color: var(--lavender-ink); }
+    .theme-amber { background: var(--amber-bg); border-color: var(--amber-line); color: var(--amber-ink); }
+    .theme-slate { background: var(--slate-bg); border-color: var(--slate-line); color: var(--slate-ink); }
+    .theme-rose { background: var(--rose-bg); border-color: var(--rose-line); color: var(--rose-ink); }
+
+    .card-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+      font-size: 18px;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    .card-sub {
+      font-size: 13px;
+      line-height: 1.7;
+      opacity: 0.9;
+    }
+
+    .list {
+      margin: 12px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 8px;
+    }
+
+    .list li {
+      position: relative;
+      padding-left: 16px;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .list li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 9px;
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: currentColor;
+      opacity: 0.45;
+    }
+
+    .arrow {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 30px;
+      color: #908879;
+      font-size: 18px;
+    }
+
+    .loop {
+      margin-top: 14px;
+      border-radius: 18px;
+      border: 1px dashed rgba(79, 61, 134, 0.35);
+      padding: 12px 16px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.7;
+      background: rgba(241, 237, 251, 0.45);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      justify-content: center;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(255,255,255,0.72);
+      border: 1px solid rgba(255,255,255,0.8);
+    }
+
+    .footer-note {
+      margin-top: 18px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.8;
+    }
+
+    @media (max-width: 980px) {
+      .hero-grid,
+      .grid-3,
+      .grid-4,
+      .grid-core,
+      .grid-prompt {
+        grid-template-columns: 1fr;
+      }
+
+      .section-top {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .section-note {
+        text-align: left;
+        max-width: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="frame">
+    <section class="hero">
+      <span class="eyebrow"><i class="fa-solid fa-book-open-reader"></i> ABO Canvas / 01</span>
+      <div class="hero-grid">
+        <div>
+          <h1>文献检索 →<br>Literature Wiki →<br>研究想法推进</h1>
+          <p>
+            从找论文，到入库、检索、编译 Wiki，再继续长出 gap、idea 和流程图。
+          </p>
+        </div>
+        <div class="hero-side">
+          <div class="signal">
+            <strong>核心一句话</strong>
+            <span>不是一次性搜索，而是持续生长的文献编译层。</span>
+          </div>
+          <div class="signal">
+            <strong>关键差异</strong>
+            <span>Raw 只读，LLM 主动写 wiki / gap / idea。</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>①</span>
+          <strong>论文发现层</strong>
+        </div>
+        <div class="section-note">统一论文入口。</div>
+      </div>
+      <div class="grid-3">
+        <article class="card theme-green">
+          <div class="card-title"><i class="fa-solid fa-satellite-dish"></i> arXiv 追踪</div>
+          <div class="card-sub">关键词 / 分类 / 新论文。</div>
+          <ul class="list">
+            <li>每日更新</li>
+            <li>偏好过滤</li>
+          </ul>
+        </article>
+        <article class="card theme-green">
+          <div class="card-title"><i class="fa-solid fa-diagram-project"></i> Semantic Scholar</div>
+          <div class="card-sub">TLDR / 引用 / follow-up。</div>
+          <ul class="list">
+            <li>追后续论文</li>
+            <li>补引用网络</li>
+          </ul>
+        </article>
+        <article class="card theme-amber">
+          <div class="card-title"><i class="fa-solid fa-link"></i> 种子扩展</div>
+          <div class="card-sub">DOI / PDF / Connected Papers。</div>
+          <ul class="list">
+            <li>手动导入</li>
+            <li>扩主题网络</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>②</span>
+          <strong>入库与标准化</strong>
+        </div>
+        <div class="section-note">标准化原料。</div>
+      </div>
+      <div class="grid-4">
+        <article class="card theme-amber">
+          <div class="card-title"><i class="fa-solid fa-file-arrow-down"></i> Metadata</div>
+          <div class="card-sub">作者 / 年份 / DOI 对齐。</div>
+        </article>
+        <article class="card theme-amber">
+          <div class="card-title"><i class="fa-solid fa-file-pdf"></i> Text Extract</div>
+          <div class="card-sub">PDF -> Markdown。</div>
+        </article>
+        <article class="card theme-slate">
+          <div class="card-title"><i class="fa-solid fa-folder-tree"></i> Literature/ Raw</div>
+          <div class="card-sub">只读沉淀，可追溯。</div>
+        </article>
+        <article class="card theme-slate">
+          <div class="card-title"><i class="fa-solid fa-database"></i> SQLite FTS5</div>
+          <div class="card-sub">全文检索。</div>
+        </article>
+      </div>
+    </section>
+
+    <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>③</span>
+          <strong>文献库工作台</strong>
+        </div>
+        <div class="section-note">用户可见层。</div>
+      </div>
+      <div class="grid-3">
+        <article class="card theme-slate">
+          <div class="card-title"><i class="fa-solid fa-magnifying-glass"></i> 搜索与筛选</div>
+          <ul class="list">
+            <li>标题 / 作者 / 全文</li>
+            <li>标签 / 时间过滤</li>
+          </ul>
+        </article>
+        <article class="card theme-lavender">
+          <div class="card-title"><i class="fa-solid fa-layer-group"></i> Digest Level</div>
+          <ul class="list">
+            <li>收录</li>
+            <li>扫读 / 精读</li>
+            <li>内化 / 融会</li>
+          </ul>
+        </article>
+        <article class="card theme-green">
+          <div class="card-title"><i class="fa-solid fa-up-right-from-square"></i> Obsidian 打开</div>
+          <ul class="list">
+            <li>打开 paper note</li>
+            <li>继续写反链 / Dataview</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>④</span>
+          <strong>LLM Literature Wiki 核心</strong>
+        </div>
+        <div class="section-note">编译一次，持续维护。</div>
+      </div>
+      <div class="grid-core">
+        <article class="card theme-slate">
+          <div class="card-title"><i class="fa-solid fa-box-archive"></i> 输入原料</div>
+          <ul class="list">
+            <li>papers</li>
+            <li>follow-up</li>
+            <li>旧 wiki</li>
+          </ul>
+        </article>
+        <article class="card theme-lavender">
+          <div class="card-title"><i class="fa-solid fa-wand-magic-sparkles"></i> 编译动作</div>
+          <ul class="list">
+            <li>写 paper / topic 页</li>
+            <li>补 wikilinks / sources</li>
+            <li>标记矛盾 / gap</li>
+          </ul>
+        </article>
+        <article class="card theme-lavender">
+          <div class="card-title"><i class="fa-solid fa-book-bookmark"></i> Wiki 产物</div>
+          <ul class="list">
+            <li>papers</li>
+            <li>topics</li>
+            <li>index / log / gaps</li>
+          </ul>
+        </article>
+      </div>
+      <div class="loop">
+        <i class="fa-solid fa-rotate-right"></i>
+        Lint: orphan pages / stale claims / missing links
+      </div>
+    </section>
+
+    <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>⑤</span>
+          <strong>Idea Propeller + 流程图补全</strong>
+        </div>
+        <div class="section-note">从阅读走到研究动作。</div>
+      </div>
+      <div class="grid-3">
+        <article class="card theme-rose">
+          <div class="card-title"><i class="fa-solid fa-triangle-exclamation"></i> Gap Detector</div>
+          <ul class="list">
+            <li>研究空白</li>
+            <li>冲突结论</li>
+          </ul>
+        </article>
+        <article class="card theme-green">
+          <div class="card-title"><i class="fa-solid fa-lightbulb"></i> Prop Idea</div>
+          <ul class="list">
+            <li>研究问题</li>
+            <li>下一步验证</li>
+          </ul>
+        </article>
+        <article class="card theme-amber">
+          <div class="card-title"><i class="fa-solid fa-bezier-curve"></i> Canvas Sync</div>
+          <ul class="list">
+            <li>补节点</li>
+            <li>补边</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>⑥</span>
+          <strong>建议 Prompt 输出结构</strong>
+        </div>
+        <div class="section-note">输入 / 输出约定。</div>
+      </div>
+      <div class="grid-prompt">
+        <article class="card theme-lavender">
+          <div class="card-title"><i class="fa-solid fa-arrow-right-to-bracket"></i> 输入</div>
+          <ul class="list">
+            <li>新增论文 + 旧 wiki</li>
+            <li>研究目标 + canvas</li>
+            <li>用户偏好</li>
+          </ul>
+          <div class="pill-row">
+            <span class="pill">papers</span>
+            <span class="pill">wiki pages</span>
+            <span class="pill">canvas nodes</span>
+            <span class="pill">research goal</span>
+          </div>
+        </article>
+        <article class="card theme-green">
+          <div class="card-title"><i class="fa-solid fa-arrow-right-from-bracket"></i> 输出</div>
+          <ul class="list">
+            <li>paper_summaries</li>
+            <li>topic_updates / gaps</li>
+            <li>prop_ideas / canvas_patch</li>
+          </ul>
+          <div class="pill-row">
+            <span class="pill">topic_updates</span>
+            <span class="pill">gaps</span>
+            <span class="pill">prop_ideas</span>
+            <span class="pill">canvas_patch</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <div class="footer-note">
+      <strong>ABO 把论文发现、检索、编译和 idea 推进，连成一张持续更新的 Literature Wiki。</strong>
+    </div>
+  </main>
+</body>
+</html>

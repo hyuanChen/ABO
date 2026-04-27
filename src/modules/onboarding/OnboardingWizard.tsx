@@ -19,6 +19,7 @@ interface OnboardingWizardProps {
 }
 
 const TOTAL_STEPS = 4;
+const clampStep = (step: number) => Math.min(Math.max(step, 0), TOTAL_STEPS - 1);
 
 export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
   const { setConfig, addToast } = useStore();
@@ -44,8 +45,8 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
       }
 
       // Resume from saved step if exists
-      if (config.onboarding_step !== undefined && config.onboarding_step > 0) {
-        setCurrentStep(config.onboarding_step);
+      if (config.onboarding_step !== undefined) {
+        setCurrentStep(clampStep(Number(config.onboarding_step) || 0));
       }
 
       if (config.vault_path) {
@@ -66,14 +67,20 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
   const saveOnboardingStep = async (step: number) => {
     try {
       await api.post("/api/config", {
-        onboarding_step: step,
+        onboarding_step: clampStep(step),
       });
     } catch (error) {
       console.error("Failed to save onboarding step:", error);
     }
   };
 
-  const completeOnboarding = async () => {
+  const goToStep = (step: number) => {
+    const nextStep = clampStep(step);
+    setCurrentStep(nextStep);
+    void saveOnboardingStep(nextStep);
+  };
+
+  const completeOnboarding = async (options?: { skipped?: boolean }) => {
     try {
       await api.post("/api/config", {
         onboarding_completed: true,
@@ -85,9 +92,9 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
       setConfig(config);
 
       addToast({
-        kind: "success",
-        title: "欢迎加入 ABO！",
-        message: "你的研究之旅即将开始",
+        kind: options?.skipped ? "info" : "success",
+        title: options?.skipped ? "已跳过新手向导" : "欢迎加入 ABO！",
+        message: options?.skipped ? "你可以随时在设置里重新打开。" : "你的研究之旅即将开始",
       });
 
       if (onComplete) {
@@ -104,19 +111,11 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
   };
 
   const handleNext = () => {
-    const nextStep = currentStep + 1;
-    if (nextStep < TOTAL_STEPS) {
-      setCurrentStep(nextStep);
-      saveOnboardingStep(nextStep);
-    }
+    goToStep(currentStep + 1);
   };
 
   const handleBack = () => {
-    const prevStep = currentStep - 1;
-    if (prevStep >= 0) {
-      setCurrentStep(prevStep);
-      saveOnboardingStep(prevStep);
-    }
+    goToStep(currentStep - 1);
   };
 
   const handleVaultPathSet = (vaultPath: string, _literaturePath?: string) => {
@@ -125,6 +124,10 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
 
   const handleComplete = () => {
     completeOnboarding();
+  };
+
+  const handleSkip = () => {
+    completeOnboarding({ skipped: true });
   };
 
   if (isLoading) {
@@ -208,10 +211,39 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
         currentStep={currentStep}
         totalSteps={TOTAL_STEPS}
         onStepClick={(step) => {
-          setCurrentStep(step);
-          saveOnboardingStep(step);
+          goToStep(step);
         }}
       />
+
+      <button
+        type="button"
+        onClick={handleSkip}
+        style={{
+          position: "absolute",
+          top: "18px",
+          right: "24px",
+          zIndex: 120,
+          padding: "9px 14px",
+          borderRadius: "999px",
+          border: "1px solid var(--border-light)",
+          background: "var(--bg-card)",
+          color: "var(--text-secondary)",
+          fontSize: "0.8125rem",
+          fontWeight: 800,
+          cursor: "pointer",
+          boxShadow: "var(--shadow-soft)",
+        }}
+        onMouseEnter={(event) => {
+          event.currentTarget.style.borderColor = "var(--color-primary)";
+          event.currentTarget.style.color = "var(--color-primary)";
+        }}
+        onMouseLeave={(event) => {
+          event.currentTarget.style.borderColor = "var(--border-light)";
+          event.currentTarget.style.color = "var(--text-secondary)";
+        }}
+      >
+        跳过向导
+      </button>
 
       {/* Step Content */}
       <div

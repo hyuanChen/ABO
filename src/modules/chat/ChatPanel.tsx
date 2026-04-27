@@ -21,6 +21,7 @@ export function ChatPanel() {
     closeConversation,
     messages,
     sendMessage,
+    stopGeneration,
     isConnected,
     isStreaming,
     error,
@@ -63,20 +64,8 @@ export function ChatPanel() {
       );
 
       if (conv) {
-        // 添加用户消息到本地显示
-        const userMsg: Message = {
-          id: `user-${Date.now()}`,
-          conversationId: conv.id,
-          role: 'user',
-          content: initialMessage,
-          contentType: 'text',
-          status: 'completed',
-          createdAt: Date.now(),
-        };
-        setLocalMessages([userMsg]);
-
         // 发送消息（此时 WebSocket 应该已连接）
-        await sendMessage(initialMessage);
+        await sendMessage(initialMessage, conv);
       }
     } catch (e) {
       console.error('Failed to start chat:', e);
@@ -92,18 +81,6 @@ export function ChatPanel() {
     const content = input;
     setInput('');
 
-    // 添加用户消息到本地
-    const userMsg: Message = {
-      id: `user-${Date.now()}`,
-      conversationId: activeConversation.id,
-      role: 'user',
-      content: content,
-      contentType: 'text',
-      status: 'completed',
-      createdAt: Date.now(),
-    };
-    setLocalMessages((prev) => [...prev, userMsg]);
-
     // 发送到后端
     await sendMessage(content);
   }, [input, activeConversation, sendMessage]);
@@ -116,7 +93,7 @@ export function ChatPanel() {
   // 关闭对话
   const handleCloseConversation = useCallback((e: React.MouseEvent, convId: string) => {
     e.stopPropagation();
-    closeConversation(convId);
+    void closeConversation(convId);
 
     // 如果关闭的是最后一个对话，返回主页
     if (conversations.length <= 1) {
@@ -257,6 +234,9 @@ export function ChatPanel() {
               input={input}
               onInputChange={setInput}
               onSend={handleSend}
+              onStop={() => {
+                void stopGeneration(activeConversation.id);
+              }}
               onBack={handleBack}
               onClear={handleClear}
             />

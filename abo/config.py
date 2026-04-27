@@ -3,10 +3,37 @@
 持久化到 ~/.abo-config.json（与旧版兼容）。
 """
 import json
+import re
 from pathlib import Path
 
 _CONFIG_PATH = Path.home() / ".abo-config.json"
 _ABO_DIR = Path.home() / ".abo"
+_DEFAULT_INTELLIGENCE_DELIVERY_TIME = "09:00"
+
+
+def _default_feed_preferences() -> dict:
+    return {
+        "hidden_module_ids": [
+            "xiaoyuzhou-tracker",
+            "zhihu-tracker",
+            "folder-monitor",
+        ],
+        "group_mode": "smart",
+        "show_recommendations": True,
+    }
+
+
+def normalize_daily_time(value: object, fallback: str = _DEFAULT_INTELLIGENCE_DELIVERY_TIME) -> str:
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if not match:
+        return fallback
+
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return fallback
+    return f"{hour:02d}:{minute:02d}"
 
 
 def load() -> dict:
@@ -15,14 +42,28 @@ def load() -> dict:
         "vault_path": "",
         "literature_path": "",
         "ai_provider": "codex",
+        "paper_ai_scoring_enabled": False,
+        "intelligence_delivery_enabled": True,
+        "intelligence_delivery_time": _DEFAULT_INTELLIGENCE_DELIVERY_TIME,
         "version": "1.0.0",
         "onboarding_completed": False,
         "onboarding_step": 0,
+        "feed_preferences": _default_feed_preferences(),
     }
     if _CONFIG_PATH.exists():
         try:
             saved = json.loads(_CONFIG_PATH.read_text())
-            return {**defaults, **saved}
+            merged = {**defaults, **saved}
+            if isinstance(saved.get("feed_preferences"), dict):
+                merged["feed_preferences"] = {
+                    **_default_feed_preferences(),
+                    **saved["feed_preferences"],
+                }
+            merged["intelligence_delivery_time"] = normalize_daily_time(
+                saved.get("intelligence_delivery_time"),
+                _DEFAULT_INTELLIGENCE_DELIVERY_TIME,
+            )
+            return merged
         except Exception:
             pass
     return defaults.copy()
@@ -35,6 +76,16 @@ def save(data: dict) -> None:
     existing = load()
     merged = {**existing}
     for k, v in data.items():
+        if k == "feed_preferences" and isinstance(v, dict):
+            merged[k] = {
+                **_default_feed_preferences(),
+                **(existing.get(k) or {}),
+                **v,
+            }
+            continue
+        if k == "intelligence_delivery_time":
+            merged[k] = normalize_daily_time(v, existing.get(k) or _DEFAULT_INTELLIGENCE_DELIVERY_TIME)
+            continue
         # Booleans are always written as-is (including False)
         if isinstance(v, bool):
             merged[k] = v
@@ -62,6 +113,11 @@ def get_ai_provider() -> str:
     if provider not in {"codex", "claude"}:
         return "codex"
     return provider
+
+
+def is_paper_ai_scoring_enabled() -> bool:
+    """Return whether paper crawl AI scoring is enabled."""
+    return bool(load().get("paper_ai_scoring_enabled", False))
 
 
 def get_abo_dir() -> Path:

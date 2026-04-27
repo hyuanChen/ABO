@@ -2,11 +2,12 @@
 ABO Backend — FastAPI 入口
 """
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 import os
 import re
+from typing import Any, Awaitable
 
 import frontmatter
 from fastapi import FastAPI, HTTPException, WebSocket
@@ -14,9 +15,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .activity import ActivityTracker, ActivityType
-from .config import get_vault_path, get_literature_path, load as load_config, save as save_config, is_demo_mode
+from .config import (
+    get_vault_path,
+    get_literature_path,
+    load as load_config,
+    normalize_daily_time,
+    save as save_config,
+    is_demo_mode,
+)
 from .demo.data import get_demo_cards, DEMO_UNREAD_COUNTS, DEMO_KEYWORD_PREFS, get_demo_activities, get_demo_modules_dashboard
+from .assistant.routes import router as assistant_router
+from .creator_smart_groups import build_shared_signal_entries, get_shared_creator_group_options
+from .health.routes import router as health_router
 from .insights.routes import router as insights_router
+from .journal_mobile import describe_mobile_journal_paths, cleanup_mobile_journal_exports, ensure_mobile_journal_structure
 from .wiki.routes import router as wiki_router
 from .preferences.engine import PreferenceEngine
 from .profile.routes import router as profile_router, init_routes as init_profile_routes
@@ -24,9 +36,12 @@ from .rss import rss_router
 from .routes.tools import router as tools_router
 from .modules.routes import router as modules_router
 from .paper_tracking import normalize_followup_monitors, normalize_keyword_monitors
+from .paper_paths import build_arxiv_grouped_relative_dir, sanitize_paper_title_for_path
+from .paper_cards import sanitize_feed_card_payload
 from .runtime.broadcaster import broadcaster
 from .runtime.discovery import ModuleRegistry, start_watcher
 from .runtime.runner import ModuleRunner
+from .vault.unified_entry import UnifiedVaultEntry
 from .runtime.scheduler import ModuleScheduler
 from .runtime.state import ModuleStateStore
 from .sdk.types import Card, FeedbackAction
@@ -34,6 +49,15 @@ from .store.cards import CardStore
 from .store.papers import PaperStore
 from .subscription_store import get_subscription_store
 from .summary import DailySummaryGenerator, SummaryScheduler
+from .vault.writer import ensure_vault_structure
+from .bilibili_tracker_config import (
+    BILIBILI_TRACKER_DEFAULT_DAYS_BACK,
+    BILIBILI_TRACKER_DEFAULT_LIMIT,
+    build_bilibili_legacy_fields,
+    normalize_bilibili_dynamic_monitors,
+    normalize_bilibili_followed_group_monitors,
+)
+from .xhs_tracker_config import build_xhs_legacy_fields, normalize_xhs_tracker_config
 
 # ── 全局单例 ────────────────────────────────────────────────────
 _registry = ModuleRegistry()
@@ -46,6 +70,42 @@ _activity_tracker: ActivityTracker | None = None
 _summary_generator: DailySummaryGenerator | None = None
 _summary_scheduler: SummaryScheduler | None = None
 _subscription_store = get_subscription_store()
+_DEFAULT_INTELLIGENCE_DELIVERY_TIME = "09:00"
+_SOCIAL_CRAWL_LEAD_MINUTES = 30
+_DEFAULT_PUSH_MODULE_IDS = (
+    "arxiv-tracker",
+    "semantic-scholar-tracker",
+    "xiaoyuzhou-tracker",
+    "zhihu-tracker",
+)
+_SOCIAL_EARLY_MODULE_IDS = (
+    "xiaohongshu-tracker",
+    "bilibili-tracker",
+)
+_DEBUG_FEED_FLOW_MODULE_GROUPS = {
+    "papers": (
+        "arxiv-tracker",
+        "semantic-scholar-tracker",
+    ),
+    "bilibili": (
+        "bilibili-tracker",
+    ),
+    "xiaohongshu": (
+        "xiaohongshu-tracker",
+    ),
+    "social": (
+        "xiaohongshu-tracker",
+        "bilibili-tracker",
+    ),
+}
+_DEBUG_FEED_FLOW_MODULE_GROUPS["all"] = (
+    *_DEBUG_FEED_FLOW_MODULE_GROUPS["papers"],
+    *_DEBUG_FEED_FLOW_MODULE_GROUPS["social"],
+)
+_INTELLIGENCE_DELIVERY_MODULE_IDS = (
+    *_DEFAULT_PUSH_MODULE_IDS,
+    *_SOCIAL_EARLY_MODULE_IDS,
+)
 
 
 def _validate_cron(expr: str) -> bool:
@@ -55,6 +115,65 @@ def _validate_cron(expr: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _shift_daily_time(time_text: str, delta_minutes: int) -> str:
+    normalized = normalize_daily_time(time_text, _DEFAULT_INTELLIGENCE_DELIVERY_TIME)
+    hour, minute = [int(part) for part in normalized.split(":")]
+    total_minutes = (hour * 60 + minute + delta_minutes) % (24 * 60)
+    return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
+def _daily_time_to_cron(time_text: str) -> str:
+    normalized = normalize_daily_time(time_text, _DEFAULT_INTELLIGENCE_DELIVERY_TIME)
+    hour, minute = [int(part) for part in normalized.split(":")]
+    return f"{minute} {hour} * * *"
+
+
+def _build_intelligence_schedule_map(push_time: str) -> dict[str, str]:
+    normalized_push_time = normalize_daily_time(push_time, _DEFAULT_INTELLIGENCE_DELIVERY_TIME)
+    social_crawl_time = _shift_daily_time(normalized_push_time, -_SOCIAL_CRAWL_LEAD_MINUTES)
+
+    schedule_map = {
+        module_id: _daily_time_to_cron(normalized_push_time)
+        for module_id in _DEFAULT_PUSH_MODULE_IDS
+    }
+    schedule_map.update({
+        module_id: _daily_time_to_cron(social_crawl_time)
+        for module_id in _SOCIAL_EARLY_MODULE_IDS
+    })
+    return schedule_map
+
+
+def _apply_intelligence_schedule_config(push_time: str, *, persist: bool = True) -> dict[str, str]:
+    schedule_map = _build_intelligence_schedule_map(push_time)
+    delivery_enabled = bool(load_config().get("intelligence_delivery_enabled", True))
+
+    for module_id, schedule in schedule_map.items():
+        module = _registry.get(module_id)
+        if module is None:
+            continue
+
+        if persist:
+            _state_store.update_module(module_id, schedule=schedule, registry=_registry)
+        else:
+            module.schedule = schedule
+
+        if _scheduler:
+            if delivery_enabled and module.enabled:
+                _scheduler.update_schedule(module)
+            else:
+                _scheduler.update_enabled(module, False)
+
+    return schedule_map
+
+
+def _set_intelligence_delivery_enabled(enabled: bool) -> None:
+    for module_id in _INTELLIGENCE_DELIVERY_MODULE_IDS:
+        module = _registry.get(module_id)
+        if module is None or _scheduler is None:
+            continue
+        _scheduler.update_enabled(module, enabled and module.enabled)
 
 
 def _extract_arxiv_id_from_paper_payload(paper: dict) -> str:
@@ -78,6 +197,478 @@ def _extract_arxiv_id_from_paper_payload(paper: dict) -> str:
             return match.group(1)
     return str(paper.get("id", "unknown"))
 
+
+def _normalize_saved_text_block(text: str) -> str:
+    cleaned = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+def _collect_saved_arxiv_ids(arxiv_root: Path) -> set[str]:
+    """Load saved arXiv IDs from grouped literature notes."""
+    existing_ids: set[str] = set()
+    if not arxiv_root.exists():
+        return existing_ids
+
+    for note_path in arxiv_root.glob("**/*.md"):
+        try:
+            post = frontmatter.loads(note_path.read_text(encoding="utf-8"))
+            paper = {
+                "metadata": post.metadata,
+                "source_url": post.metadata.get("arxiv-url", ""),
+            }
+            arxiv_id = _extract_arxiv_id_from_paper_payload(paper)
+            if arxiv_id and arxiv_id != "unknown":
+                existing_ids.add(arxiv_id)
+                continue
+        except Exception:
+            pass
+
+        match = re.search(r"([a-z\-]+/\d{7}|\d{4}\.\d{4,5})(?:v\d+)?", note_path.name, re.IGNORECASE)
+        if match:
+            existing_ids.add(match.group(1))
+
+    return existing_ids
+
+
+async def _prepare_paper_digest_payload(paper: dict, arxiv_id: str) -> dict[str, str]:
+    """Collect abstract/introduction text and assemble a stable digest block."""
+    from .tools.arxiv_api import ArxivAPITool, build_structured_digest_markdown
+
+    meta = paper.get("metadata", {}) or {}
+    abstract = _normalize_saved_text_block(meta.get("abstract") or paper.get("summary", ""))
+    introduction = _normalize_saved_text_block(meta.get("introduction", ""))
+
+    if arxiv_id and not introduction:
+        tool = ArxivAPITool()
+        introduction = _normalize_saved_text_block(await tool.fetch_introduction(arxiv_id))
+
+    return {
+        "abstract": abstract,
+        "introduction": introduction,
+        "formatted_digest": build_structured_digest_markdown(abstract, introduction),
+    }
+
+
+def _normalize_author_names(authors: list[Any] | None) -> list[str]:
+    names: list[str] = []
+    for author in authors or []:
+        if isinstance(author, dict):
+            name = str(author.get("name", "")).strip()
+        else:
+            name = str(author or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _get_effective_xhs_cookie(module_prefs: dict[str, Any]) -> str:
+    web_session = str(module_prefs.get("web_session") or "").strip()
+    id_token = str(module_prefs.get("id_token") or "").strip()
+    if web_session:
+        parts = [f"web_session={web_session}"]
+        if id_token:
+            parts.append(f"id_token={id_token}")
+        return "; ".join(parts)
+
+    cookie = str(module_prefs.get("cookie") or "").strip()
+    if cookie:
+        return cookie
+
+    return str(load_config().get("xiaohongshu_cookie") or "").strip()
+
+
+def _get_xhs_auth_source(module_prefs: dict[str, Any]) -> str | None:
+    if str(module_prefs.get("web_session") or "").strip() or str(module_prefs.get("cookie") or "").strip():
+        return "module"
+    if str(load_config().get("xiaohongshu_cookie") or "").strip():
+        return "global"
+    return None
+
+
+def _extract_bilibili_sessdata(raw_value: object) -> str:
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+
+    json_array_match = re.search(
+        r'"name"\s*:\s*"SESSDATA"\s*,\s*"value"\s*:\s*"([^"]+)"',
+        text,
+        re.IGNORECASE,
+    )
+    if json_array_match:
+        return json_array_match.group(1)
+
+    json_object_match = re.search(
+        r'"SESSDATA"\s*:\s*"([^"]+)"',
+        text,
+        re.IGNORECASE,
+    )
+    if json_object_match:
+        return json_object_match.group(1)
+
+    cookie_match = re.search(r"SESSDATA=([^;\s]+)", text, re.IGNORECASE)
+    if cookie_match:
+        return cookie_match.group(1)
+
+    if not any(char in text for char in [" ", "=", ";", "{", "["]):
+        return text
+
+    return ""
+
+
+def _get_effective_bilibili_sessdata(module_prefs: dict[str, Any]) -> str:
+    direct = _extract_bilibili_sessdata(module_prefs.get("sessdata"))
+    if direct:
+        return direct
+    return _extract_bilibili_sessdata(load_config().get("bilibili_cookie"))
+
+
+def _get_bilibili_auth_source(module_prefs: dict[str, Any]) -> str | None:
+    if _extract_bilibili_sessdata(module_prefs.get("sessdata")):
+        return "module"
+    if _extract_bilibili_sessdata(load_config().get("bilibili_cookie")):
+        return "global"
+    return None
+
+
+def _is_effective_bilibili_follow_feed_enabled(module_prefs: dict[str, Any]) -> bool:
+    raw_follow_feed = module_prefs.get("follow_feed")
+    if raw_follow_feed is None:
+        return True
+    return bool(raw_follow_feed)
+
+
+def _extract_followup_source_paper_payload(paper: dict, source_title: str) -> dict:
+    meta = paper.get("metadata", {}) or {}
+    source_meta = meta.get("source_paper", {}) or paper.get("source_paper", {}) or {}
+    normalized_title = str(source_meta.get("title") or source_title or "").strip()
+    authors = _normalize_author_names(source_meta.get("authors"))
+    paper_id = str(source_meta.get("paper_id") or source_meta.get("paperId") or "").strip()
+    arxiv_id = str(source_meta.get("arxiv_id") or source_meta.get("arxiv-id") or "").strip()
+    s2_url = str(source_meta.get("s2_url") or source_meta.get("url") or "").strip()
+    if not s2_url and paper_id:
+        s2_url = f"https://www.semanticscholar.org/paper/{paper_id}"
+    arxiv_url = str(source_meta.get("arxiv_url") or "").strip()
+    if not arxiv_url and arxiv_id:
+        arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
+    source_url = arxiv_url or s2_url
+
+    return {
+        "id": arxiv_id or paper_id or normalized_title or "unknown-source-paper",
+        "title": normalized_title or "Unknown",
+        "summary": source_meta.get("abstract", ""),
+        "score": 0,
+        "tags": ["source-paper"],
+        "source_url": source_url,
+        "metadata": {
+            "authors": authors,
+            "paper_id": paper_id,
+            "arxiv_id": arxiv_id,
+            "year": source_meta.get("year"),
+            "venue": source_meta.get("venue", ""),
+            "published": source_meta.get("published", ""),
+            "citation_count": source_meta.get("citation_count", 0),
+            "reference_count": source_meta.get("reference_count", 0),
+            "fields_of_study": source_meta.get("fields_of_study", []),
+            "abstract": source_meta.get("abstract", ""),
+            "introduction": source_meta.get("introduction", ""),
+            "s2_url": s2_url,
+            "arxiv_url": arxiv_url,
+            "pdf-url": f"https://arxiv.org/pdf/{arxiv_id}.pdf" if arxiv_id else "",
+            "html-url": f"https://arxiv.org/html/{arxiv_id}" if arxiv_id else "",
+        },
+    }
+
+
+def _extract_source_paper_payload_from_source_card(paper: dict) -> dict:
+    meta = paper.get("metadata", {}) or {}
+    title = str(paper.get("title") or meta.get("source_paper_title") or "").strip()
+    authors = _normalize_author_names(meta.get("authors"))
+    paper_id = str(meta.get("paper_id") or meta.get("paper-id") or "").strip()
+    arxiv_id = str(meta.get("arxiv_id") or meta.get("arxiv-id") or "").strip()
+    s2_url = str(meta.get("s2_url") or meta.get("s2-url") or "").strip()
+    if not s2_url and paper_id:
+        s2_url = f"https://www.semanticscholar.org/paper/{paper_id}"
+    arxiv_url = str(meta.get("arxiv_url") or meta.get("arxiv-url") or "").strip()
+    if not arxiv_url and arxiv_id:
+        arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
+    source_url = str(paper.get("source_url") or arxiv_url or s2_url).strip()
+    return {
+        "id": arxiv_id or paper_id or title or "unknown-source-paper",
+        "title": title or "Unknown",
+        "summary": meta.get("abstract") or paper.get("summary", ""),
+        "score": paper.get("score", 0),
+        "tags": paper.get("tags", ["source-paper"]),
+        "source_url": source_url,
+        "metadata": {
+            "authors": authors,
+            "paper_id": paper_id,
+            "arxiv_id": arxiv_id,
+            "year": meta.get("year"),
+            "venue": meta.get("venue", ""),
+            "published": meta.get("published", ""),
+            "citation_count": meta.get("citation_count", 0),
+            "reference_count": meta.get("reference_count", 0),
+            "fields_of_study": meta.get("fields_of_study", []),
+            "abstract": meta.get("abstract") or paper.get("summary", ""),
+            "introduction": meta.get("introduction", ""),
+            "s2_url": s2_url,
+            "arxiv_url": arxiv_url,
+            "pdf-url": f"https://arxiv.org/pdf/{arxiv_id}.pdf" if arxiv_id else "",
+            "html-url": f"https://arxiv.org/html/{arxiv_id}" if arxiv_id else "",
+        },
+    }
+
+
+def _resolve_source_paper_storage_paths(lit_path: Path, title: str) -> tuple[Path, Path, Path]:
+    folder_name = sanitize_paper_title_for_path(
+        title,
+        fallback="Unknown",
+        max_length=80,
+    )
+    note_name = sanitize_paper_title_for_path(
+        title,
+        fallback="Unknown",
+        max_length=120,
+    )
+    base_dir = lit_path / "FollowUps" / folder_name
+    note_path = base_dir / f"{note_name}.md"
+    pdf_full_path = base_dir / "paper.pdf"
+    return base_dir, note_path, pdf_full_path
+
+
+def _find_external_saved_source_paper(
+    *,
+    lit_path: Path,
+    target_path: Path,
+    source_payload: dict,
+) -> dict[str, str]:
+    meta = source_payload.get("metadata", {}) or {}
+    arxiv_id = str(meta.get("arxiv_id") or "").strip()
+    paper_id = str(meta.get("paper_id") or "").strip()
+
+    records: list[dict[str, Any] | None] = []
+    if arxiv_id and hasattr(_paper_store, "get_by_arxiv_id"):
+        records.append(_paper_store.get_by_arxiv_id(arxiv_id))
+    if paper_id and hasattr(_paper_store, "get_by_s2_paper_id"):
+        records.append(_paper_store.get_by_s2_paper_id(paper_id))
+
+    target_rel = str(target_path.relative_to(lit_path).as_posix())
+    for record in records:
+        if not record:
+            continue
+        literature_path = str(record.get("literature_path") or "").strip()
+        if not literature_path or not record.get("saved_to_literature"):
+            continue
+        if Path(literature_path).as_posix() == target_rel:
+            continue
+        result = {"path": literature_path}
+        metadata = record.get("metadata", {}) or {}
+        pdf_path = str(metadata.get("pdf_path") or "").strip()
+        if pdf_path:
+            result["pdf_path"] = pdf_path
+        return result
+
+    return {}
+
+
+def _find_existing_saved_source_paper(lit_path: Path, source_payload: dict) -> dict[str, str]:
+    title = str(source_payload.get("title") or "").strip()
+    if not title:
+        return {}
+
+    _, target_path, pdf_full_path = _resolve_source_paper_storage_paths(lit_path, title)
+    if target_path.exists():
+        result = {"path": str(target_path.relative_to(lit_path).as_posix())}
+        if pdf_full_path.exists():
+            result["pdf_path"] = "paper.pdf"
+        return result
+
+    return _find_external_saved_source_paper(
+        lit_path=lit_path,
+        target_path=target_path,
+        source_payload=source_payload,
+    )
+
+
+async def _ensure_source_paper_pdf(
+    *,
+    base_dir: Path,
+    arxiv_id: str,
+    save_pdf: bool,
+) -> str | None:
+    if not save_pdf or not arxiv_id:
+        return None
+
+    pdf_full_path = base_dir / "paper.pdf"
+    if pdf_full_path.exists():
+        return "paper.pdf"
+
+    try:
+        result = await download_arxiv_pdf(arxiv_id, pdf_full_path)
+        if result:
+            return "paper.pdf"
+    except Exception as e:
+        print(f"[source-paper] Failed to download PDF for {arxiv_id}: {e}")
+
+    return None
+
+
+def _update_note_pdf_metadata(note_path: Path, pdf_path: str | None) -> None:
+    if not pdf_path or not note_path.exists():
+        return
+
+    try:
+        post = frontmatter.loads(note_path.read_text(encoding="utf-8"))
+        if post.metadata.get("pdf-path") == pdf_path:
+            return
+        post.metadata["pdf-path"] = pdf_path
+        tmp = note_path.with_suffix(".tmp")
+        tmp.write_text(frontmatter.dumps(post), encoding="utf-8")
+        os.replace(tmp, note_path)
+    except Exception as e:
+        print(f"[source-paper] Failed to update PDF metadata for {note_path}: {e}")
+
+
+async def _ensure_source_paper_note_from_payload(
+    lit_path: Path,
+    base_dir: Path,
+    source_payload: dict,
+) -> dict[str, str]:
+    title = str(source_payload.get("title") or "").strip()
+    if not title or title == "Unknown":
+        return {}
+
+    lit_path = lit_path.resolve()
+    _, target_path, _ = _resolve_source_paper_storage_paths(lit_path, title)
+    meta = source_payload.get("metadata", {}) or {}
+    existing_saved = _find_existing_saved_source_paper(lit_path, source_payload)
+    if existing_saved and existing_saved.get("path") != str(target_path.relative_to(lit_path).as_posix()):
+        return existing_saved
+
+    arxiv_id = str(meta.get("arxiv_id") or "").strip()
+    pdf_path = await _ensure_source_paper_pdf(
+        base_dir=base_dir,
+        arxiv_id=arxiv_id,
+        save_pdf=bool(source_payload.get("save_pdf", True)),
+    )
+    if target_path.exists():
+        _update_note_pdf_metadata(target_path, pdf_path)
+        result = {
+            "path": str(target_path.relative_to(lit_path)),
+        }
+        if pdf_path:
+            result["pdf_path"] = pdf_path
+        return result
+
+    digest_payload = await _prepare_paper_digest_payload(source_payload, arxiv_id)
+    abstract_text = digest_payload["abstract"]
+    introduction_text = digest_payload["introduction"]
+    formatted_digest = digest_payload["formatted_digest"]
+
+    content_parts = [f"# {title}\n", "## 论文信息\n"]
+    authors = meta.get("authors", []) or []
+    if authors:
+        content_parts.append(
+            f"**作者**: {', '.join(authors[:5])}{' 等' if len(authors) > 5 else ''}\n"
+        )
+    if meta.get("year"):
+        content_parts.append(f"**年份**: {meta['year']}\n")
+    if meta.get("venue"):
+        content_parts.append(f"**期刊/会议**: {meta['venue']}\n")
+    if meta.get("citation_count"):
+        content_parts.append(f"**引用数**: {meta['citation_count']}\n")
+    if meta.get("reference_count"):
+        content_parts.append(f"**参考文献数**: {meta['reference_count']}\n")
+    if source_payload.get("source_url"):
+        content_parts.append(
+            f"**来源**: [{source_payload['source_url']}]({source_payload['source_url']})\n"
+        )
+
+    if abstract_text:
+        content_parts.append("\n## 原文摘要\n")
+        content_parts.append(f"{abstract_text}\n")
+
+    if introduction_text:
+        content_parts.append("\n## Introduction\n")
+        content_parts.append(f"{introduction_text}\n")
+
+    if pdf_path:
+        content_parts.append("\n## PDF\n")
+        content_parts.append(f"[下载PDF]({pdf_path})\n")
+
+    content_parts.append(f"\n{formatted_digest}\n")
+    content = "\n".join(content_parts)
+
+    post = frontmatter.Post(content)
+    post.metadata.update({
+        "abo-type": "semantic-scholar-source-paper",
+        "paper-tracking-role": "source",
+        "authors": meta.get("authors", []),
+        "paper-id": meta.get("paper_id", ""),
+        "arxiv-id": arxiv_id,
+        "s2-url": meta.get("s2_url", ""),
+        "arxiv-url": meta.get("arxiv_url", ""),
+        "year": meta.get("year"),
+        "venue": meta.get("venue", ""),
+        "citation-count": meta.get("citation_count", 0),
+        "reference-count": meta.get("reference_count", 0),
+        "fields-of-study": meta.get("fields_of_study", []),
+        "abstract": abstract_text,
+        "introduction": introduction_text,
+        "formatted-digest": formatted_digest,
+        "pdf-path": pdf_path,
+        "saved-at": datetime.now().isoformat(),
+    })
+
+    tmp = target_path.with_suffix(".tmp")
+    tmp.write_text(frontmatter.dumps(post), encoding="utf-8")
+    os.replace(tmp, target_path)
+    result = {
+        "path": str(target_path.relative_to(lit_path)),
+        "introduction": introduction_text,
+        "formatted_digest": formatted_digest,
+    }
+    if pdf_path:
+        result["pdf_path"] = pdf_path
+    return result
+
+
+async def _ensure_followup_source_paper_note(
+    lit_path: Path,
+    base_dir: Path,
+    source_title: str,
+    paper: dict,
+) -> dict[str, str]:
+    source_payload = _extract_followup_source_paper_payload(paper, source_title)
+    source_payload["save_pdf"] = True
+    return await _ensure_source_paper_note_from_payload(
+        lit_path=lit_path,
+        base_dir=base_dir,
+        source_payload=source_payload,
+    )
+
+
+async def _fetch_introduction_for_arxiv_id(arxiv_id: str, timeout: int = 30) -> str:
+    """Fetch introduction with a bounded timeout for live crawl enrichment."""
+    if not arxiv_id:
+        return ""
+
+    from .tools.arxiv_api import ArxivAPITool
+
+    try:
+        tool = ArxivAPITool()
+        return _normalize_saved_text_block(
+            await asyncio.wait_for(tool.fetch_introduction(arxiv_id), timeout=timeout)
+        )
+    except asyncio.TimeoutError:
+        print(f"[intro] Timeout fetching introduction for {arxiv_id}")
+        return ""
+    except Exception as e:
+        print(f"[intro] Failed to fetch introduction for {arxiv_id}: {e}")
+        return ""
+
 # ── 爬取任务取消控制 ────────────────────────────────────────────
 _crawl_cancel_flags: dict[str, bool] = {}  # session_id -> should_cancel
 
@@ -85,6 +676,15 @@ def _generate_crawl_session_id() -> str:
     """Generate a unique session ID for crawl operations."""
     import uuid
     return str(uuid.uuid4())[:8]
+
+
+class CrawlCancelledError(Exception):
+    """Raised when an in-flight crawl step is interrupted by a cancel signal."""
+
+
+def _register_crawl_session(session_id: str):
+    """Register a crawl session so the cancel endpoint can find it immediately."""
+    _crawl_cancel_flags[session_id] = False
 
 def _should_cancel_crawl(session_id: str) -> bool:
     """Check if a crawl session should be cancelled."""
@@ -97,6 +697,38 @@ def _cancel_crawl(session_id: str):
 def _cleanup_crawl_session(session_id: str):
     """Clean up a crawl session after completion."""
     _crawl_cancel_flags.pop(session_id, None)
+
+
+async def _await_with_crawl_cancel(
+    awaitable: Awaitable[Any],
+    session_id: str,
+    timeout: float | None = None,
+    poll_interval: float = 0.15,
+) -> Any:
+    """Await a long-running step while polling for crawl cancellation."""
+    task = asyncio.create_task(awaitable)
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+
+    while True:
+        if _should_cancel_crawl(session_id):
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            raise CrawlCancelledError(f"crawl session {session_id} cancelled")
+
+        remaining = None if timeout is None else timeout - (loop.time() - started_at)
+        if remaining is not None and remaining <= 0:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            raise asyncio.TimeoutError
+
+        wait_window = poll_interval if remaining is None else min(poll_interval, remaining)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=wait_window)
+        except asyncio.TimeoutError:
+            continue
 
 init_profile_routes(_card_store)
 
@@ -148,9 +780,11 @@ async def lifespan(app: FastAPI):
     vault_path = get_vault_path()
     _registry.load_all()
     _state_store.apply_to_registry(_registry)
+    _apply_intelligence_schedule_config(load_config().get("intelligence_delivery_time", _DEFAULT_INTELLIGENCE_DELIVERY_TIME))
     runner = ModuleRunner(_card_store, _prefs, broadcaster, vault_path, paper_store=_paper_store)
     _scheduler = ModuleScheduler(runner)
     _scheduler.start(_registry.enabled())
+    _set_intelligence_delivery_enabled(bool(load_config().get("intelligence_delivery_enabled", True)))
     start_watcher(_registry, lambda reg: _scheduler.reschedule(reg.enabled()))
     _write_sdk_readme()
     _activity_tracker = ActivityTracker()
@@ -173,9 +807,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(profile_router)
+app.include_router(health_router)
 app.include_router(rss_router)
 app.include_router(tools_router)
 app.include_router(modules_router)
+app.include_router(assistant_router)
 app.include_router(insights_router)
 app.include_router(wiki_router)
 
@@ -194,9 +830,9 @@ async def system_status():
     from .game import get_daily_stats
 
     # Get keyword stats
-    keyword_prefs = _prefs.get_all_keyword_prefs()
+    keyword_prefs = _prefs.get_all_keyword_prefs(positive_only=True)
     liked_keywords = [k for k, v in keyword_prefs.items() if v.score > 0]
-    disliked_keywords = [k for k, v in keyword_prefs.items() if v.score < -0.2]
+    disliked_keywords = _prefs.get_disliked_keywords()
 
     # Get module stats
     module_stats = {}
@@ -272,7 +908,7 @@ async def get_cards(
         module_id=module_id, unread_only=unread_only,
         limit=limit, offset=offset,
     )
-    return {"cards": [c.to_dict() for c in cards]}
+    return {"cards": [sanitize_feed_card_payload(c.to_dict()) for c in cards]}
 
 
 @app.get("/api/cards/unread-counts")
@@ -288,7 +924,7 @@ async def get_prioritized_cards(
     unread_only: bool = False,
 ):
     """Get cards sorted by combined AI score + user preference."""
-    keyword_prefs = _prefs.get_all_keyword_prefs()
+    keyword_prefs = _prefs.get_all_keyword_prefs(positive_only=True)
     keyword_scores = {k: v.score for k, v in keyword_prefs.items()}
 
     cards = _card_store.get_prioritized(
@@ -296,7 +932,25 @@ async def get_prioritized_cards(
         limit=limit,
         unread_only=unread_only,
     )
-    return {"cards": [c.to_dict() for c in cards]}
+    return {"cards": [sanitize_feed_card_payload(c.to_dict()) for c in cards]}
+
+
+@app.get("/api/crawl-records")
+async def get_crawl_records(
+    module_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    if is_demo_mode():
+        return {"records": [], "total": 0}
+
+    records = _card_store.list_crawl_records(
+        module_id=module_id,
+        limit=limit,
+        offset=offset,
+    )
+    total = _card_store.count_crawl_records(module_id=module_id)
+    return {"records": records, "total": total}
 
 
 @app.get("/api/papers")
@@ -327,17 +981,24 @@ class FeedbackReq(BaseModel):
     action: FeedbackAction
 
 
-@app.post("/api/cards/{card_id}/feedback")
-async def feedback(card_id: str, body: FeedbackReq):
-    card = _card_store.get(card_id)
-    if not card:
-        raise HTTPException(404, "Card not found")
+class BatchFeedbackReq(BaseModel):
+    card_ids: list[str]
+    action: FeedbackAction
 
+
+def _has_nonzero_rewards(rewards: dict[str, Any]) -> bool:
+    for value in rewards.values():
+        if isinstance(value, (int, float)) and value != 0:
+            return True
+    return False
+
+
+async def _apply_card_feedback(card: Card, action: FeedbackAction) -> tuple[dict[str, Any], list[str]]:
     # Update derived weights (legacy)
-    _prefs.record_feedback(card.tags, body.action.value)
+    _prefs.record_feedback(card.tags, action.value)
 
     # Update keyword preferences (Phase 2)
-    _prefs.update_from_feedback(card.tags, body.action.value, card.module_id)
+    _prefs.update_from_feedback(card.tags, action.value, card.module_id)
 
     # Apply game rewards (Phase 3)
     from .game import apply_action
@@ -348,28 +1009,29 @@ async def feedback(card_id: str, body: FeedbackReq):
         "skip": "card_skip",
         "star": "star_paper",
     }
-    game_action = action_map.get(body.action.value, "card_skip")
-    rewards = apply_action("default", game_action, {"card_id": card_id, "module": card.module_id})
+    game_action = action_map.get(action.value, "card_skip")
+    rewards = apply_action("default", game_action, {"card_id": card.id, "module": card.module_id})
+    reward_payload = rewards.get("rewards", {})
 
     # Broadcast reward notification (Phase 4)
-    if rewards.get("rewards"):
+    if isinstance(reward_payload, dict) and _has_nonzero_rewards(reward_payload):
         await broadcaster.send_reward(
             action=game_action,
-            rewards=rewards["rewards"],
-            metadata={"card_id": card_id, "card_title": card.title}
+            rewards=reward_payload,
+            metadata={"card_id": card.id, "card_title": card.title}
         )
 
     # Record in card store
-    _card_store.record_feedback(card_id, body.action.value)
+    affected_card_ids = _card_store.record_feedback(card.id, action.value)
 
     # Save liked items to markdown
-    if body.action.value == "like":
+    if action.value == "like":
         card_dict = card.to_dict()
         _prefs.save_liked_to_markdown(card_dict)
 
     module = _registry.get(card.module_id)
     if module:
-        await module.on_feedback(card_id, body.action)
+        await module.on_feedback(card.id, action)
 
     # Record activity for timeline generation
     global _activity_tracker
@@ -381,256 +1043,270 @@ async def feedback(card_id: str, body: FeedbackReq):
             "skip": ActivityType.CARD_VIEW,
             "star": ActivityType.CARD_SAVE,
         }
-        activity_type = action_map_activity.get(body.action.value, ActivityType.CARD_VIEW)
+        activity_type = action_map_activity.get(action.value, ActivityType.CARD_VIEW)
         _activity_tracker.record_activity(
             activity_type=activity_type,
-            card_id=card_id,
+            card_id=card.id,
             card_title=card.title,
             module_id=card.module_id,
-            metadata={"action": body.action.value, "tags": card.tags}
+            metadata={"action": action.value, "tags": card.tags}
         )
 
-    return {"ok": True, "rewards": rewards.get("rewards", {})}
+    return (
+        reward_payload if isinstance(reward_payload, dict) else {},
+        affected_card_ids or [card.id],
+    )
 
 
-# ── Debug / Demo ────────────────────────────────────────────────
+@app.post("/api/cards/{card_id}/feedback")
+async def feedback(card_id: str, body: FeedbackReq):
+    card = _card_store.get(card_id)
+    if not card:
+        raise HTTPException(404, "Card not found")
 
-_DEMO_CARDS = [
-    # ── arxiv-tracker (10) ───────────────────────────────────────
-    {"module_id": "arxiv-tracker", "title": "Attention Is All You Need: Revisited for 2026", "summary": "Transformer 架构的最新改进综述，涵盖稀疏注意力、线性注意力和混合专家模型的最新进展。", "tags": ["Transformer", "NLP", "深度学习"], "score": 0.92, "url": "https://arxiv.org/abs/2606.00001"},
-    {"module_id": "arxiv-tracker", "title": "Scaling Laws for Neural Language Models: New Frontiers", "summary": "探讨大语言模型规模化定律在多模态和长上下文场景下的扩展，提出新的效率预测框架。", "tags": ["LLM", "Scaling Laws", "效率"], "score": 0.88, "url": "https://arxiv.org/abs/2606.00002"},
-    {"module_id": "arxiv-tracker", "title": "Diffusion Models Meet Reinforcement Learning", "summary": "将扩散模型与强化学习结合，在连续控制任务上实现了新的 SOTA 表现。", "tags": ["扩散模型", "强化学习", "控制"], "score": 0.85, "url": "https://arxiv.org/abs/2606.00003"},
-    {"module_id": "arxiv-tracker", "title": "Constitutional AI: Harmlessness from AI Feedback", "summary": "提出通过 AI 自我批评和修正来实现对齐的新方法，减少人类反馈的依赖。", "tags": ["AI对齐", "RLHF", "安全"], "score": 0.86, "url": "https://arxiv.org/abs/2606.00004"},
-    {"module_id": "arxiv-tracker", "title": "Efficient Fine-Tuning of LLMs with LoRA and Beyond", "summary": "对比 LoRA、QLoRA、AdaLoRA 等参数高效微调方法，提出统一的理论分析框架。", "tags": ["微调", "LoRA", "LLM"], "score": 0.89, "url": "https://arxiv.org/abs/2606.00005"},
-    {"module_id": "arxiv-tracker", "title": "Neural Radiance Fields for Autonomous Driving", "summary": "NeRF 在自动驾驶场景重建中的最新应用，实现厘米级精度的三维环境感知。", "tags": ["NeRF", "自动驾驶", "三维重建"], "score": 0.79, "url": "https://arxiv.org/abs/2606.00006"},
-    {"module_id": "arxiv-tracker", "title": "Protein Language Models: From Sequences to Functions", "summary": "蛋白质语言模型综述，探讨序列-结构-功能预测的端到端方法。", "tags": ["蛋白质", "生物信息", "预训练"], "score": 0.83, "url": "https://arxiv.org/abs/2606.00007"},
-    {"module_id": "arxiv-tracker", "title": "State Space Models vs Transformers: A Comprehensive Benchmark", "summary": "Mamba 及其变体与 Transformer 在 12 个 NLP 基准上的系统对比，揭示各自的优势场景。", "tags": ["SSM", "Mamba", "基准测试"], "score": 0.91, "url": "https://arxiv.org/abs/2606.00008"},
-    {"module_id": "arxiv-tracker", "title": "Federated Learning at Scale: Lessons from Production", "summary": "Google 联邦学习生产系统经验总结，涵盖隐私、通信效率和模型聚合策略。", "tags": ["联邦学习", "隐私计算", "分布式"], "score": 0.77, "url": "https://arxiv.org/abs/2606.00009"},
-    {"module_id": "arxiv-tracker", "title": "Code Generation with Large Language Models: A Survey", "summary": "LLM 代码生成能力的全面综述，从 Copilot 到自主 Agent 编程。", "tags": ["代码生成", "LLM", "Agent"], "score": 0.87, "url": "https://arxiv.org/abs/2606.00010"},
-    # ── semantic-scholar-tracker (8) ─────────────────────────────
-    {"module_id": "semantic-scholar-tracker", "title": "A Survey on Retrieval-Augmented Generation", "summary": "RAG 技术全面综述：从基础检索增强到自适应检索、多跳推理和知识图谱集成。", "tags": ["RAG", "信息检索", "知识库"], "score": 0.90, "url": "https://www.semanticscholar.org/paper/1"},
-    {"module_id": "semantic-scholar-tracker", "title": "Graph Neural Networks for Scientific Discovery", "summary": "图神经网络在药物发现、材料科学和蛋白质结构预测中的最新应用进展。", "tags": ["GNN", "科学发现", "药物设计"], "score": 0.82, "url": "https://www.semanticscholar.org/paper/2"},
-    {"module_id": "semantic-scholar-tracker", "title": "Multimodal Learning with Transformers: A Survey", "summary": "多模态 Transformer 学习的系统性综述，涵盖视觉-语言、音频-视觉等跨模态融合策略。", "tags": ["多模态", "Transformer", "跨模态"], "score": 0.84, "url": "https://www.semanticscholar.org/paper/3"},
-    {"module_id": "semantic-scholar-tracker", "title": "Knowledge Distillation in Large Language Models", "summary": "大语言模型知识蒸馏的最新方法，包括黑盒蒸馏、任务特定蒸馏和渐进式蒸馏策略。", "tags": ["知识蒸馏", "模型压缩", "LLM"], "score": 0.83, "url": "https://www.semanticscholar.org/paper/4"},
-    {"module_id": "semantic-scholar-tracker", "title": "Causal Inference Meets Machine Learning: A Practical Guide", "summary": "因果推断与机器学习结合的实用指南，涵盖反事实推理、工具变量和双重差分法的现代实现。", "tags": ["因果推断", "因果发现", "统计学"], "score": 0.81, "url": "https://www.semanticscholar.org/paper/5"},
-    {"module_id": "semantic-scholar-tracker", "title": "Robotics Foundation Models: Bridging Simulation and Reality", "summary": "机器人基础模型综述，探讨 Sim2Real 迁移、视觉-语言-动作模型和通用操作策略。", "tags": ["机器人", "基础模型", "Sim2Real"], "score": 0.78, "url": "https://www.semanticscholar.org/paper/6"},
-    {"module_id": "semantic-scholar-tracker", "title": "Time Series Forecasting with Foundation Models", "summary": "时间序列基础模型的前沿进展，对比 TimeGPT、Lag-Llama 和 Chronos 的预测性能。", "tags": ["时间序列", "预测", "基础模型"], "score": 0.80, "url": "https://www.semanticscholar.org/paper/7"},
-    {"module_id": "semantic-scholar-tracker", "title": "Synthetic Data Generation for Privacy-Preserving ML", "summary": "合成数据生成方法综述：GAN、扩散模型和 LLM 在构建隐私安全训练集中的应用。", "tags": ["合成数据", "隐私", "数据增强"], "score": 0.76, "url": "https://www.semanticscholar.org/paper/8"},
-    # ── xiaohongshu-tracker (8) ──────────────────────────────────
-    {"module_id": "xiaohongshu-tracker", "title": "读博第三年的时间管理心得", "summary": "分享 Pomodoro + 时间块法结合的实践经验，以及如何平衡科研、写作和生活。", "tags": ["读博", "时间管理", "科研生活"], "score": 0.75, "url": "https://www.xiaohongshu.com/explore/demo1"},
-    {"module_id": "xiaohongshu-tracker", "title": "用 Obsidian 搭建个人知识库的完整流程", "summary": "从零开始搭建 Zettelkasten 笔记系统，包括插件推荐、模板设计和工作流自动化。", "tags": ["Obsidian", "知识管理", "Zettelkasten"], "score": 0.78, "url": "https://www.xiaohongshu.com/explore/demo2"},
-    {"module_id": "xiaohongshu-tracker", "title": "科研人的 iPad 笔记术", "summary": "使用 GoodNotes + Zotero 的论文阅读工作流，提升文献管理效率。", "tags": ["论文阅读", "iPad", "工具"], "score": 0.72, "url": "https://www.xiaohongshu.com/explore/demo3"},
-    {"module_id": "xiaohongshu-tracker", "title": "一个人的留学生活 | 如何对抗学术孤独感", "summary": "分享在海外读博期间维持心理健康的方法：建立学术社群、定期运动和正念冥想。", "tags": ["留学", "心理健康", "读博"], "score": 0.68, "url": "https://www.xiaohongshu.com/explore/demo4"},
-    {"module_id": "xiaohongshu-tracker", "title": "SCI 论文写作模板分享 | Introduction 万能框架", "summary": "总结 50 篇顶刊论文的 Introduction 结构，提炼出四段式万能写作框架。", "tags": ["论文写作", "SCI", "学术"], "score": 0.80, "url": "https://www.xiaohongshu.com/explore/demo5"},
-    {"module_id": "xiaohongshu-tracker", "title": "实验室咖啡角 DIY | 低成本提升幸福感", "summary": "花 200 元在实验室搭建一个温馨咖啡角，附购物清单和布置思路。", "tags": ["生活", "DIY", "实验室"], "score": 0.55, "url": "https://www.xiaohongshu.com/explore/demo6"},
-    {"module_id": "xiaohongshu-tracker", "title": "Nature 子刊拒稿后怎么改？亲身经历分享", "summary": "记录一篇从 Nature Communications 拒稿到接收的全过程，包含审稿意见回复策略。", "tags": ["Nature", "投稿", "审稿"], "score": 0.82, "url": "https://www.xiaohongshu.com/explore/demo7"},
-    {"module_id": "xiaohongshu-tracker", "title": "研究生必备 Mac 软件清单 (2026 版)", "summary": "精选 20 个提升科研效率的 Mac 应用：文献管理、写作、数据分析、作图工具一网打尽。", "tags": ["Mac", "软件推荐", "效率"], "score": 0.74, "url": "https://www.xiaohongshu.com/explore/demo8"},
-    # ── bilibili-tracker (8) ─────────────────────────────────────
-    {"module_id": "bilibili-tracker", "title": "3Blue1Brown: 线性代数的本质 (2026 更新版)", "summary": "经典数学可视化系列更新，新增张量分解和高维几何的直觉解释。", "tags": ["数学", "可视化", "线性代数"], "score": 0.87, "url": "https://www.bilibili.com/video/BV1demo1"},
-    {"module_id": "bilibili-tracker", "title": "从零实现一个 Mini-GPT", "summary": "手把手教学视频，用 PyTorch 从头实现一个小型 GPT 模型，深入理解 Transformer 内部机制。", "tags": ["GPT", "PyTorch", "教程"], "score": 0.83, "url": "https://www.bilibili.com/video/BV1demo2"},
-    {"module_id": "bilibili-tracker", "title": "计算机视觉前沿 2026: 从 ViT 到 DINO v3", "summary": "梳理自监督视觉模型的演进路线，对比最新的视觉基础模型架构。", "tags": ["计算机视觉", "ViT", "自监督"], "score": 0.81, "url": "https://www.bilibili.com/video/BV1demo3"},
-    {"module_id": "bilibili-tracker", "title": "强化学习入门到实践 | DQN → PPO → SAC 全讲解", "summary": "8 小时系统课程，从马尔可夫决策过程到前沿 RL 算法，配套代码和环境。", "tags": ["强化学习", "DQN", "PPO"], "score": 0.79, "url": "https://www.bilibili.com/video/BV1demo4"},
-    {"module_id": "bilibili-tracker", "title": "李沐带你读论文: DALL-E 3 技术报告深度解析", "summary": "逐页解读 DALL-E 3 技术报告，分析文本到图像生成的最新突破和训练技巧。", "tags": ["DALL-E", "文生图", "论文解读"], "score": 0.85, "url": "https://www.bilibili.com/video/BV1demo5"},
-    {"module_id": "bilibili-tracker", "title": "数据科学家的一天 | 互联网大厂 vlog", "summary": "记录在字节跳动做推荐算法的日常：晨会、数据分析、模型调参和团队协作。", "tags": ["数据科学", "职场", "vlog"], "score": 0.62, "url": "https://www.bilibili.com/video/BV1demo6"},
-    {"module_id": "bilibili-tracker", "title": "LaTeX 论文排版从入门到精通", "summary": "从零学习 LaTeX：环境配置、常用命令、公式排版、参考文献管理和模板自定义。", "tags": ["LaTeX", "排版", "教程"], "score": 0.73, "url": "https://www.bilibili.com/video/BV1demo7"},
-    {"module_id": "bilibili-tracker", "title": "MIT 6.S191 深度学习导论 2026 (中英双语字幕)", "summary": "MIT 最新深度学习公开课完整搬运，涵盖基础网络、生成模型、RL 和前沿应用。", "tags": ["MIT", "公开课", "深度学习"], "score": 0.88, "url": "https://www.bilibili.com/video/BV1demo8"},
-    # ── zhihu-tracker (8) ────────────────────────────────────────
-    {"module_id": "zhihu-tracker", "title": "如何评价 2026 年 AI 领域的最新进展？", "summary": "知乎高赞回答汇总：多模态大模型、具身智能和 AI Agent 三大方向的突破性进展。", "tags": ["AI", "多模态", "Agent"], "score": 0.80, "url": "https://www.zhihu.com/question/demo1"},
-    {"module_id": "zhihu-tracker", "title": "博士毕业后进入工业界还是学术界？", "summary": "来自不同背景的研究者分享职业选择的考量因素和真实体验。", "tags": ["职业规划", "博士", "学术界"], "score": 0.70, "url": "https://www.zhihu.com/question/demo2"},
-    {"module_id": "zhihu-tracker", "title": "有哪些值得关注的 AI 开源项目？", "summary": "盘点 2026 年最具影响力的 AI 开源项目，涵盖训练框架、推理引擎和应用工具。", "tags": ["开源", "AI工具", "推荐"], "score": 0.76, "url": "https://www.zhihu.com/question/demo3"},
-    {"module_id": "zhihu-tracker", "title": "为什么说 Rust 是系统编程的未来？", "summary": "从内存安全、并发模型和生态系统三个角度深度分析 Rust 语言的核心优势。", "tags": ["Rust", "系统编程", "编程语言"], "score": 0.72, "url": "https://www.zhihu.com/question/demo4"},
-    {"module_id": "zhihu-tracker", "title": "如何从零开始学习机器学习？", "summary": "系统化学习路径推荐：数学基础 → 经典算法 → 深度学习 → 项目实践，附资源链接。", "tags": ["机器学习", "学习路径", "入门"], "score": 0.74, "url": "https://www.zhihu.com/question/demo5"},
-    {"module_id": "zhihu-tracker", "title": "大语言模型的涌现能力是否真实存在？", "summary": "围绕 LLM 涌现能力的学术争论梳理，是度量标准的假象还是真正的相变？", "tags": ["LLM", "涌现", "AI理论"], "score": 0.85, "url": "https://www.zhihu.com/question/demo6"},
-    {"module_id": "zhihu-tracker", "title": "读研期间发表论文最重要的经验是什么？", "summary": "数十位学者的论文写作心得：选题比方法重要，写作比实验重要，展示比内容重要。", "tags": ["论文发表", "研究生", "经验"], "score": 0.71, "url": "https://www.zhihu.com/question/demo7"},
-    {"module_id": "zhihu-tracker", "title": "2026 年，普通程序员如何拥抱 AI 转型？", "summary": "讨论传统开发者如何利用 AI 工具提升效率，以及 AI 时代的核心竞争力。", "tags": ["AI转型", "程序员", "职业发展"], "score": 0.69, "url": "https://www.zhihu.com/question/demo8"},
-    # ── xiaoyuzhou-tracker (6) ───────────────────────────────────
-    {"module_id": "xiaoyuzhou-tracker", "title": "硬地骗局 EP.128: AI 创业的第二波浪潮", "summary": "讨论 AI 应用层创业的新机会，以及开发者如何找到 PMF。", "tags": ["AI创业", "播客", "产品"], "score": 0.73, "url": "https://www.xiaoyuzhoufm.com/episode/demo1"},
-    {"module_id": "xiaoyuzhou-tracker", "title": "科技乱炖: 聊聊 Agent 时代的开发者工具", "summary": "探讨 AI Agent 对软件开发工作流的影响，以及新一代开发工具的形态。", "tags": ["Agent", "开发工具", "播客"], "score": 0.74, "url": "https://www.xiaoyuzhoufm.com/episode/demo2"},
-    {"module_id": "xiaoyuzhou-tracker", "title": "声东击西: 学术圈的开放获取运动", "summary": "讨论 Open Access 对学术出版的颠覆，以及 Plan S、预印本和数据共享的最新动态。", "tags": ["开放获取", "学术出版", "播客"], "score": 0.70, "url": "https://www.xiaoyuzhoufm.com/episode/demo3"},
-    {"module_id": "xiaoyuzhou-tracker", "title": "不合时宜: 当 AI 遇上哲学——意识与智能的边界", "summary": "从哲学角度审视 AI 是否可能拥有意识，中文房间论证在 LLM 时代的新解读。", "tags": ["AI哲学", "意识", "思辨"], "score": 0.67, "url": "https://www.xiaoyuzhoufm.com/episode/demo4"},
-    {"module_id": "xiaoyuzhou-tracker", "title": "知行小酒馆: 研究生的理财入门", "summary": "适合学生党的理财策略：从余额宝到指数基金定投，低风险积累第一桶金。", "tags": ["理财", "研究生", "生活"], "score": 0.58, "url": "https://www.xiaoyuzhoufm.com/episode/demo5"},
-    {"module_id": "xiaoyuzhou-tracker", "title": "来都来了: 对话斯坦福 AI Lab 博士后——我的科研之路", "summary": "分享从国内本科到斯坦福博后的成长经历，讨论科研选题和导师关系。", "tags": ["科研经历", "斯坦福", "博后"], "score": 0.76, "url": "https://www.xiaoyuzhoufm.com/episode/demo6"},
-    # ── folder-monitor (4) ───────────────────────────────────────
-    {"module_id": "folder-monitor", "title": "新文件: experiment_results_v3.csv", "summary": "检测到实验数据目录新增文件，包含 2048 行实验记录，文件大小 1.2MB。", "tags": ["文件监控", "实验数据", "CSV"], "score": 0.60, "url": ""},
-    {"module_id": "folder-monitor", "title": "文献更新: attention_survey_2026.pdf", "summary": "Zotero 同步目录检测到新 PDF 文献，已自动提取元数据和摘要。", "tags": ["文件监控", "PDF", "文献"], "score": 0.65, "url": ""},
-    {"module_id": "folder-monitor", "title": "笔记变更: research-journal-april.md", "summary": "Obsidian Vault 中的研究日志文件被修改，新增 350 字关于模型调参的笔记。", "tags": ["文件监控", "笔记", "Obsidian"], "score": 0.50, "url": ""},
-    {"module_id": "folder-monitor", "title": "代码更新: model/transformer.py", "summary": "项目代码目录检测到模型文件更新，变更了 MultiHeadAttention 的实现。", "tags": ["文件监控", "代码", "模型"], "score": 0.55, "url": ""},
-]
+    rewards, affected_card_ids = await _apply_card_feedback(card, body.action)
+    return {"ok": True, "rewards": rewards, "affected_card_ids": affected_card_ids}
 
 
-@app.post("/api/debug/seed-cards")
-async def seed_demo_cards(body: dict | None = None):
-    """Generate demo feed cards for testing/demo purposes."""
-    import random
-    import time as _time
+@app.post("/api/cards/feedback/batch")
+async def feedback_batch(body: BatchFeedbackReq):
+    unique_card_ids = list(dict.fromkeys(
+        card_id.strip()
+        for card_id in body.card_ids
+        if isinstance(card_id, str) and card_id.strip()
+    ))
 
-    count = (body or {}).get("count", 20)
-    count = max(1, min(count, 200))
+    updated_ids: list[str] = []
+    affected_ids: list[str] = []
+    missing_ids: list[str] = []
 
-    now = _time.time()
-    inserted = 0
-    for i in range(count):
-        tpl = _DEMO_CARDS[i % len(_DEMO_CARDS)]
-        card_id = f"demo-{tpl['module_id']}-{i}-{random.randint(1000, 9999)}"
-        card = Card(
-            id=card_id,
-            title=tpl["title"],
-            summary=tpl["summary"],
-            score=max(0.0, min(1.0, tpl["score"] + random.uniform(-0.08, 0.08))),
-            tags=tpl["tags"],
-            source_url=tpl.get("url", ""),
-            obsidian_path=f"Demo/{card_id}.md",
-            module_id=tpl["module_id"],
-            created_at=now - random.uniform(0, 86400 * 7),
-            metadata={"demo": True},
-        )
-        _card_store.save(card)
-        inserted += 1
+    for card_id in unique_card_ids:
+        card = _card_store.get(card_id)
+        if not card:
+            missing_ids.append(card_id)
+            continue
+        _, current_affected_ids = await _apply_card_feedback(card, body.action)
+        updated_ids.append(card_id)
+        for affected_id in current_affected_ids:
+            normalized = affected_id.strip()
+            if normalized and normalized not in affected_ids:
+                affected_ids.append(normalized)
 
-    return {"ok": True, "inserted": inserted}
-
-
-@app.post("/api/debug/seed-all")
-async def seed_all_demo_data(body: dict | None = None):
-    """Seed demo data for all areas: cards, profile, activity, preferences."""
-    import random
-    import time as _time
-    import json as _json
-
-    results = {}
-
-    # 1. Seed cards
-    card_count = (body or {}).get("card_count", 52)
-    card_count = max(1, min(card_count, 200))
-    now = _time.time()
-    inserted = 0
-    for i in range(card_count):
-        tpl = _DEMO_CARDS[i % len(_DEMO_CARDS)]
-        card_id = f"demo-{tpl['module_id']}-{i}-{random.randint(1000, 9999)}"
-        card = Card(
-            id=card_id,
-            title=tpl["title"],
-            summary=tpl["summary"],
-            score=max(0.0, min(1.0, tpl["score"] + random.uniform(-0.08, 0.08))),
-            tags=tpl["tags"],
-            source_url=tpl.get("url", ""),
-            obsidian_path=f"Demo/{card_id}.md",
-            module_id=tpl["module_id"],
-            created_at=now - random.uniform(0, 86400 * 7),
-            metadata={"demo": True},
-        )
-        _card_store.save(card)
-        inserted += 1
-    results["cards"] = inserted
-
-    # 2. Seed profile data
-    abo_dir = Path.home() / ".abo"
-    abo_dir.mkdir(parents=True, exist_ok=True)
-
-    # Profile identity
-    profile_path = abo_dir / "profile.json"
-    profile_data = {
-        "codename": "Researcher-X",
-        "long_term_goal": "探索通用人工智能的理论基础，构建可解释的智能系统",
-        "research_field": "Machine Learning & NLP",
-        "affiliation": "Demo University",
+    return {
+        "ok": True,
+        "updated": len(updated_ids),
+        "card_ids": updated_ids,
+        "affected_card_ids": affected_ids,
+        "missing": missing_ids,
     }
-    profile_path.write_text(_json.dumps(profile_data, ensure_ascii=False, indent=2), encoding="utf-8")
-    results["profile"] = True
 
-    # Daily motto
-    motto_path = abo_dir / "daily_motto.json"
-    motto_path.write_text(_json.dumps({
-        "motto": "Stay hungry, stay foolish. 保持好奇，持续探索。",
-        "date": datetime.now().strftime("%Y-%m-%d"),
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-    results["motto"] = True
 
-    # SAN log (30 days)
-    san_path = abo_dir / "san_log.json"
-    san_log = {}
-    for d in range(30):
-        date_str = (datetime.now() - timedelta(days=d)).strftime("%Y-%m-%d")
-        san_log[date_str] = random.randint(40, 95)
-    san_path.write_text(_json.dumps(san_log, ensure_ascii=False, indent=2), encoding="utf-8")
-    results["san_log"] = 30
+def _get_debug_feed_flow_skip_reason(module_id: str) -> str | None:
+    prefs = _prefs.all_data()
+    module_prefs = dict((prefs.get("modules", {}) or {}).get(module_id, {}) or {})
 
-    # Happiness log (30 days)
-    happiness_path = abo_dir / "happiness_log.json"
-    happiness_log = {}
-    for d in range(30):
-        date_str = (datetime.now() - timedelta(days=d)).strftime("%Y-%m-%d")
-        happiness_log[date_str] = random.randint(50, 100)
-    happiness_path.write_text(_json.dumps(happiness_log, ensure_ascii=False, indent=2), encoding="utf-8")
-    results["happiness_log"] = 30
+    if module_id == "arxiv-tracker":
+        enabled_monitors = [
+            monitor
+            for monitor in normalize_keyword_monitors(module_prefs)
+            if monitor.get("enabled", True)
+        ]
+        if not enabled_monitors:
+            return "未配置启用的 arXiv 关键词监控器，调试入口只会执行已保存监控。"
 
-    # Energy memory
-    energy_path = abo_dir / "energy_memory.json"
-    energy_data = {
-        "current": random.randint(50, 90),
-        "history": [
-            {"date": (datetime.now() - timedelta(days=d)).strftime("%Y-%m-%d"),
-             "value": random.randint(30, 100)}
-            for d in range(14)
-        ],
+    if module_id == "semantic-scholar-tracker":
+        enabled_monitors = [
+            monitor
+            for monitor in normalize_followup_monitors(module_prefs)
+            if monitor.get("enabled", True)
+        ]
+        if not enabled_monitors:
+            return "未配置启用的 Follow Up 监控器，调试入口只会执行已保存监控，不会使用手动 crawl 的临时 query。"
+
+    if module_id == "xiaohongshu-tracker":
+        normalized = normalize_xhs_tracker_config(module_prefs)
+        active_keyword_monitors = [
+            monitor for monitor in normalized["keyword_monitors"]
+            if monitor.get("enabled", True)
+        ]
+        active_following_monitors = [
+            monitor for monitor in normalized["following_scan_monitors"]
+            if monitor.get("enabled", True)
+        ]
+        following_enabled = bool(normalized["following_scan"].get("enabled"))
+        active_creator_monitors = [
+            monitor for monitor in normalized["creator_monitors"]
+            if monitor.get("enabled", True)
+        ]
+        creator_enabled = bool(module_prefs.get("creator_push_enabled", False))
+
+        if not active_keyword_monitors and not active_following_monitors and not following_enabled and not (creator_enabled and active_creator_monitors):
+            return "未配置启用的小红书监控词条；关键词、关注流或博主抓取至少需要有一条启用中的定义。"
+
+        if not _get_effective_xhs_cookie(module_prefs):
+            return "未连接可复用的小红书 Cookie；关注流搜索、关键词搜索和博主最新动态都不会执行。请先在主动工具里重新连接 Cookie。"
+
+    if module_id == "bilibili-tracker":
+        active_daily_monitors = [
+            monitor for monitor in normalize_bilibili_dynamic_monitors(module_prefs)
+            if monitor.get("enabled", True)
+        ]
+        active_group_monitors = [
+            monitor for monitor in normalize_bilibili_followed_group_monitors(module_prefs)
+            if monitor.get("enabled", True)
+        ]
+        fixed_up_uids = [
+            str(uid).strip()
+            for uid in (module_prefs.get("up_uids") or [])
+            if str(uid).strip()
+        ]
+
+        if not active_daily_monitors and not active_group_monitors and not fixed_up_uids:
+            return "未配置启用的 B站监控词条；常驻关键词、智能分组或固定 UP 至少需要保留一类。"
+
+        if (active_daily_monitors or active_group_monitors) and _is_effective_bilibili_follow_feed_enabled(module_prefs) and not _get_effective_bilibili_sessdata(module_prefs) and not fixed_up_uids:
+            return "未连接可复用的 B站 SESSDATA / Cookie；已关注动态、关键词监控和智能分组都不会执行。请先在主动工具里重新连接 B站 Cookie。"
+
+    return None
+
+
+def _get_debug_feed_flow_zero_output_message(module_id: str) -> str | None:
+    if module_id == "arxiv-tracker":
+        return "已执行，但没有新增 arXiv 论文；常见原因是当前关键词时间窗口内没有新论文，或结果已入库。"
+    if module_id == "semantic-scholar-tracker":
+        return "已执行，但没有新增 Follow Up 论文；常见原因是结果已入库、超出时间窗口，或当前源论文暂无新增引用。"
+    if module_id == "xiaohongshu-tracker":
+        return "已执行，但没有新增小红书情报；常见原因是结果已被历史去重、当前时间窗内没有新内容，或 Cookie 已失效。"
+    if module_id == "bilibili-tracker":
+        return "已执行，但没有新增 B站情报；常见原因是结果已被历史去重、当前关注源暂无更新，或登录态已失效。"
+    return None
+
+
+async def _run_debug_feed_flow_module(module_id: str) -> tuple[int, dict[str, object]]:
+    module = _registry.get(module_id)
+    module_name = module.name if module else module_id
+    if not module:
+        return 0, {
+            "module_id": module_id,
+            "name": module_name,
+            "ok": False,
+            "status": "missing",
+            "message": "Module not found",
+        }
+
+    skip_reason = _get_debug_feed_flow_skip_reason(module_id)
+    if skip_reason:
+        return 0, {
+            "module_id": module_id,
+            "name": module_name,
+            "ok": False,
+            "status": "skipped",
+            "card_count": 0,
+            "message": skip_reason,
+        }
+
+    try:
+        card_count: int | None = None
+        run_now_with_count = getattr(_scheduler, "run_now_with_count", None)
+        if callable(run_now_with_count):
+            card_count = await run_now_with_count(module_id, _registry)
+            ok = card_count is not None
+        else:
+            ok = await _scheduler.run_now(module_id, _registry)
+
+        if not ok:
+            return 0, {
+                "module_id": module_id,
+                "name": module_name,
+                "ok": False,
+                "status": "missing",
+                "message": "Module not found",
+            }
+
+        result: dict[str, object] = {
+            "module_id": module_id,
+            "name": module_name,
+            "ok": True,
+            "status": "completed",
+        }
+        if card_count is not None:
+            result["card_count"] = card_count
+            if card_count == 0:
+                zero_output_message = _get_debug_feed_flow_zero_output_message(module_id)
+                if zero_output_message:
+                    result["message"] = zero_output_message
+        return 1, result
+    except Exception as exc:
+        return 0, {
+            "module_id": module_id,
+            "name": module_name,
+            "ok": False,
+            "status": "error",
+            "message": str(exc),
+        }
+
+
+@app.post("/api/debug/feed-flow")
+async def debug_run_feed_flow(body: dict | None = None):
+    """Run feed-related modules immediately for developer testing."""
+    if not _scheduler:
+        raise HTTPException(503, "Scheduler not ready")
+
+    data = body or {}
+    requested_scope = str(data.get("scope", "all") or "all").strip().lower()
+    raw_module_ids = data.get("module_ids")
+
+    module_ids: list[str] = []
+    if isinstance(raw_module_ids, list):
+        module_ids = [
+            str(module_id).strip()
+            for module_id in raw_module_ids
+            if str(module_id).strip()
+        ]
+
+    if not module_ids:
+        if requested_scope not in _DEBUG_FEED_FLOW_MODULE_GROUPS:
+            raise HTTPException(400, "Unsupported feed-flow scope")
+        module_ids = list(_DEBUG_FEED_FLOW_MODULE_GROUPS[requested_scope])
+
+    results_by_module_id: dict[str, dict[str, object]] = {}
+    completed = 0
+    social_parallel_ids = {
+        module_id
+        for module_id in module_ids
+        if module_id in {"xiaohongshu-tracker", "bilibili-tracker"}
     }
-    energy_path.write_text(_json.dumps(energy_data, ensure_ascii=False, indent=2), encoding="utf-8")
-    results["energy"] = True
 
-    # Daily todos
-    todos_path = abo_dir / "daily_todos.json"
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    todos_data = {
-        today_str: [
-            {"text": "阅读 3 篇 Transformer 相关论文", "done": True},
-            {"text": "整理实验数据并更新 Wandb 面板", "done": True},
-            {"text": "写完 Introduction 第二稿", "done": False},
-            {"text": "Review 师弟的 PR", "done": False},
-            {"text": "跑步 30 分钟", "done": True},
-        ],
+    for module_id in module_ids:
+        if module_id in social_parallel_ids:
+            continue
+        completed_delta, result = await _run_debug_feed_flow_module(module_id)
+        completed += completed_delta
+        results_by_module_id[module_id] = result
+
+    if social_parallel_ids:
+        social_results = await asyncio.gather(*[
+            _run_debug_feed_flow_module(module_id)
+            for module_id in module_ids
+            if module_id in social_parallel_ids
+        ])
+        for module_id, (completed_delta, result) in zip(
+            [module_id for module_id in module_ids if module_id in social_parallel_ids],
+            social_results,
+            strict=False,
+        ):
+            completed += completed_delta
+            results_by_module_id[module_id] = result
+
+    results = [results_by_module_id[module_id] for module_id in module_ids]
+
+    return {
+        "ok": completed == len(module_ids),
+        "scope": requested_scope if requested_scope in _DEBUG_FEED_FLOW_MODULE_GROUPS else "custom",
+        "completed": completed,
+        "total": len(module_ids),
+        "results": results,
     }
-    todos_path.write_text(_json.dumps(todos_data, ensure_ascii=False, indent=2), encoding="utf-8")
-    results["todos"] = True
-
-    # 3. Seed keyword preferences
-    prefs_path = abo_dir / "keyword_preferences.json"
-    keyword_prefs = {
-        "Transformer": {"score": 0.8, "count": 15, "source_modules": ["arxiv-tracker", "semantic-scholar-tracker"]},
-        "LLM": {"score": 0.9, "count": 22, "source_modules": ["arxiv-tracker", "zhihu-tracker"]},
-        "读博": {"score": 0.6, "count": 8, "source_modules": ["xiaohongshu-tracker", "zhihu-tracker"]},
-        "强化学习": {"score": 0.5, "count": 6, "source_modules": ["arxiv-tracker", "bilibili-tracker"]},
-        "RAG": {"score": 0.7, "count": 10, "source_modules": ["semantic-scholar-tracker"]},
-        "Agent": {"score": 0.85, "count": 18, "source_modules": ["arxiv-tracker", "zhihu-tracker", "xiaoyuzhou-tracker"]},
-        "论文写作": {"score": 0.4, "count": 5, "source_modules": ["xiaohongshu-tracker"]},
-        "开源": {"score": 0.3, "count": 4, "source_modules": ["zhihu-tracker"]},
-    }
-    prefs_path.write_text(_json.dumps(keyword_prefs, ensure_ascii=False, indent=2), encoding="utf-8")
-    results["keyword_prefs"] = len(keyword_prefs)
-
-    # 4. Seed activity timeline (today)
-    activities_dir = abo_dir / "activities"
-    activities_dir.mkdir(parents=True, exist_ok=True)
-    timeline_path = activities_dir / f"timeline_{today_str}.json"
-    demo_activities = [
-        {"id": "d1", "type": "card_like", "timestamp": f"{today_str}T09:15:00", "card_title": "State Space Models vs Transformers", "module_id": "arxiv-tracker", "metadata": {}},
-        {"id": "d2", "type": "card_save", "timestamp": f"{today_str}T09:32:00", "card_title": "A Survey on RAG", "module_id": "semantic-scholar-tracker", "metadata": {}},
-        {"id": "d3", "type": "card_view", "timestamp": f"{today_str}T10:05:00", "card_title": "读博第三年的时间管理心得", "module_id": "xiaohongshu-tracker", "metadata": {}},
-        {"id": "d4", "type": "card_like", "timestamp": f"{today_str}T10:48:00", "card_title": "Code Generation with LLMs", "module_id": "arxiv-tracker", "metadata": {}},
-        {"id": "d5", "type": "card_view", "timestamp": f"{today_str}T11:20:00", "card_title": "实验室咖啡角 DIY", "module_id": "xiaohongshu-tracker", "metadata": {}},
-        {"id": "d6", "type": "card_save", "timestamp": f"{today_str}T14:00:00", "card_title": "MIT 6.S191 深度学习导论", "module_id": "bilibili-tracker", "metadata": {}},
-        {"id": "d7", "type": "card_like", "timestamp": f"{today_str}T15:30:00", "card_title": "大语言模型的涌现能力", "module_id": "zhihu-tracker", "metadata": {}},
-        {"id": "d8", "type": "card_view", "timestamp": f"{today_str}T16:15:00", "card_title": "AI 创业的第二波浪潮", "module_id": "xiaoyuzhou-tracker", "metadata": {}},
-    ]
-    timeline_data = {
-        "date": today_str,
-        "activities": demo_activities,
-        "summary": None,
-        "summary_generated_at": None,
-    }
-    timeline_path.write_text(_json.dumps(timeline_data, ensure_ascii=False, indent=2), encoding="utf-8")
-    results["activities"] = len(demo_activities)
-
-    return {"ok": True, "results": results}
 
 
 @app.delete("/api/debug/cards")
@@ -712,15 +1388,32 @@ async def run_module(module_id: str):
 @app.post("/api/modules/arxiv-tracker/crawl")
 async def crawl_arxiv_live(data: dict = None):
     """Real-time arXiv crawl with keyword support, deduplication, and progress via WebSocket."""
-    from .default_modules.arxiv.category import ALL_SUBCATEGORIES, get_category_name
+    from .default_modules.arxiv import ArxivTracker
+    from .paper_tracking import expand_arxiv_categories
     from .tools.arxiv_api import arxiv_api_search
-    import re
 
-    keywords = data.get("keywords", []) if data else []
-    max_results = data.get("max_results", 50) if data else 50
-    search_mode = data.get("mode", "AND") if data else "AND"  # "AND", "OR", or "AND_OR"
-    cs_only = data.get("cs_only", True) if data else True  # Default to CS only
-    days_back = data.get("days_back", 180) if data else 180
+    data = data or {}
+    keywords = data.get("keywords", [])
+    raw_max_results = data["max_results"] if "max_results" in data else 50
+    raw_days_back = data["days_back"] if "days_back" in data else 180
+    search_mode = data.get("mode", "AND")  # "AND", "OR", or "AND_OR"
+    cs_only = data.get("cs_only", True)  # Default to CS only
+    requested_categories = data.get("categories", [])
+
+    try:
+        max_results = int(raw_max_results) if raw_max_results not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        max_results = None
+
+    try:
+        days_back = int(raw_days_back) if raw_days_back not in (None, "", 0, "0") else None
+    except (TypeError, ValueError):
+        days_back = None
+
+    if max_results is not None:
+        max_results = max(1, min(5000, max_results))
+    if days_back is not None:
+        days_back = max(1, min(3650, days_back))
 
     # Get existing arXiv IDs from literature library to avoid duplicates
     existing_ids = set()
@@ -730,16 +1423,15 @@ async def crawl_arxiv_live(data: dict = None):
             lit_path = get_vault_path()
         if lit_path:
             arxiv_dir = lit_path / "arxiv"
-            if arxiv_dir.exists():
-                for f in arxiv_dir.glob("*.md"):
-                    match = re.match(r'([\d.]+)-', f.name)
-                    if match:
-                        existing_ids.add(match.group(1))
+            existing_ids = _collect_saved_arxiv_ids(arxiv_dir)
     except Exception:
         pass
 
     results = []
     session_id = _generate_crawl_session_id()
+    _register_crawl_session(session_id)
+    tracker = ArxivTracker()
+    prefs = _prefs.get_prefs_for_module("arxiv-tracker")
 
     try:
         # Send session ID to client for cancellation
@@ -754,8 +1446,12 @@ async def crawl_arxiv_live(data: dict = None):
             "type": "crawl_progress",
             "phase": "fetching",
             "current": 0,
-            "total": max_results,
-            "message": "正在从 arXiv 获取论文列表..."
+            "total": max_results or 0,
+            "message": (
+                "正在从 arXiv 获取论文列表..."
+                if max_results is not None
+                else "正在从 arXiv 获取论文列表（不限篇数）..."
+            )
         })
 
         # Check for cancellation before fetch
@@ -767,10 +1463,7 @@ async def crawl_arxiv_live(data: dict = None):
             _cleanup_crawl_session(session_id)
             return {"papers": [], "count": 0, "cancelled": True}
 
-        cs_categories = [
-            code for code in ALL_SUBCATEGORIES
-            if code.startswith("cs.")
-        ] if cs_only else None
+        resolved_categories = expand_arxiv_categories(["cs.*"]) if cs_only else expand_arxiv_categories(requested_categories)
 
         def normalize_keywords(raw_keywords: list[str]) -> list[str]:
             parsed: list[str] = []
@@ -778,20 +1471,25 @@ async def crawl_arxiv_live(data: dict = None):
                 parsed.extend(part.strip() for part in re.split(r"[,，\s]+", str(kw)) if part.strip())
             return parsed
 
+        tracking_label_parts = [" ".join(str(kw).strip() for kw in keywords if str(kw).strip())]
+        if not cs_only and requested_categories:
+            tracking_label_parts.append(", ".join(str(category).strip() for category in requested_categories if str(category).strip()))
+        search_label = " · ".join(part for part in tracking_label_parts if part)
+
         async def search_with_arxiv_api() -> list[dict]:
             if search_mode == "AND_OR":
                 raw_query = " ".join(str(kw) for kw in keywords).strip()
                 groups = [group.strip() for group in raw_query.split("|") if group.strip()]
                 seen: set[str] = set()
                 merged: list[dict] = []
-                per_group_limit = max(max_results, 20)
+                per_group_limit = max(max_results, 20) if max_results is not None else None
                 for group in groups:
                     group_keywords = normalize_keywords([group])
                     if not group_keywords:
                         continue
                     group_papers = await arxiv_api_search(
                         keywords=group_keywords,
-                        categories=cs_categories,
+                        categories=resolved_categories or None,
                         mode="AND",
                         max_results=per_group_limit,
                         days_back=days_back,
@@ -803,14 +1501,14 @@ async def crawl_arxiv_live(data: dict = None):
                             continue
                         seen.add(paper_id)
                         merged.append(paper)
-                        if len(merged) >= max_results:
+                        if max_results is not None and len(merged) >= max_results:
                             return merged
                 return merged
 
             api_mode = "AND" if search_mode == "AND" else "OR"
             papers = await arxiv_api_search(
                 keywords=normalize_keywords(keywords),
-                categories=cs_categories,
+                categories=resolved_categories or None,
                 mode=api_mode,
                 max_results=max_results,
                 days_back=days_back,
@@ -821,54 +1519,35 @@ async def crawl_arxiv_live(data: dict = None):
                 if paper.get("id") and paper.get("id") not in existing_ids
             ][:max_results]
 
-        def paper_to_card_data(paper: dict) -> dict:
-            arxiv_id = paper.get("id", "")
-            categories = paper.get("categories") or []
-            primary_category = paper.get("primary_category") or (categories[0] if categories else "")
-            published = paper.get("published") or ""
-            updated = paper.get("updated") or published
-            authors = paper.get("authors", [])
-            abs_url = paper.get("arxiv_url") or f"https://arxiv.org/abs/{arxiv_id}"
-            pdf_url = paper.get("pdf_url") or f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-            metadata = {
-                "abo-type": "arxiv-api-paper",
-                "authors": authors,
-                "author_count": len(authors),
-                "arxiv-id": arxiv_id,
-                "primary_category": primary_category,
-                "primary_category_name": get_category_name(primary_category),
-                "categories": categories,
-                "all_categories": [get_category_name(c) for c in categories],
-                "published": published,
-                "updated": updated,
-                "comments": paper.get("comment") or "",
-                "journal_ref": paper.get("journal_ref") or "",
-                "doi": paper.get("doi") or "",
-                "pdf-url": pdf_url,
-                "html-url": f"https://arxiv.org/html/{arxiv_id}",
-                "abstract": paper.get("summary", ""),
-                "keywords": categories,
-                "links": {
-                    "abs": abs_url,
-                    "pdf": pdf_url,
-                    "html": f"https://arxiv.org/html/{arxiv_id}",
-                },
-            }
+        async def paper_to_card_data(paper: dict) -> dict:
+            item = tracker.item_from_api_result(paper)
+            if not item:
+                raise ValueError(f"Invalid arXiv paper payload: {paper}")
+
+            item.raw.update({
+                "paper_tracking_type": "keyword",
+                "paper_tracking_role": "keyword",
+                "relationship": "keyword",
+                "relationship_label": "关键词追踪",
+                "paper_tracking_label": search_label,
+                "paper_tracking_labels": [search_label] if search_label else [],
+            })
+            payload = await tracker.build_tracking_payload(item, prefs)
             return {
-                "id": arxiv_id,
-                "title": paper.get("title", "Untitled"),
-                "summary": paper.get("summary", ""),
-                # arXiv API 搜索不再做 Claude 打分；保留字段只为兼容前端/保存接口。
-                "score": 1.0,
-                "tags": categories,
-                "source_url": abs_url,
-                "metadata": metadata,
+                "id": item.id,
+                "title": payload["title"],
+                "summary": payload["summary"],
+                "score": payload["score"],
+                "tags": payload["tags"],
+                "source_url": payload["source_url"],
+                "metadata": payload["metadata"],
             }
 
-        api_papers = await search_with_arxiv_api()
+        api_papers = await _await_with_crawl_cancel(
+            search_with_arxiv_api(),
+            session_id=session_id,
+        )
 
-        # 旧路径已停用：不再调用 ArxivTracker.fetch/process，不抓 HTML figures，不跑 Claude 打分。
-        # 这里直接把 arXiv API 结果转换为前端卡片数据并通过 WebSocket 推送。
         for i, paper in enumerate(api_papers):
             if _should_cancel_crawl(session_id):
                 await broadcaster.send_event({
@@ -878,7 +1557,11 @@ async def crawl_arxiv_live(data: dict = None):
                 _cleanup_crawl_session(session_id)
                 return {"papers": results, "count": len(results), "cancelled": True}
 
-            paper_data = paper_to_card_data(paper)
+            paper_data = await _await_with_crawl_cancel(
+                paper_to_card_data(paper),
+                session_id=session_id,
+                timeout=30,
+            )
             results.append(paper_data)
             _paper_store.upsert_from_payload(paper_data, source_module="arxiv-tracker")
 
@@ -920,6 +1603,14 @@ async def crawl_arxiv_live(data: dict = None):
             "requested": max_results,
             "skipped_duplicates": len(existing_ids)
         }
+    except CrawlCancelledError:
+        await broadcaster.send_event({
+            "type": "crawl_cancelled",
+            "session_id": session_id,
+            "message": f"爬取任务已取消，已推送 {len(results)} 篇论文"
+        })
+        _cleanup_crawl_session(session_id)
+        return {"papers": results, "count": len(results), "cancelled": True}
     except Exception as e:
         # Clean up session on error
         _cleanup_crawl_session(session_id)
@@ -989,7 +1680,7 @@ async def save_arxiv_to_literature(data: dict):
     import asyncio
 
     paper = data.get("paper", {})
-    folder = data.get("folder", "arxiv")
+    folder = str(data.get("folder", "arxiv") or "arxiv").strip() or "arxiv"
     save_pdf = data.get("save_pdf", True)  # Default to saving PDF
 
     # Get literature path
@@ -999,41 +1690,39 @@ async def save_arxiv_to_literature(data: dict):
     if not lit_path:
         raise HTTPException(400, "Literature path not configured")
 
-    # Build target path
-    target_dir = lit_path / folder
-    target_dir.mkdir(parents=True, exist_ok=True)
-
-    # Build filename: Title first, then arXiv ID (e.g., "Paper Title-arxiv.2501.12345.md")
     title = paper.get("title", "untitled")
     meta = paper.get("metadata", {})
     arxiv_id = _extract_arxiv_id_from_paper_payload(paper)
-    safe_title = "".join(c for c in title[:80] if c.isalnum() or c in " -_").strip()
-    filename_base = f"{safe_title}-{arxiv_id}"
-    filename = f"{filename_base}.md"
-    target_path = target_dir / filename
+    paper_relative_dir = build_arxiv_grouped_relative_dir(
+        paper,
+        root_folder=folder,
+        paper_fallback=arxiv_id or "untitled",
+    )
+    paper_folder = lit_path / Path(paper_relative_dir)
+    paper_folder.mkdir(parents=True, exist_ok=True)
 
-    # Create figures directory
-    figures_dir = target_dir / f"{filename_base}.figures"
+    filename_base = paper_folder.name
+    target_path = paper_folder / f"{filename_base}.md"
+    figures_dir = paper_folder / "figures"
     figures_dir.mkdir(exist_ok=True)
 
-    pdf_url = meta.get("pdf-url", f"https://arxiv.org/pdf/{arxiv_id}.pdf")
+    pdf_url = meta.get("pdf-url") or (f"https://arxiv.org/pdf/{arxiv_id}.pdf" if arxiv_id else "")
 
     # Download PDF if requested
     pdf_path = None
     if save_pdf and pdf_url:
-        pdf_dir = lit_path / "arxiv_pdf"
-        pdf_dir.mkdir(exist_ok=True)
-        pdf_filename = f"{filename_base}.pdf"
-        pdf_path = pdf_dir / pdf_filename
-
+        pdf_full_path = paper_folder / "paper.pdf"
         try:
-            async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-                resp = await client.get(pdf_url, headers={"User-Agent": "ABO-arXiv-Tracker/1.0"})
-                if resp.status_code == 200:
-                    pdf_path.write_bytes(resp.content)
-                    pdf_path = str(pdf_path.relative_to(lit_path))
-                else:
-                    pdf_path = None
+            if arxiv_id:
+                result = await download_arxiv_pdf(arxiv_id, pdf_full_path)
+                if result:
+                    pdf_path = "paper.pdf"
+            else:
+                async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                    resp = await client.get(pdf_url, headers={"User-Agent": "ABO-arXiv-Tracker/1.0"})
+                    if resp.status_code == 200:
+                        pdf_full_path.write_bytes(resp.content)
+                        pdf_path = "paper.pdf"
         except Exception as e:
             print(f"Failed to download PDF for {arxiv_id}: {e}")
             pdf_path = None
@@ -1066,7 +1755,7 @@ async def save_arxiv_to_literature(data: dict):
                     return {
                         "filename": local_name,
                         "caption": fig.get("caption", f"Figure {idx + 1}"),
-                        "local_path": str(local_path.relative_to(lit_path)),
+                        "local_path": str((Path("figures") / local_name).as_posix()),
                         "original_url": url,
                     }
         except Exception as e:
@@ -1079,21 +1768,43 @@ async def save_arxiv_to_literature(data: dict):
         downloaded = await asyncio.gather(*download_tasks)
         local_figures = [f for f in downloaded if f]
 
+    paper_folder_rel = paper_folder.relative_to(lit_path)
+    frontend_figures = [
+        {
+            **fig,
+            "local_path": str((paper_folder_rel / fig["local_path"]).as_posix()),
+        }
+        for fig in local_figures
+    ]
+
+    digest_payload = await _prepare_paper_digest_payload(paper, arxiv_id)
+    abstract_text = digest_payload["abstract"]
+    introduction_text = digest_payload["introduction"]
+    formatted_digest = digest_payload["formatted_digest"]
+
     # Build content
     content_parts = [f"# {title}\n"]
 
     # Add PDF link if downloaded
     if pdf_path:
-        content_parts.append(f"**[📄 PDF 下载](../arxiv_pdf/{filename_base}.pdf)**\n")
+        content_parts.append("**[📄 PDF 下载](paper.pdf)**\n")
 
     if meta.get("contribution"):
         content_parts.append(f"**核心创新**: {meta['contribution']}\n")
 
-    content_parts.append(f"{paper.get('summary', '')}\n")
+    if paper.get("summary"):
+        content_parts.append("## AI 摘要\n")
+        content_parts.append(f"{paper.get('summary', '')}\n")
 
-    if meta.get("abstract"):
+    if abstract_text:
         content_parts.append("## 摘要\n")
-        content_parts.append(f"{meta['abstract']}\n")
+        content_parts.append(f"{abstract_text}\n")
+
+    if introduction_text:
+        content_parts.append("## Introduction\n")
+        content_parts.append(f"{introduction_text}\n")
+
+    content_parts.append(f"{formatted_digest}\n")
 
     # Add figures section
     if local_figures:
@@ -1118,9 +1829,29 @@ async def save_arxiv_to_literature(data: dict):
         "pdf-path": pdf_path,
         "published": meta.get("published", ""),
         "keywords": meta.get("keywords", []),
-        "figures": local_figures,
+        "abstract": abstract_text,
+        "introduction": introduction_text,
+        "formatted-digest": formatted_digest,
+        "figures": frontend_figures,
+        "local_figures": frontend_figures,
         "figures_dir": str(figures_dir.relative_to(lit_path)),
     })
+    post.metadata.update(
+        UnifiedVaultEntry(
+            entry_id=arxiv_id,
+            entry_type="paper",
+            title=paper.get("title", ""),
+            summary=paper.get("summary", ""),
+            source_url=paper.get("source_url", ""),
+            source_platform="arxiv",
+            source_module="arxiv-tracker",
+            authors=meta.get("authors", []),
+            published=meta.get("published", ""),
+            tags=paper.get("tags", []),
+            score=paper.get("score", 0.5),
+            obsidian_path=str(target_path.relative_to(lit_path)),
+        ).to_metadata()
+    )
 
     # Atomic write
     tmp = target_path.with_suffix(".tmp")
@@ -1137,10 +1868,13 @@ async def save_arxiv_to_literature(data: dict):
             existing_card = card_store.get(card_id)
             if not existing_card:
                 continue
-            existing_card.metadata["local_figures"] = local_figures
+            existing_card.metadata["local_figures"] = frontend_figures
             existing_card.metadata["figures_dir"] = str(figures_dir.relative_to(lit_path))
             existing_card.metadata["saved_to_literature"] = True
             existing_card.metadata["literature_path"] = str(target_path.relative_to(lit_path))
+            existing_card.metadata["abstract"] = abstract_text
+            existing_card.metadata["introduction"] = introduction_text
+            existing_card.metadata["formatted-digest"] = formatted_digest
             if pdf_path:
                 existing_card.metadata["pdf_path"] = pdf_path
             card_store.save(existing_card)
@@ -1151,10 +1885,14 @@ async def save_arxiv_to_literature(data: dict):
         **paper,
         "metadata": {
             **meta,
-            "local_figures": local_figures,
+            "local_figures": frontend_figures,
+            "figures": frontend_figures,
             "figures_dir": str(figures_dir.relative_to(lit_path)),
             "saved_to_literature": True,
             "literature_path": str(target_path.relative_to(lit_path)),
+            "abstract": abstract_text,
+            "introduction": introduction_text,
+            "formatted-digest": formatted_digest,
             **({"pdf_path": pdf_path} if pdf_path else {}),
         },
         "path": str(target_path.relative_to(lit_path)),
@@ -1166,8 +1904,11 @@ async def save_arxiv_to_literature(data: dict):
     return {
         "ok": True,
         "path": str(target_path.relative_to(lit_path)),
-        "figures": local_figures,
+        "folder": str(paper_folder.relative_to(lit_path)),
+        "figures": frontend_figures,
         "pdf": pdf_path,
+        "introduction": introduction_text,
+        "formatted_digest": formatted_digest,
     }
 
 
@@ -1193,7 +1934,8 @@ async def crawl_arxiv_by_category(data: dict = None):
         "sort_order": "descending"
     }
     """
-    from .default_modules.arxiv.category import ALL_SUBCATEGORIES, get_category_name
+    from .default_modules.arxiv import ArxivTracker
+    from .paper_tracking import expand_arxiv_categories
     from .tools.arxiv_api import arxiv_api_search
 
     data = data or {}
@@ -1210,64 +1952,39 @@ async def crawl_arxiv_by_category(data: dict = None):
         lit_path = get_literature_path() or get_vault_path()
         if lit_path:
             arxiv_dir = lit_path / "arxiv"
-            if arxiv_dir.exists():
-                for f in arxiv_dir.glob("**/*.md"):
-                    # Match arXiv ID patterns in filename
-                    import re
-                    match = re.search(r'(\d{4}\.\d{4,5})', f.name)
-                    if match:
-                        existing_ids.add(match.group(1))
+            existing_ids = _collect_saved_arxiv_ids(arxiv_dir)
     except Exception:
         pass
 
     results = []
+    tracker = ArxivTracker()
+    prefs = _prefs.get_prefs_for_module("arxiv-tracker")
 
-    def expand_categories(raw_categories: list[str]) -> list[str]:
-        expanded: list[str] = []
-        for category in raw_categories:
-            if category.endswith(".*"):
-                prefix = category[:-1]
-                expanded.extend(code for code in ALL_SUBCATEGORIES if code.startswith(prefix))
-            else:
-                expanded.append(category)
-        return expanded
+    tracking_label_parts = [str(part).strip() for part in [", ".join(keywords), ", ".join(categories)] if str(part).strip()]
+    tracking_label = " · ".join(tracking_label_parts)
 
-    def paper_to_card_data(paper: dict) -> dict:
-        arxiv_id = paper.get("id", "")
-        paper_categories = paper.get("categories") or []
-        primary_category = paper.get("primary_category") or (paper_categories[0] if paper_categories else "")
-        published = paper.get("published") or ""
-        updated = paper.get("updated") or published
-        authors = paper.get("authors", [])
-        abs_url = paper.get("arxiv_url") or f"https://arxiv.org/abs/{arxiv_id}"
-        pdf_url = paper.get("pdf_url") or f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-        metadata = {
-            "abo-type": "arxiv-api-paper",
-            "authors": authors,
-            "author_count": len(authors),
-            "arxiv-id": arxiv_id,
-            "primary_category": primary_category,
-            "primary_category_name": get_category_name(primary_category),
-            "categories": paper_categories,
-            "all_categories": [get_category_name(c) for c in paper_categories],
-            "published": published,
-            "updated": updated,
-            "comments": paper.get("comment") or "",
-            "journal_ref": paper.get("journal_ref") or "",
-            "doi": paper.get("doi") or "",
-            "pdf-url": pdf_url,
-            "html-url": f"https://arxiv.org/html/{arxiv_id}",
-            "abstract": paper.get("summary", ""),
-            "keywords": paper_categories,
-        }
+    async def paper_to_card_data(paper: dict) -> dict:
+        item = tracker.item_from_api_result(paper)
+        if not item:
+            raise ValueError(f"Invalid arXiv paper payload: {paper}")
+
+        item.raw.update({
+            "paper_tracking_type": "keyword",
+            "paper_tracking_role": "keyword",
+            "relationship": "keyword",
+            "relationship_label": "关键词追踪",
+            "paper_tracking_label": tracking_label,
+            "paper_tracking_labels": [tracking_label] if tracking_label else [],
+        })
+        payload = await tracker.build_tracking_payload(item, prefs)
         return {
-            "id": arxiv_id,
-            "title": paper.get("title", "Untitled"),
-            "summary": paper.get("summary", ""),
-            "score": 1.0,
-            "tags": paper_categories,
-            "source_url": abs_url,
-            "metadata": metadata,
+            "id": item.id,
+            "title": payload["title"],
+            "summary": payload["summary"],
+            "score": payload["score"],
+            "tags": payload["tags"],
+            "source_url": payload["source_url"],
+            "metadata": payload["metadata"],
         }
 
     try:
@@ -1280,7 +1997,7 @@ async def crawl_arxiv_by_category(data: dict = None):
             "message": f"正在从 arXiv 获取论文 (分类: {', '.join(categories)})..."
         })
 
-        api_categories = expand_categories(categories)
+        api_categories = expand_arxiv_categories(categories)
         api_papers = await arxiv_api_search(
             categories=api_categories,
             keywords=keywords,
@@ -1304,9 +2021,8 @@ async def crawl_arxiv_by_category(data: dict = None):
             })
             return {"papers": [], "count": 0}
 
-        # 旧路径已停用：分类搜索也直接使用 arXiv API 结果，不跑 HTML 抓图或 Claude 打分。
         for i, paper in enumerate(api_papers):
-            paper_data = paper_to_card_data(paper)
+            paper_data = await paper_to_card_data(paper)
             results.append(paper_data)
             _paper_store.upsert_from_payload(paper_data, source_module="arxiv-tracker")
 
@@ -1478,67 +2194,43 @@ async def fetch_figures_from_arxiv_html(
     max_figures: int = DEFAULT_MAX_FIGURES
 ) -> list[dict]:
     """Fetch figures from arXiv HTML page with smart prioritization."""
-    import re
     import asyncio
+    from .tools.arxiv_api import build_arxiv_html_urls, extract_figure_candidates_from_html
+
     figures = []
 
     # Ensure figures directory exists
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        html_url = f"https://arxiv.org/html/{arxiv_id}"
-        resp = await client.get(html_url, headers={"User-Agent": "ABO/1.0"}, timeout=HTML_TIMEOUT)
-
-        if resp.status_code != 200:
-            print(f"[figures] HTTP error {resp.status_code} when fetching HTML for {arxiv_id}")
-            return figures
-
-        html = resp.text
-        img_pattern = r'<img[^>]+src="([^"]+)"[^>]*>'
-        img_matches = list(re.finditer(img_pattern, html, re.IGNORECASE))
-
         figure_candidates = []
-        for i, match in enumerate(img_matches[:20]):  # Check first 20 images
-            src = match.group(1)
-            if not src:
+        seen_urls: set[str] = set()
+        next_index = 0
+
+        for html_url in build_arxiv_html_urls(arxiv_id):
+            source_added = 0
+            resp = await client.get(html_url, headers={"User-Agent": "ABO/1.0"}, timeout=HTML_TIMEOUT)
+
+            if resp.status_code != 200:
+                print(f"[figures] HTTP error {resp.status_code} when fetching HTML for {arxiv_id} from {html_url}")
                 continue
 
-            img_tag = match.group(0)
-            alt_match = re.search(r'alt="([^"]*)"', img_tag, re.IGNORECASE)
-            alt = alt_match.group(1) if alt_match else ""
+            for candidate in extract_figure_candidates_from_html(resp.text, arxiv_id, html_url):
+                candidate_url = candidate["url"]
+                if candidate_url in seen_urls:
+                    continue
+                seen_urls.add(candidate_url)
+                figure_candidates.append({
+                    "url": candidate_url,
+                    "caption": candidate["caption"],
+                    "score": candidate["score"],
+                    "index": next_index,
+                })
+                next_index += 1
+                source_added += 1
 
-            # Skip non-figure images
-            if any(skip in src.lower() for skip in ['icon', 'logo', 'button', 'spacer', 'arrow']):
-                continue
-
-            # Make absolute URL
-            if src.startswith('/'):
-                src = f"https://arxiv.org{src}"
-            elif not src.startswith('http'):
-                if src.startswith(arxiv_id + '/'):
-                    src = f"https://arxiv.org/html/{src}"
-                else:
-                    src = f"https://arxiv.org/html/{arxiv_id}/{src}"
-
-            # Score based on likelihood of being a pipeline/method figure
-            alt_lower = alt.lower()
-            score = 0
-            priority_keywords = [
-                ('pipeline', 30), ('architecture', 25), ('framework', 25),
-                ('overview', 20), ('method', 20), ('system', 15),
-                ('flowchart', 20), ('diagram', 15), ('structure', 15),
-                ('model', 10), ('approach', 10), ('fig', 10), ('figure', 10)
-            ]
-            for kw, pts in priority_keywords:
-                if kw in alt_lower:
-                    score += pts
-
-            figure_candidates.append({
-                'url': src,
-                'caption': alt[:120] if alt else f"Figure {i+1}",
-                'score': score,
-                'index': i
-            })
+            if source_added or len(figure_candidates) >= max_figures:
+                break
 
         # Sort by score (descending) and take top max_figures
         figure_candidates.sort(key=lambda x: (-x['score'], x['index']))
@@ -1752,6 +2444,51 @@ async def save_s2_to_literature(data: dict):
     meta = paper.get("metadata", {})
     title = paper.get("title", "untitled")
     paper_id = meta.get("paper_id", "unknown")
+    paper_tracking_role = str(meta.get("paper_tracking_role") or "").strip()
+
+    if paper_tracking_role == "source":
+        source_payload = _extract_source_paper_payload_from_source_card(paper)
+        source_payload["save_pdf"] = save_pdf
+        base_dir, _, _ = _resolve_source_paper_storage_paths(
+            lit_path,
+            str(source_payload.get("title", "")),
+        )
+        base_dir.mkdir(parents=True, exist_ok=True)
+        source_note_result = await _ensure_source_paper_note_from_payload(
+            lit_path=lit_path,
+            base_dir=base_dir,
+            source_payload=source_payload,
+        )
+        source_paper_path = source_note_result.get("path")
+        source_pdf_path = source_note_result.get("pdf_path")
+        if not source_paper_path:
+            raise HTTPException(400, "Source paper title is required")
+
+        enriched_paper = {
+            **paper,
+            "metadata": {
+                **meta,
+                "saved_to_literature": True,
+                "literature_path": source_paper_path,
+                "source_paper_path": source_paper_path,
+                **({"pdf_path": source_pdf_path} if source_pdf_path else {}),
+            },
+            "path": source_paper_path,
+            "literature_path": source_paper_path,
+            "saved_to_literature": True,
+        }
+        _paper_store.upsert_from_payload(enriched_paper, source_module="semantic-scholar-tracker")
+
+        return {
+            "ok": True,
+            "path": source_paper_path,
+            "figures": [],
+            "pdf": source_pdf_path,
+            "introduction": source_note_result.get("introduction", source_payload.get("metadata", {}).get("introduction", "")),
+            "formatted_digest": source_note_result.get("formatted_digest", ""),
+            "source_paper_path": source_paper_path,
+            "folder": str(base_dir.relative_to(lit_path)),
+        }
 
     # Prefer explicit override, then the follow-up paper metadata carried from tracker results.
     source_paper = (
@@ -1760,29 +2497,38 @@ async def save_s2_to_literature(data: dict):
         or paper.get("source_paper_title")
         or "Unknown"
     )
-    source_folder_name = re.sub(r'[^\w\s-]', '', source_paper)[:80].strip() or "Unknown"
+    source_folder_name = sanitize_paper_title_for_path(
+        source_paper,
+        fallback="Unknown",
+        max_length=80,
+    )
 
-    # Build paper folder name: AuthorYear-ShortTitle
-    authors = meta.get("authors", ["Unknown"])
-    first_author = authors[0].split()[-1].replace(",", "").replace(" ", "") if authors else "Unknown"
-    year = meta.get("year", datetime.now().year)
-    short_title = "".join(c for c in title[:20] if c.isalnum()).upper() or "UNTITLED"
-    # Build target path: Literature/FollowUps/{Source}/{AuthorYear-ShortTitle}/
+    paper_folder_name = sanitize_paper_title_for_path(
+        title,
+        fallback=paper_id,
+        max_length=120,
+    )
+    # Build target path: Literature/FollowUps/{Source}/{Paper Title}/
     base_dir = lit_path / "FollowUps" / source_folder_name
-    paper_folder = base_dir / f"{first_author}{year}-{short_title}"
+    paper_folder = base_dir / paper_folder_name
     paper_folder.mkdir(parents=True, exist_ok=True)
 
     # Figures folder inside paper folder
     figures_dir = paper_folder / "figures"
     figures_dir.mkdir(exist_ok=True)
 
-    # Markdown filename: {AuthorYear}-{ShortTitle}.md
-    md_filename = f"{first_author}{year}-{short_title}.md"
+    # Markdown filename: {Paper Title}.md
+    md_filename = f"{paper_folder_name}.md"
     target_path = paper_folder / md_filename
+
+    arxiv_id = _extract_arxiv_id_from_paper_payload(paper)
+    digest_payload = await _prepare_paper_digest_payload(paper, arxiv_id)
+    abstract_text = digest_payload["abstract"]
+    introduction_text = digest_payload["introduction"]
+    formatted_digest = digest_payload["formatted_digest"]
 
     # Try to fetch figures from arXiv if arxiv_id exists
     local_figures = []
-    arxiv_id = meta.get("arxiv_id", "")
 
     if arxiv_id:
         try:
@@ -1833,12 +2579,19 @@ async def save_s2_to_literature(data: dict):
     content_parts.append(f"\n**ABO评分**: {round(paper.get('score', 0) * 10, 1)}/10\n")
 
     # Add summary
-    content_parts.append(f"\n## 摘要\n")
-    content_parts.append(f"{paper.get('summary', '')}\n")
+    if paper.get("summary"):
+        content_parts.append(f"\n## AI 摘要\n")
+        content_parts.append(f"{paper.get('summary', '')}\n")
 
-    if meta.get("abstract"):
+    if abstract_text:
         content_parts.append(f"\n### 原文摘要\n")
-        content_parts.append(f"{meta['abstract']}\n")
+        content_parts.append(f"{abstract_text}\n")
+
+    if introduction_text:
+        content_parts.append(f"\n## Introduction\n")
+        content_parts.append(f"{introduction_text}\n")
+
+    content_parts.append(f"\n{formatted_digest}\n")
 
     # Add figures section
     if local_figures:
@@ -1868,17 +2621,45 @@ async def save_s2_to_literature(data: dict):
         "venue": meta.get("venue", ""),
         "citation-count": meta.get("citation_count", 0),
         "keywords": meta.get("keywords", []),
+        "abstract": abstract_text,
+        "introduction": introduction_text,
+        "formatted-digest": formatted_digest,
         "source-paper-title": source_paper,
         "figures": frontend_figures,
         "figures-dir": str(figures_dir.relative_to(paper_folder)) if local_figures else None,
         "pdf-path": pdf_path,
         "saved-at": datetime.now().isoformat(),
     })
+    post.metadata.update(
+        UnifiedVaultEntry(
+            entry_id=paper_id or arxiv_id or paper.get("id", ""),
+            entry_type="paper",
+            title=paper.get("title", ""),
+            summary=paper.get("summary", ""),
+            source_url=paper.get("source_url", ""),
+            source_platform="semantic-scholar",
+            source_module="semantic-scholar-tracker",
+            authors=meta.get("authors", []),
+            published=str(meta.get("published", "")),
+            tags=paper.get("tags", []),
+            score=paper.get("score", 0.5),
+            obsidian_path=str(target_path.relative_to(lit_path)),
+        ).to_metadata()
+    )
 
     # Atomic write
     tmp = target_path.with_suffix(".tmp")
     tmp.write_text(frontmatter.dumps(post), encoding="utf-8")
     os.replace(tmp, target_path)
+
+    source_note_result = await _ensure_followup_source_paper_note(
+        lit_path=lit_path,
+        base_dir=base_dir,
+        source_title=source_paper,
+        paper=paper,
+    )
+    source_paper_path = source_note_result.get("path")
+    source_paper_pdf_path = source_note_result.get("pdf_path")
 
     enriched_paper = {
         **paper,
@@ -1887,6 +2668,11 @@ async def save_s2_to_literature(data: dict):
             "local_figures": frontend_figures,
             "saved_to_literature": True,
             "literature_path": str(target_path.relative_to(lit_path)),
+            **({"source_paper_path": source_paper_path} if source_paper_path else {}),
+            **({"source_paper_pdf_path": source_paper_pdf_path} if source_paper_pdf_path else {}),
+            "abstract": abstract_text,
+            "introduction": introduction_text,
+            "formatted-digest": formatted_digest,
             **({"pdf_path": pdf_path} if pdf_path else {}),
         },
         "path": str(target_path.relative_to(lit_path)),
@@ -1913,6 +2699,13 @@ async def save_s2_to_literature(data: dict):
             existing_card.metadata["local_figures"] = frontend_figures
             existing_card.metadata["saved_to_literature"] = True
             existing_card.metadata["literature_path"] = str(target_path.relative_to(lit_path))
+            if source_paper_path:
+                existing_card.metadata["source_paper_path"] = source_paper_path
+            if source_paper_pdf_path:
+                existing_card.metadata["source_paper_pdf_path"] = source_paper_pdf_path
+            existing_card.metadata["abstract"] = abstract_text
+            existing_card.metadata["introduction"] = introduction_text
+            existing_card.metadata["formatted-digest"] = formatted_digest
             if pdf_path:
                 existing_card.metadata["pdf_path"] = pdf_path
             card_store.save(existing_card)
@@ -1924,6 +2717,10 @@ async def save_s2_to_literature(data: dict):
         "path": str(target_path.relative_to(lit_path)),
         "figures": frontend_figures,
         "pdf": pdf_path,
+        "introduction": introduction_text,
+        "formatted_digest": formatted_digest,
+        "source_paper_path": source_paper_path,
+        "source_paper_pdf_path": source_paper_pdf_path,
         "folder": str(paper_folder.relative_to(lit_path))
     }
 
@@ -1959,6 +2756,7 @@ async def crawl_semantic_scholar_tracker(data: dict = None):
     tracker = SemanticScholarTracker()
     results = []
     session_id = data.get("session_id") or _generate_crawl_session_id()
+    _register_crawl_session(session_id)
 
     try:
         # Send session ID to client
@@ -1993,11 +2791,102 @@ async def crawl_semantic_scholar_tracker(data: dict = None):
             ),
         })
 
-        items = await tracker.fetch_followups(
-            query=query,
-            max_results=max_results,
-            days_back=days_back,
-            sort_by=sort_by,
+        source_paper = None
+        if hasattr(tracker, "resolve_source_paper"):
+            source_paper = await _await_with_crawl_cancel(
+                tracker.resolve_source_paper(query),
+                session_id=session_id,
+            )
+
+        if source_paper and hasattr(tracker, "source_paper_to_item") and hasattr(tracker, "process"):
+            try:
+                source_external_ids = source_paper.get("externalIds", {}) or {}
+                source_arxiv_id = str(source_external_ids.get("ArXiv") or "").strip()
+                source_s2_paper_id = str(source_paper.get("paperId") or "").strip()
+                existing_source_record = None
+                if source_arxiv_id:
+                    existing_source_record = _paper_store.get_by_arxiv_id(source_arxiv_id)
+                if not existing_source_record and source_s2_paper_id:
+                    existing_source_record = _paper_store.get_by_s2_paper_id(source_s2_paper_id)
+
+                if existing_source_record and (
+                    existing_source_record.get("saved_to_literature")
+                    or existing_source_record.get("literature_path")
+                ):
+                    await broadcaster.send_event({
+                        "type": "crawl_progress",
+                        "module": "semantic-scholar-tracker",
+                        "session_id": session_id,
+                        "phase": "processing",
+                        "current": 0,
+                        "total": max_results or 0,
+                        "message": (
+                            f"跳过源论文抓取，已入库: "
+                            f"{str(existing_source_record.get('literature_path') or existing_source_record.get('title') or source_paper.get('title', ''))[:80]}"
+                        ),
+                    })
+                else:
+                    source_item = tracker.source_paper_to_item(source_paper)
+                    await broadcaster.send_event({
+                        "type": "crawl_progress",
+                        "module": "semantic-scholar-tracker",
+                        "session_id": session_id,
+                        "phase": "processing",
+                        "current": 0,
+                        "total": max_results or 0,
+                        "message": f"正在整理源论文卡片: {str(source_paper.get('title', ''))[:50]}...",
+                    })
+
+                    source_cards = await _await_with_crawl_cancel(
+                        tracker.process([source_item], prefs),
+                        session_id=session_id,
+                        timeout=60,
+                    )
+                    if source_cards:
+                        source_card = source_cards[0]
+                        source_data = {
+                            "id": source_card.id,
+                            "title": source_card.title,
+                            "summary": source_card.summary,
+                            "score": source_card.score,
+                            "tags": source_card.tags,
+                            "source_url": source_card.source_url,
+                            "metadata": source_card.metadata,
+                        }
+                        _paper_store.upsert_from_payload(source_data, source_module="semantic-scholar-tracker")
+
+                        await broadcaster.send_event({
+                            "type": "crawl_paper",
+                            "module": "semantic-scholar-tracker",
+                            "session_id": session_id,
+                            "paper": source_data,
+                            "current": 0,
+                            "total": max_results or 0,
+                        })
+            except asyncio.TimeoutError:
+                print("[s2-tracker] Timeout processing source paper, continuing with follow-ups")
+            except Exception as e:
+                print(f"[s2-tracker] Error processing source paper: {e}")
+
+        try:
+            followup_coro = tracker.fetch_followups(
+                query=query,
+                max_results=max_results,
+                days_back=days_back,
+                sort_by=sort_by,
+                source_paper=source_paper,
+            )
+        except TypeError:
+            followup_coro = tracker.fetch_followups(
+                query=query,
+                max_results=max_results,
+                days_back=days_back,
+                sort_by=sort_by,
+            )
+
+        items = await _await_with_crawl_cancel(
+            followup_coro,
+            session_id=session_id,
         )
 
         if not items:
@@ -2036,9 +2925,10 @@ async def crawl_semantic_scholar_tracker(data: dict = None):
             })
 
             try:
-                card_list = await asyncio.wait_for(
+                card_list = await _await_with_crawl_cancel(
                     tracker.process([item], prefs),
-                    timeout=60
+                    session_id=session_id,
+                    timeout=60,
                 )
                 if card_list:
                     card = card_list[0]
@@ -2080,7 +2970,19 @@ async def crawl_semantic_scholar_tracker(data: dict = None):
 
         _cleanup_crawl_session(session_id)
         return {"papers": results, "count": len(results)}
-
+    except CrawlCancelledError:
+        await broadcaster.send_event({
+            "type": "crawl_cancelled",
+            "module": "semantic-scholar-tracker",
+            "session_id": session_id,
+            "message": (
+                f"爬取任务已取消，已处理 {len(results)}/{len(items) if 'items' in locals() else 0} 篇论文"
+                if "items" in locals() and items
+                else "爬取任务已取消"
+            )
+        })
+        _cleanup_crawl_session(session_id)
+        return {"papers": results, "count": len(results), "cancelled": True}
     except Exception as e:
         _cleanup_crawl_session(session_id)
         error_msg = str(e)
@@ -2152,7 +3054,20 @@ async def get_config():
 
 @app.post("/api/config")
 async def update_config(data: dict):
+    if "intelligence_delivery_time" in data:
+        data["intelligence_delivery_time"] = normalize_daily_time(
+            data.get("intelligence_delivery_time"),
+            _DEFAULT_INTELLIGENCE_DELIVERY_TIME,
+        )
     save_config(data)
+    vault_path = str(data.get("vault_path") or "").strip()
+    if vault_path:
+        ensure_vault_structure(vault_path)
+        ensure_mobile_journal_structure(vault_path)
+    if "intelligence_delivery_time" in data:
+        _apply_intelligence_schedule_config(data["intelligence_delivery_time"])
+    if "intelligence_delivery_enabled" in data:
+        _set_intelligence_delivery_enabled(bool(data["intelligence_delivery_enabled"]))
     return load_config()
 
 
@@ -2191,6 +3106,22 @@ async def validate_vault_path(request: VaultValidationRequest):
     return {"valid": True, "message": "路径验证成功"}
 
 
+@app.get("/api/journal/mobile-paths")
+async def get_mobile_journal_paths_api():
+    vault_path = get_vault_path()
+    if not vault_path:
+        raise HTTPException(400, "Vault not configured")
+    return describe_mobile_journal_paths(vault_path)
+
+
+@app.post("/api/journal/mobile/cleanup")
+async def cleanup_mobile_journal_exports_api():
+    vault_path = get_vault_path()
+    if not vault_path:
+        raise HTTPException(400, "Vault not configured")
+    return cleanup_mobile_journal_exports(vault_path)
+
+
 # ── Preferences ──────────────────────────────────────────────────
 
 @app.get("/api/preferences")
@@ -2211,13 +3142,25 @@ async def get_keyword_preferences():
     """Get all keyword preferences with scores."""
     if is_demo_mode():
         from .demo.data import DEMO_KEYWORD_PREFS as _dkp
-        top = sorted(_dkp.items(), key=lambda x: -x[1]["score"])[:20]
+        top = sorted(
+            ((k, v) for k, v in _dkp.items() if v["score"] > 0),
+            key=lambda x: (-x[1]["score"], -x[1]["count"]),
+        )[:20]
         return {
-            "keywords": {k: {"score": v["score"], "count": v["count"], "source_modules": v["source_modules"]} for k, v in _dkp.items()},
-            "top": [{"keyword": k, "score": v["score"]} for k, v in top],
+            "keywords": {
+                k: {
+                    "score": v["score"],
+                    "count": v["count"],
+                    "source_modules": v["source_modules"],
+                    "last_updated": v.get("last_updated", ""),
+                }
+                for k, v in _dkp.items()
+                if v["score"] > 0
+            },
+            "top": [(k, v["score"]) for k, v in top],
             "disliked": [],
         }
-    prefs = _prefs.get_all_keyword_prefs()
+    prefs = _prefs.get_all_keyword_prefs(positive_only=True)
     return {
         "keywords": {k: v.to_dict() for k, v in prefs.items()},
         "top": _prefs.get_top_keywords(20),
@@ -2262,6 +3205,8 @@ class ModuleConfig(BaseModel):
     """Module configuration schema for crawler subscriptions."""
     keywords: list[str] = []
     up_uids: list[str] = []  # Bilibili
+    favorite_up_uids: list[str] = []  # Bilibili favorite-only pool
+    favorite_up_excluded_uids: list[str] = []  # Favorite-only pool manual exclusions
     followed_up_groups: list[str] = []  # Bilibili followed groups
     followed_up_original_groups: list[int] = []  # Native Bilibili tag IDs
     followed_up_filter_mode: str = "and"  # and | smart_only
@@ -2277,8 +3222,11 @@ class ModuleConfig(BaseModel):
     follow_feed: bool = False
     follow_feed_types: list[int] = [8, 2, 4, 64]
     fetch_follow_limit: int = 20
+    fixed_up_monitor_limit: int = BILIBILI_TRACKER_DEFAULT_LIMIT
     creator_groups: list[str] = []
     creator_profiles: dict = {}
+    creator_name_map: dict = {}
+    favorite_up_profiles: dict = {}
     creator_group_options: list[dict] = []
     keyword_filter: bool = True
     keyword_monitors: list[dict] = []
@@ -2298,6 +3246,35 @@ BILIBILI_FOLLOWED_GROUP_OPTIONS = [
     {"value": "other", "label": "其他"},
 ]
 
+_PAPER_MONITOR_NUMERIC_DEFAULTS = {
+    "arxiv-tracker": {
+        "max_results": 20,
+        "days_back": 30,
+    },
+    "semantic-scholar-tracker": {
+        "max_results": 20,
+        "days_back": 365,
+    },
+}
+
+
+def _normalize_paper_monitor_int(module_id: str, field: str, raw_value: object) -> int | None:
+    defaults = _PAPER_MONITOR_NUMERIC_DEFAULTS.get(module_id)
+    if not defaults or field not in defaults:
+        return None
+
+    if raw_value in (None, ""):
+        return int(defaults[field])
+
+    text = str(raw_value).strip()
+    if not text:
+        return int(defaults[field])
+
+    try:
+        return max(1, int(text))
+    except (TypeError, ValueError):
+        return int(defaults[field])
+
 
 @app.get("/api/modules/{module_id}/config")
 async def get_module_config(module_id: str):
@@ -2309,6 +3286,8 @@ async def get_module_config(module_id: str):
     # Load from preferences
     prefs = _prefs.all_data()
     module_prefs = prefs.get("modules", {}).get(module_id, {})
+    shared_creator_group_options = get_shared_creator_group_options(prefs)
+    shared_creator_grouping = dict(prefs.get("shared_creator_grouping", {}) or {})
 
     subscription_types = getattr(module, "subscription_types", [])
 
@@ -2318,6 +3297,8 @@ async def get_module_config(module_id: str):
         "enabled": getattr(module, "enabled", True),
         "keywords": module_prefs.get("keywords", []),
         "up_uids": module_prefs.get("up_uids", []),
+        "favorite_up_uids": module_prefs.get("favorite_up_uids", []),
+        "favorite_up_excluded_uids": module_prefs.get("favorite_up_excluded_uids", []),
         "followed_up_groups": module_prefs.get("followed_up_groups", []),
         "followed_up_original_groups": module_prefs.get("followed_up_original_groups", []),
         "followed_up_filter_mode": module_prefs.get("followed_up_filter_mode", "and"),
@@ -2332,11 +3313,16 @@ async def get_module_config(module_id: str):
         "follow_feed": module_prefs.get("follow_feed", False),
         "follow_feed_types": module_prefs.get("follow_feed_types", [8, 2, 4, 64]),
         "fetch_follow_limit": module_prefs.get("fetch_follow_limit", 20),
-        "creator_push_enabled": module_prefs.get("creator_push_enabled", True),
+        "fixed_up_monitor_limit": module_prefs.get("fixed_up_monitor_limit"),
+        "creator_push_enabled": module_prefs.get("creator_push_enabled", False),
         "disabled_creator_ids": module_prefs.get("disabled_creator_ids", []),
         "creator_groups": module_prefs.get("creator_groups", []),
         "creator_profiles": module_prefs.get("creator_profiles", {}),
-        "creator_group_options": module_prefs.get("creator_group_options", []),
+        "creator_name_map": module_prefs.get("creator_name_map", {}),
+        "favorite_up_profiles": module_prefs.get("favorite_up_profiles", {}),
+        "creator_group_options": module_prefs.get("creator_group_options", []) or shared_creator_group_options,
+        "shared_creator_grouping": shared_creator_grouping,
+        "shared_signal_entries": build_shared_signal_entries(shared_creator_grouping),
         "keyword_filter": module_prefs.get("keyword_filter", True),
         "sessdata": module_prefs.get("sessdata", ""),
         "cookie": module_prefs.get("cookie", ""),
@@ -2344,21 +3330,73 @@ async def get_module_config(module_id: str):
         "id_token": module_prefs.get("id_token", ""),
         "keyword_monitors": [],
         "followup_monitors": [],
+        "daily_dynamic_monitors": [],
         "days_back": module_prefs.get("days_back"),
         "sort_by": module_prefs.get("sort_by"),
+        "auth_ready": False,
+        "auth_source": None,
         # UI hints for adding subscriptions
         "subscription_types": subscription_types,
     }
 
     if module_id == "bilibili-tracker":
-        config["followed_up_group_options"] = module_prefs.get("creator_group_options") or BILIBILI_FOLLOWED_GROUP_OPTIONS
+        config["fetch_follow_limit"] = module_prefs.get("fetch_follow_limit", BILIBILI_TRACKER_DEFAULT_LIMIT)
+        config["fixed_up_monitor_limit"] = module_prefs.get(
+            "fixed_up_monitor_limit",
+            module_prefs.get("fetch_follow_limit", BILIBILI_TRACKER_DEFAULT_LIMIT),
+        )
+        config["days_back"] = module_prefs.get("days_back", BILIBILI_TRACKER_DEFAULT_DAYS_BACK)
+        bilibili_monitors = normalize_bilibili_dynamic_monitors(module_prefs)
+        bilibili_group_options = (
+            module_prefs.get("creator_group_options")
+            or shared_creator_group_options
+            or BILIBILI_FOLLOWED_GROUP_OPTIONS
+        )
+        bilibili_group_label_lookup = {
+            str(item.get("value") or "").strip(): str(item.get("label") or "").strip()
+            for item in bilibili_group_options
+            if str(item.get("value") or "").strip()
+        }
+        followed_group_monitors = normalize_bilibili_followed_group_monitors(
+            module_prefs,
+            label_lookup=bilibili_group_label_lookup,
+        )
+        config["daily_dynamic_monitors"] = bilibili_monitors
+        config["followed_up_group_monitors"] = followed_group_monitors
+        config.update(
+            build_bilibili_legacy_fields(
+                module_prefs,
+                daily_dynamic_monitors=bilibili_monitors,
+                followed_group_monitors=followed_group_monitors,
+            )
+        )
+        config["followed_up_group_options"] = bilibili_group_options
+        config["auth_ready"] = bool(_get_effective_bilibili_sessdata(module_prefs))
+        config["auth_source"] = _get_bilibili_auth_source(module_prefs)
     elif module_id == "arxiv-tracker":
         config["keyword_monitors"] = normalize_keyword_monitors(module_prefs)
-        config["days_back"] = module_prefs.get("days_back", 30)
+        config["max_results"] = _normalize_paper_monitor_int(module_id, "max_results", module_prefs.get("max_results"))
+        config["days_back"] = _normalize_paper_monitor_int(module_id, "days_back", module_prefs.get("days_back"))
     elif module_id == "semantic-scholar-tracker":
         config["followup_monitors"] = normalize_followup_monitors(module_prefs)
-        config["days_back"] = module_prefs.get("days_back", 365)
+        config["max_results"] = _normalize_paper_monitor_int(module_id, "max_results", module_prefs.get("max_results"))
+        config["days_back"] = _normalize_paper_monitor_int(module_id, "days_back", module_prefs.get("days_back"))
         config["sort_by"] = module_prefs.get("sort_by", "recency")
+    elif module_id == "xiaohongshu-tracker":
+        xhs_config = normalize_xhs_tracker_config(module_prefs)
+        legacy = build_xhs_legacy_fields(
+            module_prefs,
+            keyword_monitors=xhs_config["keyword_monitors"],
+            following_scan=xhs_config["following_scan"],
+            creator_monitors=xhs_config["creator_monitors"],
+        )
+        config.update(legacy)
+        config["keyword_monitors"] = xhs_config["keyword_monitors"]
+        config["following_scan"] = xhs_config["following_scan"]
+        config["following_scan_monitors"] = xhs_config["following_scan_monitors"]
+        config["creator_monitors"] = xhs_config["creator_monitors"]
+        config["auth_ready"] = bool(_get_effective_xhs_cookie(module_prefs))
+        config["auth_source"] = _get_xhs_auth_source(module_prefs)
 
     # Add module-specific defaults if empty
     if "keywords" not in module_prefs and not config["keywords"]:
@@ -2387,11 +3425,49 @@ async def update_module_config(module_id: str, data: dict):
     if "keywords" in data:
         module_prefs["keywords"] = data["keywords"]
     if "keyword_monitors" in data:
-        module_prefs["keyword_monitors"] = normalize_keyword_monitors({"keyword_monitors": data["keyword_monitors"]})
+        if module_id == "xiaohongshu-tracker":
+            module_prefs["keyword_monitors"] = list(data["keyword_monitors"] or [])
+            if not module_prefs["keyword_monitors"]:
+                module_prefs["keywords"] = []
+                module_prefs["enable_keyword_search"] = False
+        else:
+            module_prefs["keyword_monitors"] = normalize_keyword_monitors({"keyword_monitors": data["keyword_monitors"]})
+    if "daily_dynamic_monitors" in data and module_id == "bilibili-tracker":
+        module_prefs["daily_dynamic_monitors"] = normalize_bilibili_dynamic_monitors(
+            {
+                **module_prefs,
+                "daily_dynamic_monitors": data["daily_dynamic_monitors"],
+            }
+        )
+        if module_prefs["daily_dynamic_monitors"]:
+            module_prefs["follow_feed"] = True
+    if "followed_up_group_monitors" in data and module_id == "bilibili-tracker":
+        group_options = (
+            module_prefs.get("creator_group_options")
+            or BILIBILI_FOLLOWED_GROUP_OPTIONS
+        )
+        label_lookup = {
+            str(item.get("value") or "").strip(): str(item.get("label") or "").strip()
+            for item in group_options
+            if str(item.get("value") or "").strip()
+        }
+        module_prefs["followed_up_group_monitors"] = normalize_bilibili_followed_group_monitors(
+            {
+                **module_prefs,
+                "followed_up_group_monitors": data["followed_up_group_monitors"],
+            },
+            label_lookup=label_lookup,
+        )
+        if module_prefs["followed_up_group_monitors"]:
+            module_prefs["follow_feed"] = True
     if "followup_monitors" in data:
         module_prefs["followup_monitors"] = normalize_followup_monitors({"followup_monitors": data["followup_monitors"]})
     if "up_uids" in data:
         module_prefs["up_uids"] = data["up_uids"]
+    if "favorite_up_uids" in data:
+        module_prefs["favorite_up_uids"] = list(data["favorite_up_uids"] or [])
+    if "favorite_up_excluded_uids" in data:
+        module_prefs["favorite_up_excluded_uids"] = list(data["favorite_up_excluded_uids"] or [])
     if "followed_up_groups" in data:
         module_prefs["followed_up_groups"] = data["followed_up_groups"]
     if "followed_up_original_groups" in data:
@@ -2412,13 +3488,21 @@ async def update_module_config(module_id: str, data: dict):
     if "podcast_ids" in data:
         module_prefs["podcast_ids"] = data["podcast_ids"]
     if "max_results" in data:
-        module_prefs["max_results"] = max(1, int(data["max_results"] or 1))
-    if "days_back" in data:
-        raw_days_back = data["days_back"]
-        if raw_days_back in (None, "", 0, "0"):
-            module_prefs["days_back"] = None
+        normalized_max_results = _normalize_paper_monitor_int(module_id, "max_results", data["max_results"])
+        if normalized_max_results is not None:
+            module_prefs["max_results"] = normalized_max_results
         else:
-            module_prefs["days_back"] = max(1, int(raw_days_back))
+            module_prefs["max_results"] = max(1, int(data["max_results"] or 1))
+    if "days_back" in data:
+        normalized_days_back = _normalize_paper_monitor_int(module_id, "days_back", data["days_back"])
+        if normalized_days_back is not None:
+            module_prefs["days_back"] = normalized_days_back
+        else:
+            raw_days_back = data["days_back"]
+            if raw_days_back in (None, "", 0, "0"):
+                module_prefs["days_back"] = None
+            else:
+                module_prefs["days_back"] = max(1, int(raw_days_back))
     if "sort_by" in data:
         module_prefs["sort_by"] = str(data["sort_by"] or "recency").strip() or "recency"
     if "enable_keyword_search" in data:
@@ -2434,6 +3518,8 @@ async def update_module_config(module_id: str, data: dict):
         module_prefs["follow_feed_types"] = data["follow_feed_types"]
     if "fetch_follow_limit" in data:
         module_prefs["fetch_follow_limit"] = max(1, int(data["fetch_follow_limit"] or 1))
+    if "fixed_up_monitor_limit" in data:
+        module_prefs["fixed_up_monitor_limit"] = max(1, int(data["fixed_up_monitor_limit"] or 1))
     if "creator_push_enabled" in data:
         module_prefs["creator_push_enabled"] = bool(data["creator_push_enabled"])
     if "disabled_creator_ids" in data:
@@ -2442,14 +3528,98 @@ async def update_module_config(module_id: str, data: dict):
         module_prefs["creator_groups"] = list(data["creator_groups"] or [])
     if "creator_profiles" in data:
         module_prefs["creator_profiles"] = dict(data["creator_profiles"] or {})
+    if "creator_name_map" in data:
+        module_prefs["creator_name_map"] = dict(data["creator_name_map"] or {})
+    if "favorite_up_profiles" in data:
+        module_prefs["favorite_up_profiles"] = dict(data["favorite_up_profiles"] or {})
     if "creator_group_options" in data:
         module_prefs["creator_group_options"] = list(data["creator_group_options"] or [])
+    if "following_scan" in data and module_id == "xiaohongshu-tracker":
+        module_prefs["following_scan"] = dict(data["following_scan"] or {})
+    if "following_scan_monitors" in data and module_id == "xiaohongshu-tracker":
+        module_prefs["following_scan_monitors"] = list(data["following_scan_monitors"] or [])
+        if not module_prefs["following_scan_monitors"]:
+            module_prefs["follow_feed"] = False
+            existing_scan = dict(module_prefs.get("following_scan") or {})
+            existing_scan["keywords"] = []
+            existing_scan["enabled"] = False
+            module_prefs["following_scan"] = existing_scan
+    if "creator_monitors" in data and module_id == "xiaohongshu-tracker":
+        module_prefs["creator_monitors"] = list(data["creator_monitors"] or [])
+        if not module_prefs["creator_monitors"]:
+            module_prefs["user_ids"] = []
+            module_prefs["disabled_creator_ids"] = []
+            module_prefs["creator_push_enabled"] = False
+    if "shared_creator_grouping" in data:
+        prefs.setdefault("shared_creator_grouping", {})
+        shared_payload = dict(data["shared_creator_grouping"] or {})
+        signal_group_labels = {}
+        for signal, raw_labels in dict(shared_payload.get("signal_group_labels") or {}).items():
+            normalized_signal = str(signal or "").strip()
+            if not normalized_signal:
+                continue
+            if isinstance(raw_labels, (list, tuple, set)):
+                normalized_labels = [
+                    str(label).strip()[:48]
+                    for label in raw_labels
+                    if str(label or "").strip()
+                ]
+                if not normalized_labels:
+                    continue
+                signal_group_labels[normalized_signal] = (
+                    normalized_labels[0] if len(normalized_labels) == 1 else normalized_labels
+                )
+                continue
+
+            normalized_label = str(raw_labels or "").strip()[:48]
+            if normalized_label:
+                signal_group_labels[normalized_signal] = normalized_label
+        prefs["shared_creator_grouping"]["signal_group_labels"] = signal_group_labels
+        prefs["shared_creator_grouping"]["updated_at"] = datetime.utcnow().isoformat()
     if "keyword_filter" in data:
         module_prefs["keyword_filter"] = data["keyword_filter"]
     if "sessdata" in data:
         module_prefs["sessdata"] = data["sessdata"]
     if "cookie" in data:
         module_prefs["cookie"] = data["cookie"]
+    if module_id == "xiaohongshu-tracker":
+        xhs_config = normalize_xhs_tracker_config(module_prefs)
+        module_prefs["keyword_monitors"] = xhs_config["keyword_monitors"]
+        module_prefs["following_scan"] = xhs_config["following_scan"]
+        module_prefs["following_scan_monitors"] = xhs_config["following_scan_monitors"]
+        module_prefs["creator_monitors"] = xhs_config["creator_monitors"]
+        module_prefs.update(
+            build_xhs_legacy_fields(
+                module_prefs,
+                keyword_monitors=xhs_config["keyword_monitors"],
+                following_scan=xhs_config["following_scan"],
+                creator_monitors=xhs_config["creator_monitors"],
+            )
+        )
+    if module_id == "bilibili-tracker":
+        bilibili_monitors = normalize_bilibili_dynamic_monitors(module_prefs)
+        bilibili_group_options = (
+            module_prefs.get("creator_group_options")
+            or BILIBILI_FOLLOWED_GROUP_OPTIONS
+        )
+        bilibili_group_label_lookup = {
+            str(item.get("value") or "").strip(): str(item.get("label") or "").strip()
+            for item in bilibili_group_options
+            if str(item.get("value") or "").strip()
+        }
+        followed_group_monitors = normalize_bilibili_followed_group_monitors(
+            module_prefs,
+            label_lookup=bilibili_group_label_lookup,
+        )
+        module_prefs["daily_dynamic_monitors"] = bilibili_monitors
+        module_prefs["followed_up_group_monitors"] = followed_group_monitors
+        module_prefs.update(
+            build_bilibili_legacy_fields(
+                module_prefs,
+                daily_dynamic_monitors=bilibili_monitors,
+                followed_group_monitors=followed_group_monitors,
+            )
+        )
 
     # Save preferences
     _prefs.update(prefs)

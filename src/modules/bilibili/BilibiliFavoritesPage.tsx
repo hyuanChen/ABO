@@ -3,10 +3,13 @@ import type React from "react";
 import { Check, Cookie, FolderHeart, ImageOff, RefreshCw, RotateCcw, Save, Tv, Users } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
 import { useToast } from "../../components/Toast";
+import { withLocationSuffix } from "../../core/pathDisplay";
 import { useStore } from "../../core/store";
+import { readJsonStorage } from "../../core/storage";
 import {
   BilibiliFavoriteFolder,
   FavoriteCrawlResponse,
+  bilibiliCancelTaskSilently,
   bilibiliListFavoriteFolders,
   bilibiliGetConfig,
   bilibiliGetCookieFromBrowser,
@@ -40,18 +43,54 @@ const FAVORITES_LIST_TASK_KEY = "bilibili_favorites_list_task_id";
 const FAVORITES_CRAWL_TASK_KEY = "bilibili_favorites_crawl_task_id";
 const FAVORITES_FOLDERS_CACHE_KEY = "bilibili_favorites_folders_cache";
 const FAVORITES_RESULT_CACHE_KEY = "bilibili_favorites_result_cache";
+const TASK_POLL_INTERVAL_MS = 900;
+const TASK_POLL_RETRY_DELAY_MS = 1500;
+const TASK_POLL_MAX_CONSECUTIVE_ERRORS = 12;
+const TASK_POLL_NOT_FOUND_RETRY_LIMIT = 5;
 
 function readJsonCache<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) as T : fallback;
-  } catch {
-    return fallback;
+  return readJsonStorage(key, fallback);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function getErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err || "未知错误");
+}
+
+function createTerminalTaskError(message: string): Error & { taskTerminal: true } {
+  return Object.assign(new Error(message), { taskTerminal: true as const });
+}
+
+function isTerminalTaskError(err: unknown): err is Error & { taskTerminal: true } {
+  return Boolean(err && typeof err === "object" && "taskTerminal" in err);
+}
+
+function formatTaskPollingMessage(err: unknown, taskStorageKey?: string): string {
+  const message = getErrorMessage(err);
+  if (isTerminalTaskError(err)) {
+    return message;
   }
+  if (taskStorageKey && localStorage.getItem(taskStorageKey)) {
+    return `${message}；后台任务可能仍在执行，可稍后自动恢复`;
+  }
+  return message;
+}
+
+function cancelStoredTask(taskStorageKey: string): void {
+  const taskId = localStorage.getItem(taskStorageKey);
+  if (!taskId) {
+    return;
+  }
+  localStorage.removeItem(taskStorageKey);
+  bilibiliCancelTaskSilently(taskId);
 }
 
 export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPageProps) {
   const toast = useToast();
+  const config = useStore((state) => state.config);
   const setActiveTab = useStore((state) => state.setActiveTab);
   const didAutoLoad = useRef(false);
   const [cookie, setCookie] = useState("");
@@ -112,16 +151,27 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
     const crawlTaskId = localStorage.getItem(FAVORITES_CRAWL_TASK_KEY);
     if (crawlTaskId) {
       void resumeCrawlTask(crawlTaskId, false).catch((err) => {
-        toast.error("恢复爬取任务失败", err instanceof Error ? err.message : "未知错误");
+        toast.error("恢复爬取任务失败", formatTaskPollingMessage(err, FAVORITES_CRAWL_TASK_KEY));
       });
       return;
     }
     if (listTaskId) {
       void resumeListTask(listTaskId, false).catch((err) => {
-        toast.error("恢复收藏栏任务失败", err instanceof Error ? err.message : "未知错误");
+        toast.error("恢复收藏栏任务失败", formatTaskPollingMessage(err, FAVORITES_LIST_TASK_KEY));
       });
       return;
     }
+  }, []);
+
+  useEffect(() => {
+    const handlePageHide = () => {
+      cancelStoredTask(FAVORITES_LIST_TASK_KEY);
+      cancelStoredTask(FAVORITES_CRAWL_TASK_KEY);
+    };
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      window.removeEventListener("pagehide", handlePageHide);
+    };
   }, []);
 
   function finalizeListTask(taskId?: string | null) {
@@ -140,38 +190,61 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
 
   async function resumeListTask(taskId: string, showToast = true) {
     setLoading(true);
+    let consecutiveErrors = 0;
     try {
       while (true) {
-        const task = await bilibiliGetListFavoriteFoldersTask(taskId);
-        setListTask(task);
+        try {
+          const task = await bilibiliGetListFavoriteFoldersTask(taskId);
+          consecutiveErrors = 0;
+          setListTask(task);
 
-        if (task.status === "completed") {
-          const res = task.result;
-          if (!res) {
-            throw new Error("收藏栏预览结果为空");
+          if (task.status === "completed") {
+            const res = task.result;
+            if (!res) {
+              throw createTerminalTaskError("收藏栏预览结果为空");
+            }
+            setFolders(res.folders);
+            setCookieConfigured(true);
+            setSelectedIds((prev) => {
+              const valid = new Set(res.folders.map((folder) => folder.id));
+              return new Set([...prev].filter((id) => valid.has(id)));
+            });
+            finalizeListTask(taskId);
+            if (showToast) {
+              toast.success("收藏栏已加载", `${res.folder_count} 个条目`);
+            }
+            break;
           }
-          setFolders(res.folders);
-          setCookieConfigured(true);
-          setSelectedIds((prev) => {
-            const valid = new Set(res.folders.map((folder) => folder.id));
-            return new Set([...prev].filter((id) => valid.has(id)));
-          });
-          finalizeListTask(taskId);
-          if (showToast) {
-            toast.success("收藏栏已加载", `${res.folder_count} 个条目`);
+
+          if (task.status === "failed") {
+            finalizeListTask(taskId);
+            throw createTerminalTaskError(task.error || "收藏栏读取失败");
           }
-          break;
-        }
 
-        if (task.status === "failed") {
-          finalizeListTask(taskId);
-          throw new Error(task.error || "收藏栏读取失败");
-        }
+          if (task.status === "cancelled") {
+            finalizeListTask(taskId);
+            throw createTerminalTaskError(task.error || "后台任务已停止");
+          }
 
-        await new Promise((resolve) => window.setTimeout(resolve, 900));
+          await sleep(TASK_POLL_INTERVAL_MS);
+        } catch (err) {
+          if (isTerminalTaskError(err)) {
+            throw err;
+          }
+          consecutiveErrors += 1;
+          const maxRetry = isNotFoundError(err)
+            ? TASK_POLL_NOT_FOUND_RETRY_LIMIT
+            : TASK_POLL_MAX_CONSECUTIVE_ERRORS;
+          if (consecutiveErrors >= maxRetry) {
+            if (isNotFoundError(err)) {
+              finalizeListTask(taskId);
+            }
+            throw err;
+          }
+          await sleep(TASK_POLL_RETRY_DELAY_MS);
+        }
       }
     } catch (err) {
-      finalizeListTask(taskId);
       throw err;
     } finally {
       setLoading(false);
@@ -180,37 +253,65 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
 
   async function resumeCrawlTask(taskId: string, showToast = true) {
     setCrawling(true);
+    let consecutiveErrors = 0;
     try {
       while (true) {
-        const task = await bilibiliGetCrawlFavoriteFoldersTask(taskId);
-        setCrawlTask(task);
+        try {
+          const task = await bilibiliGetCrawlFavoriteFoldersTask(taskId);
+          consecutiveErrors = 0;
+          setCrawlTask(task);
 
-        if (task.status === "completed") {
-          const crawlResult = task.result;
-          if (!crawlResult) {
-            throw new Error("收藏内容入库结果为空");
+          if (task.status === "completed") {
+            const crawlResult = task.result;
+            if (!crawlResult) {
+              throw createTerminalTaskError("收藏内容入库结果为空");
+            }
+            setResult(crawlResult);
+            setCookieConfigured(true);
+            finalizeCrawlTask(taskId);
+            if (showToast) {
+              toast.success(
+                crawlResult.crawl_mode === "full" ? "收藏夹已全量入库" : "收藏夹已增量入库",
+                withLocationSuffix(
+                  `新增 ${crawlResult.favorite_count} 条，稍后再看 ${crawlResult.watch_later_count} 条，跳过 ${crawlResult.skipped_count} 条`,
+                  crawlResult.output_dir,
+                  "vault",
+                  config,
+                ),
+              );
+            }
+            break;
           }
-          setResult(crawlResult);
-          setCookieConfigured(true);
-          finalizeCrawlTask(taskId);
-          if (showToast) {
-            toast.success(
-              crawlResult.crawl_mode === "full" ? "收藏夹已全量入库" : "收藏夹已增量入库",
-              `新增 ${crawlResult.favorite_count} 条，稍后再看 ${crawlResult.watch_later_count} 条，跳过 ${crawlResult.skipped_count} 条`
-            );
+
+          if (task.status === "failed") {
+            finalizeCrawlTask(taskId);
+            throw createTerminalTaskError(task.error || "收藏内容入库失败");
           }
-          break;
-        }
 
-        if (task.status === "failed") {
-          finalizeCrawlTask(taskId);
-          throw new Error(task.error || "收藏内容入库失败");
-        }
+          if (task.status === "cancelled") {
+            finalizeCrawlTask(taskId);
+            throw createTerminalTaskError(task.error || "后台任务已停止");
+          }
 
-        await new Promise((resolve) => window.setTimeout(resolve, 900));
+          await sleep(TASK_POLL_INTERVAL_MS);
+        } catch (err) {
+          if (isTerminalTaskError(err)) {
+            throw err;
+          }
+          consecutiveErrors += 1;
+          const maxRetry = isNotFoundError(err)
+            ? TASK_POLL_NOT_FOUND_RETRY_LIMIT
+            : TASK_POLL_MAX_CONSECUTIVE_ERRORS;
+          if (consecutiveErrors >= maxRetry) {
+            if (isNotFoundError(err)) {
+              finalizeCrawlTask(taskId);
+            }
+            throw err;
+          }
+          await sleep(TASK_POLL_RETRY_DELAY_MS);
+        }
       }
     } catch (err) {
-      finalizeCrawlTask(taskId);
       throw err;
     } finally {
       setCrawling(false);
@@ -297,7 +398,7 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
         }
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "未知错误";
+      const message = formatTaskPollingMessage(err, FAVORITES_LIST_TASK_KEY);
       if (
         message.includes("SESSDATA")
         || message.includes("Cookie")
@@ -383,7 +484,12 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
           setCookieConfigured(true);
           toast.success(
             crawlResult.crawl_mode === "full" ? "收藏夹已全量入库" : "收藏夹已增量入库",
-            `新增 ${crawlResult.favorite_count} 条，稍后再看 ${crawlResult.watch_later_count} 条，跳过 ${crawlResult.skipped_count} 条`
+            withLocationSuffix(
+              `新增 ${crawlResult.favorite_count} 条，稍后再看 ${crawlResult.watch_later_count} 条，跳过 ${crawlResult.skipped_count} 条`,
+              crawlResult.output_dir,
+              "vault",
+              config,
+            ),
           );
           setLegacyStatus({
             kind: "crawl",
@@ -397,7 +503,7 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
         throw err;
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "未知错误";
+      const message = formatTaskPollingMessage(err, FAVORITES_CRAWL_TASK_KEY);
       if (
         message.includes("SESSDATA")
         || message.includes("Cookie")

@@ -17,14 +17,17 @@ const ALL_ACHIEVEMENTS = [
 
 interface Props {
   achievements: Achievement[];
+  showHeader?: boolean;
 }
 
-export default function AchievementGallery({ achievements }: Props) {
+export default function AchievementGallery({ achievements, showHeader = true }: Props) {
   const unlockedMap = new Map(achievements.map((a) => [a.id, a]));
 
   return (
     <div>
-      <h3 style={{ fontSize: "0.875rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "12px" }}>成就徽章</h3>
+      {showHeader && (
+        <h3 style={{ fontSize: "0.875rem", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "12px" }}>成就徽章</h3>
+      )}
       <div style={{ display: "flex", gap: "12px", overflowX: "auto", paddingBottom: "8px" }}>
         {ALL_ACHIEVEMENTS.map(({ id, label, desc, icon }) => {
           const unlocked = unlockedMap.get(id);

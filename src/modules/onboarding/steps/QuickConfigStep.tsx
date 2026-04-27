@@ -16,8 +16,12 @@ import {
   Globe,
   CheckCircle2,
   AlertCircle,
+  Bot,
   ChevronDown,
   ChevronUp,
+  Clock,
+  KeyRound,
+  ShieldCheck,
 } from "lucide-react";
 import { api } from "../../../core/api";
 import { useStore } from "../../../core/store";
@@ -45,6 +49,8 @@ interface ModuleConfig {
   keywords: string[];
   requiresCookie: boolean;
   description: string;
+  advanced?: boolean;
+  configHint?: string;
 }
 
 type CookiePlatform = "bilibili" | "xiaohongshu";
@@ -71,10 +77,21 @@ const DEFAULT_KEYWORDS: Record<string, string[]> = {
   "folder-monitor": ["research", "notes", "ideas"],
 };
 
+const AI_PROVIDER_OPTIONS = [
+  { id: "codex" as const, label: "Codex", supported: true, hint: "默认可用" },
+  { id: "claude" as const, label: "Claude", supported: false, hint: "暂不支持（易封号）" },
+];
+
 export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps) {
-  const { addToast } = useStore();
+  const { addToast, setConfig, setAiProvider: setGlobalAiProvider } = useStore();
   const [isSaving, setIsSaving] = useState(false);
-  const [showCookieHint, setShowCookieHint] = useState(false);
+  const [showCookieHint, setShowCookieHint] = useState(true);
+  const [aiProvider, setAiProvider] = useState<"codex" | "claude">("codex");
+  const [paperAiScoringEnabled, setPaperAiScoringEnabled] = useState(false);
+  const [intelligenceDeliveryEnabled, setIntelligenceDeliveryEnabled] = useState(true);
+  const [intelligenceDeliveryTime, setIntelligenceDeliveryTime] = useState("09:00");
+  const [semanticScholarApiKey, setSemanticScholarApiKey] = useState("");
+  const [showAdvancedModules, setShowAdvancedModules] = useState(false);
   const [cookieSetup, setCookieSetup] = useState<Record<CookiePlatform, CookieSetupState>>({
     bilibili: {
       configured: false,
@@ -104,7 +121,8 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
       enabled: true,
       keywords: DEFAULT_KEYWORDS["arxiv-tracker"],
       requiresCookie: false,
-      description: "追踪最新学术论文",
+      description: "定时抓取 arXiv 关键词论文",
+      configHint: "主动工具：论文追踪 / arXiv API",
     },
     {
       id: "semantic-scholar-tracker",
@@ -113,7 +131,8 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
       enabled: true,
       keywords: DEFAULT_KEYWORDS["semantic-scholar-tracker"],
       requiresCookie: false,
-      description: "学术搜索引擎",
+      description: "追踪一篇论文的后续研究",
+      configHint: "API Key 可选；留空也能使用",
     },
     {
       id: "bilibili-tracker",
@@ -122,7 +141,8 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
       enabled: true,
       keywords: DEFAULT_KEYWORDS["bilibili-tracker"],
       requiresCookie: true,
-      description: "技术视频和教程",
+      description: "关注流、UP 主和收藏视频追踪",
+      configHint: "主动工具：哔哩哔哩工具",
     },
     {
       id: "xiaohongshu-tracker",
@@ -131,7 +151,8 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
       enabled: true,
       keywords: DEFAULT_KEYWORDS["xiaohongshu-tracker"],
       requiresCookie: true,
-      description: "学习笔记和评测",
+      description: "收藏专辑、关键词和关注流追踪",
+      configHint: "主动工具：小红书工具",
     },
     {
       id: "xiaoyuzhou-tracker",
@@ -141,24 +162,27 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
       keywords: DEFAULT_KEYWORDS["xiaoyuzhou-tracker"],
       requiresCookie: false,
       description: "播客内容追踪",
+      advanced: true,
     },
     {
       id: "zhihu-tracker",
       name: "知乎追踪器",
       icon: <HelpCircle style={{ width: "20px", height: "20px" }} />,
-      enabled: true,
+      enabled: false,
       keywords: DEFAULT_KEYWORDS["zhihu-tracker"],
       requiresCookie: true,
       description: "问答和深度文章",
+      advanced: true,
     },
     {
       id: "folder-monitor",
       name: "文件夹监控",
       icon: <Rss style={{ width: "20px", height: "20px" }} />,
-      enabled: true,
+      enabled: false,
       keywords: DEFAULT_KEYWORDS["folder-monitor"],
       requiresCookie: false,
       description: "监控本地文件变化",
+      advanced: true,
     },
   ]);
 
@@ -179,8 +203,51 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
   };
 
   useEffect(() => {
+    void loadGlobalConfig();
+    void loadModuleStatus();
     void loadCookieStatus();
   }, []);
+
+  const loadGlobalConfig = async () => {
+    try {
+      const config = await api.get<Record<string, unknown>>("/api/config");
+      setAiProvider(config.ai_provider === "codex" ? "codex" : "codex");
+      setPaperAiScoringEnabled(Boolean(config.paper_ai_scoring_enabled));
+      setIntelligenceDeliveryEnabled(config.intelligence_delivery_enabled !== false);
+      setIntelligenceDeliveryTime(String(config.intelligence_delivery_time || "09:00"));
+      setSemanticScholarApiKey(String(config.semantic_scholar_api_key || ""));
+    } catch (error) {
+      console.error("Failed to load onboarding config:", error);
+    }
+  };
+
+  const loadModuleStatus = async () => {
+    try {
+      const moduleList = await api.get<{ modules: Array<{ id: string; enabled?: boolean }> }>("/api/modules");
+      const enabledById = new Map(moduleList.modules.map((module) => [module.id, module.enabled !== false]));
+      const configResults = await Promise.allSettled(
+        modules.map((module) =>
+          api.get<{ keywords?: string[] }>(`/api/modules/${module.id}/config`)
+            .then((config) => ({ id: module.id, keywords: config.keywords }))
+        )
+      );
+      const keywordsById = new Map<string, string[]>();
+      configResults.forEach((result) => {
+        if (result.status === "fulfilled" && Array.isArray(result.value.keywords) && result.value.keywords.length > 0) {
+          keywordsById.set(result.value.id, result.value.keywords);
+        }
+      });
+      setModules((current) =>
+        current.map((module) => ({
+          ...module,
+          enabled: enabledById.has(module.id) ? Boolean(enabledById.get(module.id)) : module.enabled,
+          keywords: keywordsById.get(module.id) || module.keywords,
+        }))
+      );
+    } catch (error) {
+      console.error("Failed to load onboarding module status:", error);
+    }
+  };
 
   const setCookiePlatformState = (
     platform: CookiePlatform,
@@ -396,30 +463,40 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
   const handleContinue = async () => {
     setIsSaving(true);
     try {
-      // Save module configurations — use allSettled so partial failures don't block progress
-      const enabledModules = modules.filter((m) => m.enabled);
+      const savedConfig = await api.post<Record<string, unknown>>("/api/config", {
+        ai_provider: aiProvider,
+        paper_ai_scoring_enabled: paperAiScoringEnabled,
+        intelligence_delivery_enabled: intelligenceDeliveryEnabled,
+        intelligence_delivery_time: intelligenceDeliveryTime,
+        ...(semanticScholarApiKey.trim()
+          ? { semantic_scholar_api_key: semanticScholarApiKey.trim() }
+          : {}),
+      });
+      setConfig(savedConfig as any);
+      setGlobalAiProvider(aiProvider);
 
       const results = await Promise.allSettled(
-        enabledModules.map((module) =>
-          api.post(`/api/modules/${module.id}/config`, {
+        modules.map(async (module) => {
+          await api.patch(`/api/modules/${module.id}`, { enabled: module.enabled });
+          await api.post(`/api/modules/${module.id}/config`, {
             keywords: module.keywords,
-            enabled: module.enabled,
-          })
-        )
+          });
+        })
       );
 
       const failed = results.filter((r) => r.status === "rejected").length;
+      const enabledModules = modules.filter((m) => m.enabled);
       if (failed > 0) {
         addToast({
           kind: "info",
           title: "部分配置保存失败",
-          message: `${enabledModules.length - failed}/${enabledModules.length} 个模块保存成功，可稍后在模块管理中重新配置`,
+          message: `${modules.length - failed}/${modules.length} 个模块保存成功，可稍后在模块管理或设置中重新配置`,
         });
       } else {
         addToast({
           kind: "success",
-          title: "配置已保存",
-          message: `已启用 ${enabledModules.length} 个模块`,
+          title: "一键配置已保存",
+          message: `默认推送 ${intelligenceDeliveryEnabled ? "已开启" : "已关闭"}，已启用 ${enabledModules.length} 个模块`,
         });
       }
 
@@ -436,6 +513,8 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
 
   const enabledCount = modules.filter((m) => m.enabled).length;
   const cookieRequiredCount = modules.filter((m) => m.enabled && m.requiresCookie).length;
+  const advancedCount = modules.filter((m) => m.advanced).length;
+  const visibleModules = modules.filter((m) => !m.advanced || showAdvancedModules);
   const showCookieSetup = modules.some(
     (module) =>
       module.enabled && (module.id === "bilibili-tracker" || module.id === "xiaohongshu-tracker")
@@ -667,7 +746,7 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
             marginBottom: "8px",
           }}
         >
-          快速配置
+          一键配置
         </h2>
 
         <p
@@ -677,10 +756,215 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
             lineHeight: 1.6,
           }}
         >
-          选择要启用的模块并配置关键词
+          保留默认设置直接继续，基础配置约 10 秒钟；自动化模块关键词可以先留空，稍后再配置
           <br />
-          已启用 {enabledCount} 个模块，其中 {cookieRequiredCount} 个需要 Cookie
+          已启用 {enabledCount} 个模块，其中 {cookieRequiredCount} 个需要浏览器 Cookie，建议优先先把 Cookie 配好
         </p>
+      </div>
+
+      {/* Core Preferences */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+          gap: "16px",
+          marginBottom: "24px",
+        }}
+      >
+        <div
+          style={{
+            padding: "18px",
+            borderRadius: "var(--radius-lg)",
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-light)",
+            boxShadow: "var(--shadow-soft)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+            <Clock style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />
+            <div>
+              <div style={{ fontSize: "0.9375rem", fontWeight: 800, color: "var(--text-main)" }}>每日情报</div>
+              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "2px" }}>到点把配置好的监控跑一遍</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", marginBottom: "12px" }}>
+            <span style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+              {intelligenceDeliveryEnabled ? "已开启默认推送" : "已关闭默认推送，只保留手动抓取"}
+            </span>
+            <button
+              onClick={() => setIntelligenceDeliveryEnabled((current) => !current)}
+              style={{
+                width: "48px",
+                height: "26px",
+                borderRadius: "999px",
+                border: "none",
+                background: intelligenceDeliveryEnabled ? "var(--color-primary)" : "var(--border-light)",
+                position: "relative",
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              <span
+                style={{
+                  position: "absolute",
+                  top: "3px",
+                  left: intelligenceDeliveryEnabled ? "25px" : "3px",
+                  width: "20px",
+                  height: "20px",
+                  borderRadius: "50%",
+                  background: "white",
+                  boxShadow: "0 2px 4px rgba(0,0,0,0.16)",
+                  transition: "left 180ms ease",
+                }}
+              />
+            </button>
+          </div>
+          <label style={{ display: "block", fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "8px", fontWeight: 700 }}>
+            默认推送时间
+          </label>
+          <input
+            type="time"
+            step={1800}
+            value={intelligenceDeliveryTime}
+            onChange={(event) => setIntelligenceDeliveryTime(event.target.value)}
+            style={{
+              width: "100%",
+              padding: "10px 12px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border-light)",
+              background: "var(--bg-app)",
+              color: "var(--text-main)",
+              fontSize: "0.875rem",
+            }}
+          />
+        </div>
+
+        <div
+          style={{
+            padding: "18px",
+            borderRadius: "var(--radius-lg)",
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-light)",
+            boxShadow: "var(--shadow-soft)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+            <Bot style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />
+            <div>
+              <div style={{ fontSize: "0.9375rem", fontWeight: 800, color: "var(--text-main)" }}>AI 助手</div>
+              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "2px" }}>影响助手入口和论文帮读评分</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
+            {AI_PROVIDER_OPTIONS.map((provider) => {
+              const active = aiProvider === provider.id;
+              return (
+                <button
+                  key={provider.id}
+                  type="button"
+                  onClick={() => {
+                    if (!provider.supported) return;
+                    setAiProvider(provider.id);
+                  }}
+                  disabled={!provider.supported}
+                  title={provider.hint}
+                  style={{
+                    flex: 1,
+                    padding: "9px 12px",
+                    borderRadius: "var(--radius-md)",
+                    border: `1px solid ${provider.supported ? (active ? "var(--color-primary)" : "var(--border-light)") : "rgba(15, 23, 42, 0.12)"}`,
+                    background: provider.supported
+                      ? (active ? "rgba(188, 164, 227, 0.14)" : "var(--bg-app)")
+                      : "rgba(15, 23, 42, 0.74)",
+                    color: provider.supported
+                      ? (active ? "var(--color-primary)" : "var(--text-secondary)")
+                      : "rgba(255, 255, 255, 0.72)",
+                    fontSize: "0.8125rem",
+                    fontWeight: 800,
+                    cursor: provider.supported ? "pointer" : "not-allowed",
+                    opacity: provider.supported ? 1 : 0.92,
+                  }}
+                >
+                  {provider.label}
+                </button>
+              );
+            })}
+          </div>
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: "var(--radius-md)",
+              background: "rgba(15, 23, 42, 0.08)",
+              color: "var(--text-secondary)",
+              fontSize: "0.75rem",
+              lineHeight: 1.6,
+              marginBottom: "12px",
+            }}
+          >
+            当前默认使用 Codex。Claude 暂不支持，易封号。
+          </div>
+          <button
+            onClick={() => setPaperAiScoringEnabled((current) => !current)}
+            style={{
+              width: "100%",
+              padding: "10px 12px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border-light)",
+              background: paperAiScoringEnabled ? "rgba(168, 230, 207, 0.16)" : "var(--bg-app)",
+              color: paperAiScoringEnabled ? "#4f9b80" : "var(--text-secondary)",
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              justifyContent: "center",
+              fontSize: "0.8125rem",
+              fontWeight: 800,
+              cursor: "pointer",
+            }}
+          >
+            <ShieldCheck style={{ width: "16px", height: "16px" }} />
+            {paperAiScoringEnabled ? "论文 AI 帮读评分已开启" : "暂不调用 AI 评分论文"}
+          </button>
+        </div>
+
+        <div
+          style={{
+            padding: "18px",
+            borderRadius: "var(--radius-lg)",
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-light)",
+            boxShadow: "var(--shadow-soft)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+            <KeyRound style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />
+            <div>
+              <div style={{ fontSize: "0.9375rem", fontWeight: 800, color: "var(--text-main)" }}>学术 API</div>
+              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "2px" }}>arXiv 无需 Key，Semantic Scholar 可选</div>
+            </div>
+          </div>
+          <label style={{ display: "block", fontSize: "0.75rem", color: "var(--text-muted)", marginBottom: "8px", fontWeight: 700 }}>
+            Semantic Scholar API Key（可选）
+          </label>
+          <input
+            type="password"
+            value={semanticScholarApiKey}
+            onChange={(event) => setSemanticScholarApiKey(event.target.value)}
+            placeholder="留空也可以先开始"
+            style={{
+              width: "100%",
+              padding: "10px 12px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border-light)",
+              background: "var(--bg-app)",
+              color: "var(--text-main)",
+              fontSize: "0.875rem",
+              marginBottom: "10px",
+            }}
+          />
+          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+            如果你后续大量跑 Follow Up，再到 Semantic Scholar 申请自己的 Key。这里先不强迫填写。
+          </div>
+        </div>
       </div>
 
       {/* Cookie Setup */}
@@ -750,7 +1034,41 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
 
       {/* Module List */}
       <div style={{ display: "flex", flexDirection: "column", gap: "16px", marginBottom: "32px" }}>
-        {modules.map((module) => (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "16px",
+            padding: "4px 2px",
+          }}
+        >
+          <div>
+            <div style={{ fontSize: "0.9375rem", fontWeight: 800, color: "var(--text-main)" }}>自动化模块</div>
+            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "4px" }}>
+              这里只做开关和关键词。小红书、B 站、论文的精细监控去对应主动工具页配置。
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowAdvancedModules((current) => !current)}
+            style={{
+              padding: "8px 12px",
+              borderRadius: "999px",
+              border: "1px solid var(--border-light)",
+              background: showAdvancedModules ? "rgba(188, 164, 227, 0.12)" : "var(--bg-card)",
+              color: showAdvancedModules ? "var(--color-primary)" : "var(--text-secondary)",
+              fontSize: "0.75rem",
+              fontWeight: 800,
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {showAdvancedModules ? "隐藏 TODO 模块" : `显示 TODO 模块 ${advancedCount}`}
+          </button>
+        </div>
+
+        {visibleModules.map((module) => (
           <div
             key={module.id}
             style={{
@@ -835,6 +1153,9 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
                   )}
                 </div>
                 <p style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>{module.description}</p>
+                {module.configHint && (
+                  <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "4px" }}>{module.configHint}</p>
+                )}
               </div>
 
               {/* Status */}
@@ -861,7 +1182,7 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
                   type="text"
                   value={module.keywords.join(", ")}
                   onChange={(e) => updateKeywords(module.id, e.target.value)}
-                  placeholder="输入关键词..."
+                  placeholder="可先留空，稍后再配置"
                   style={{
                     width: "100%",
                     padding: "10px 14px",
@@ -879,6 +1200,20 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
                     e.currentTarget.style.borderColor = "var(--border-light)";
                   }}
                 />
+                <p
+                  style={{
+                    marginTop: "8px",
+                    fontSize: "0.75rem",
+                    lineHeight: 1.6,
+                    color: module.keywords.length > 0 ? "var(--text-muted)" : "var(--text-secondary)",
+                  }}
+                >
+                  {module.keywords.length > 0
+                    ? "也可以稍后回到主动工具里继续细调。"
+                    : module.requiresCookie
+                      ? "可以先留空，稍后再配置；但最好先把 Cookie 配好。"
+                      : "可以先留空，稍后再配置。"}
+                </p>
               </div>
             )}
           </div>

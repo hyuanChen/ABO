@@ -33,11 +33,13 @@ class ModuleScheduler:
                 self._add_job(m)
 
     async def run_now(self, module_id: str, registry: ModuleRegistry) -> bool:
+        return (await self.run_now_with_count(module_id, registry)) is not None
+
+    async def run_now_with_count(self, module_id: str, registry: ModuleRegistry) -> int | None:
         module = registry.get(module_id)
         if not module:
-            return False
-        await self._runner.run(module)
-        return True
+            return None
+        return await self._runner.run(module)
 
     def job_info(self) -> list[dict]:
         return [

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Search, X, FileText, Lightbulb, BookOpen, ExternalLink, Clock } from 'lucide-react';
 import { api } from '../../core/api';
+import { isActionEnterKey, isComposingKeyboardEvent } from '../../core/keyboard';
 import { useStore, type FeedCard } from '../../core/store';
 
 // ── Types ─────────────────────────────────────────────────────────
@@ -184,6 +185,7 @@ export function useGlobalSearch(): UseGlobalSearchReturn {
       }
 
       if (!isOpen) return;
+      if (isComposingKeyboardEvent(e)) return;
 
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -203,7 +205,7 @@ export function useGlobalSearch(): UseGlobalSearchReturn {
         return;
       }
 
-      if (e.key === 'Enter') {
+      if (isActionEnterKey(e)) {
         e.preventDefault();
         executeSelected();
         return;

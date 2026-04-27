@@ -3,6 +3,7 @@ import { create } from "zustand";
 // ── 类型定义 ──────────────────────────────────────────────────────
 
 export type ActiveTab =
+  | "assistant"
   | "profile"
   | "overview"
   | "literature"
@@ -34,6 +35,16 @@ export interface AppConfig {
   vault_path: string;
   literature_path?: string;
   version: string;
+  paper_ai_scoring_enabled?: boolean;
+  intelligence_delivery_enabled?: boolean;
+  intelligence_delivery_time?: string;
+  onboarding_completed?: boolean;
+  onboarding_step?: number;
+  feed_preferences?: {
+    hidden_module_ids?: string[];
+    group_mode?: "timeline" | "smart";
+    show_recommendations?: boolean;
+  };
 }
 
 export interface FeedCard {
@@ -124,6 +135,11 @@ export interface ArxivPaper {
 }
 
 export type AiProvider = "codex" | "claude";
+
+function normalizeAiProvider(value: unknown): AiProvider {
+  // Claude is intentionally disabled in the UI for now; clamp legacy persisted values.
+  return value === "codex" ? "codex" : "codex";
+}
 
 // ── Store ─────────────────────────────────────────────────────────
 
@@ -376,10 +392,11 @@ export const useStore = create<AboStore>((set) => ({
     set({ sbtiOverride: v });
   },
 
-  aiProvider: (localStorage.getItem("abo-ai-provider") as AiProvider) || "codex",
+  aiProvider: normalizeAiProvider(localStorage.getItem("abo-ai-provider")),
   setAiProvider: (aiProvider) => {
-    localStorage.setItem("abo-ai-provider", aiProvider);
-    set({ aiProvider });
+    const normalized = normalizeAiProvider(aiProvider);
+    localStorage.setItem("abo-ai-provider", normalized);
+    set({ aiProvider: normalized });
   },
 
   toasts: [],

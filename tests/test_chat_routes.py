@@ -13,12 +13,15 @@ Tests for FastAPI chat endpoints:
 - GET /api/chat/connections
 - WebSocket /api/chat/ws/{cli_type}/{session_id}
 """
+from types import SimpleNamespace
 import pytest
 import json
 import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 from abo.main import app
+from abo.chat import conversation_runtime_manager
+from abo.assistant.store import AssistantSessionStore
 from abo.store.conversations import ConversationStore
 
 
@@ -26,8 +29,49 @@ from abo.store.conversations import ConversationStore
 def reset_singleton():
     """Reset conversation store singleton before each test."""
     ConversationStore._instance = None
+    AssistantSessionStore._instance = None
+    asyncio.run(conversation_runtime_manager.kill_all())
     yield
+    asyncio.run(conversation_runtime_manager.kill_all())
     ConversationStore._instance = None
+    AssistantSessionStore._instance = None
+
+
+def _make_conversation_store(tmp_path) -> ConversationStore:
+    store = object.__new__(ConversationStore)
+    store.db_path = str(tmp_path / "chat-routes.db")
+    store._initialized = False
+    store._init_db()
+    store._initialized = True
+    return store
+
+
+def _make_assistant_store(tmp_path) -> AssistantSessionStore:
+    store = object.__new__(AssistantSessionStore)
+    store.db_path = str(tmp_path / "assistant-routes.db")
+    store._initialized = False
+    store._init_db()
+    store._initialized = True
+    return store
+
+
+@pytest.fixture(autouse=True)
+def isolate_chat_stores(tmp_path, monkeypatch):
+    conversation_store = _make_conversation_store(tmp_path)
+    assistant_store = _make_assistant_store(tmp_path)
+
+    monkeypatch.setattr("abo.routes.chat.conversation_store", conversation_store)
+    monkeypatch.setattr("abo.routes.chat.assistant_session_store", assistant_store)
+    monkeypatch.setattr("abo.chat.runtime_manager.conversation_store", conversation_store)
+    monkeypatch.setattr("abo.store.conversations.conversation_store", conversation_store)
+    monkeypatch.setattr("abo.assistant.store.assistant_session_store", assistant_store)
+    monkeypatch.setattr("abo.routes.chat.build_assistant_chat_context", lambda: "助手工作台上下文：测试。")
+    monkeypatch.setattr(
+        "abo.chat.runtime_manager.detector.get_cli_info",
+        lambda cli_type: SimpleNamespace(id=cli_type, is_available=True),
+    )
+
+    yield
 
 
 @pytest.fixture
@@ -142,6 +186,53 @@ class TestConversationEndpoints:
         assert data["status"] == "active"
         assert "created_at" in data
         assert "updated_at" in data
+
+    def test_create_conversation_records_chat_start_activity(self, client):
+        """Creating a conversation should record a chat_start activity."""
+        mock_cli = MagicMock()
+        mock_cli.id = "claude"
+        mock_cli.name = "Claude Code"
+        mock_cli.is_available = True
+        mock_tracker = MagicMock()
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli), patch(
+            "abo.routes.chat.ActivityTracker",
+            return_value=mock_tracker,
+        ):
+            response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "claude", "title": "Activity Chat", "origin": "assistant"},
+            )
+
+        assert response.status_code == 200
+        mock_tracker.record_activity.assert_called_once()
+        kwargs = mock_tracker.record_activity.call_args.kwargs
+        assert kwargs["activity_type"].value == "chat_start"
+        assert kwargs["metadata"]["context"] == "assistant"
+
+    def test_create_assistant_conversation_mirrors_assistant_session(self, client):
+        """Assistant-origin conversations should get a dedicated assistant session record."""
+        from abo.routes import chat as chat_routes
+
+        mock_cli = MagicMock()
+        mock_cli.id = "codex"
+        mock_cli.name = "Codex"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "codex", "title": "Assistant Session", "origin": "assistant"},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+
+        sessions = chat_routes.assistant_session_store.list_sessions(limit=10)
+        assert len(sessions) == 1
+        assert sessions[0].raw_conversation_id == data["id"]
+        assert sessions[0].raw_session_id == data["session_id"]
+        assert sessions[0].title == "Assistant Session"
 
     def test_create_conversation_unavailable_cli(self, client):
         """Test creating conversation with unavailable CLI returns 400."""
@@ -326,6 +417,29 @@ class TestConversationEndpoints:
         get_response = client.get(f"/api/chat/conversations/{conv_id}")
         assert get_response.status_code == 404
 
+    def test_delete_conversation_endpoint_removes_assistant_mirror(self, client):
+        """Deleting a raw assistant conversation should also delete the mirrored assistant session."""
+        from abo.routes import chat as chat_routes
+
+        mock_cli = MagicMock()
+        mock_cli.id = "codex"
+        mock_cli.name = "Codex"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            create_response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "codex", "title": "Assistant Delete", "origin": "assistant"},
+            )
+            conv_id = create_response.json()["id"]
+
+        assert chat_routes.assistant_session_store.count_sessions() == 1
+
+        response = client.delete(f"/api/chat/conversations/{conv_id}")
+
+        assert response.status_code == 200
+        assert chat_routes.assistant_session_store.count_sessions() == 0
+
     def test_update_conversation_title_endpoint(self, client):
         """Test PATCH /api/chat/conversations/{id}/title updates title."""
         mock_cli = MagicMock()
@@ -353,6 +467,32 @@ class TestConversationEndpoints:
         # Verify the update
         get_response = client.get(f"/api/chat/conversations/{conv_id}")
         assert get_response.json()["title"] == "New Title"
+
+    def test_update_conversation_title_endpoint_syncs_assistant_session(self, client):
+        """Assistant session titles should stay aligned with the raw conversation title."""
+        from abo.routes import chat as chat_routes
+
+        mock_cli = MagicMock()
+        mock_cli.id = "codex"
+        mock_cli.name = "Codex"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            create_response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "codex", "title": "旧标题", "origin": "assistant"},
+            )
+            conv_id = create_response.json()["id"]
+
+        response = client.patch(
+            f"/api/chat/conversations/{conv_id}/title",
+            json={"title": "新标题"},
+        )
+
+        assert response.status_code == 200
+        session = chat_routes.assistant_session_store.get_session_by_raw_conversation(conv_id)
+        assert session is not None
+        assert session.title == "新标题"
 
 
 class TestMessageEndpoints:
@@ -443,6 +583,272 @@ class TestMessageEndpoints:
         assert data[0]["metadata"]["tokens"] == 100
         assert data[0]["metadata"]["latency"] == 200
 
+    def test_send_message_http_includes_recent_history(self, client):
+        """Recent chat history should be injected into the runtime prompt."""
+        from abo.cli.runner import StreamEvent
+        from abo.store.conversations import conversation_store
+
+        mock_cli = MagicMock()
+        mock_cli.id = "claude"
+        mock_cli.name = "Claude Code"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            create_response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "claude", "title": "History Chat"}
+            )
+            conv_id = create_response.json()["id"]
+
+        conversation_store.add_message(conv_id, "user", "第一轮问题：帮我整理这周的研究任务。")
+        conversation_store.add_message(conv_id, "assistant", "第一轮回答：已经按主题拆成三条主线。")
+
+        captured: dict[str, str] = {}
+        mock_runner = AsyncMock()
+
+        async def fake_send_message(message: str, msg_id: str, on_event):
+            captured["message"] = message
+            await on_event(StreamEvent(type="content", data="done", msg_id=msg_id))
+
+        mock_runner.send_message.side_effect = fake_send_message
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli), patch(
+            "abo.chat.runtime_manager.RunnerFactory.create",
+            return_value=mock_runner,
+        ):
+            response = client.post(
+                f"/api/chat/conversations/{conv_id}/messages",
+                json={"message": "继续推进第二轮。", "conversation_id": conv_id},
+            )
+
+        assert response.status_code == 200
+        assert "第一轮问题" in captured["message"]
+        assert "第一轮回答" in captured["message"]
+        assert "当前用户请求：\n继续推进第二轮。" in captured["message"]
+
+    def test_send_message_http_includes_assistant_workspace_context(self, client):
+        """Assistant-origin conversations should receive workspace context."""
+        from abo.cli.runner import StreamEvent
+        from abo.store.conversations import conversation_store
+
+        mock_cli = MagicMock()
+        mock_cli.id = "codex"
+        mock_cli.name = "Codex"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            create_response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "codex", "title": "Assistant Chat", "origin": "assistant"},
+            )
+            conv_id = create_response.json()["id"]
+
+        stored = conversation_store.get_conversation(conv_id)
+        assert stored is not None
+        assert stored.origin == "assistant"
+
+        captured: dict[str, str] = {}
+        mock_runner = AsyncMock()
+
+        async def fake_send_message(message: str, msg_id: str, on_event):
+            captured["message"] = message
+            await on_event(StreamEvent(type="content", data="done", msg_id=msg_id))
+
+        mock_runner.send_message.side_effect = fake_send_message
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli), patch(
+            "abo.routes.chat.build_assistant_chat_context",
+            return_value="助手工作台上下文：今日情报 12 条，Internet Wiki 8 页。",
+        ), patch(
+            "abo.chat.runtime_manager.RunnerFactory.create",
+            return_value=mock_runner,
+        ):
+            response = client.post(
+                f"/api/chat/conversations/{conv_id}/messages",
+                json={"message": "帮我继续整理这些情报。", "conversation_id": conv_id},
+            )
+
+        assert response.status_code == 200
+        assert "助手工作台上下文" in captured["message"]
+        assert "当前用户请求：\n帮我继续整理这些情报。" in captured["message"]
+
+    def test_send_message_http_context_scope_can_enable_assistant_context(self, client):
+        """Assistant context can be requested per-message even on non-assistant conversations."""
+        from abo.cli.runner import StreamEvent
+
+        mock_cli = MagicMock()
+        mock_cli.id = "codex"
+        mock_cli.name = "Codex"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            create_response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "codex", "title": "Generic Chat"},
+            )
+            conv_id = create_response.json()["id"]
+
+        captured: dict[str, str] = {}
+        mock_runner = AsyncMock()
+
+        async def fake_send_message(message: str, msg_id: str, on_event):
+            captured["message"] = message
+            await on_event(StreamEvent(type="content", data="done", msg_id=msg_id))
+
+        mock_runner.send_message.side_effect = fake_send_message
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli), patch(
+            "abo.routes.chat.build_assistant_chat_context",
+            return_value="助手工作台上下文：情报流和 Wiki 已加载。",
+        ), patch(
+            "abo.chat.runtime_manager.RunnerFactory.create",
+            return_value=mock_runner,
+        ):
+            response = client.post(
+                f"/api/chat/conversations/{conv_id}/messages",
+                json={
+                    "message": "在助手模式下继续整理。",
+                    "conversation_id": conv_id,
+                    "context_scope": "assistant",
+                },
+            )
+
+        assert response.status_code == 200
+        assert "助手工作台上下文" in captured["message"]
+
+    def test_send_message_http_records_chat_message_activity(self, client):
+        """Sending a message should record a chat_message activity."""
+        from abo.cli.runner import StreamEvent
+
+        mock_cli = MagicMock()
+        mock_cli.id = "claude"
+        mock_cli.name = "Claude Code"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            create_response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "claude", "title": "Message Activity"},
+            )
+            conv_id = create_response.json()["id"]
+
+        mock_runner = AsyncMock()
+
+        async def fake_send_message(message: str, msg_id: str, on_event):
+            await on_event(StreamEvent(type="content", data="done", msg_id=msg_id))
+
+        mock_runner.send_message.side_effect = fake_send_message
+        mock_tracker = MagicMock()
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli), patch(
+            "abo.chat.runtime_manager.RunnerFactory.create",
+            return_value=mock_runner,
+        ), patch(
+            "abo.routes.chat.ActivityTracker",
+            return_value=mock_tracker,
+        ):
+            response = client.post(
+                f"/api/chat/conversations/{conv_id}/messages",
+                json={"message": "记录这条消息。", "conversation_id": conv_id, "context_scope": "assistant"},
+            )
+
+        assert response.status_code == 200
+        assert mock_tracker.record_activity.call_count >= 1
+        last_call = mock_tracker.record_activity.call_args
+        assert last_call.kwargs["activity_type"].value == "chat_message"
+        assert last_call.kwargs["metadata"]["context"] == "assistant"
+
+    def test_send_message_http_mirrors_assistant_messages_and_resume_handle(self, client):
+        """Assistant message turns should be mirrored into the assistant store and keep the backend session handle."""
+        from abo.cli.runner import StreamEvent
+        from abo.routes import chat as chat_routes
+
+        mock_cli = MagicMock()
+        mock_cli.id = "codex"
+        mock_cli.name = "Codex"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            create_response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "codex", "title": "Assistant Mirror", "origin": "assistant"},
+            )
+            conv_id = create_response.json()["id"]
+
+        mock_runner = AsyncMock()
+        mock_runner.last_session_handle = None
+
+        async def fake_send_message(_message: str, msg_id: str, on_event):
+            mock_runner.last_session_handle = "thread-123"
+            await on_event(StreamEvent(type="content", data="已整理完成", msg_id=msg_id))
+
+        mock_runner.send_message.side_effect = fake_send_message
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli), patch(
+            "abo.chat.runtime_manager.detector.get_cli_info",
+            return_value=mock_cli,
+        ), patch(
+            "abo.chat.runtime_manager.RunnerFactory.create",
+            return_value=mock_runner,
+        ):
+            response = client.post(
+                f"/api/chat/conversations/{conv_id}/messages",
+                json={"message": "帮我整理这批情报。", "conversation_id": conv_id},
+            )
+
+        assert response.status_code == 200
+        session = chat_routes.assistant_session_store.get_session_by_raw_conversation(conv_id)
+        assert session is not None
+        assert session.raw_session_id == "thread-123"
+
+        messages = chat_routes.assistant_session_store.list_messages(session.id, limit=10)
+        assert [message.role for message in messages] == ["user", "assistant"]
+        assert messages[0].content == "帮我整理这批情报。"
+        assert messages[1].content == "已整理完成"
+
+    def test_send_message_http_merges_stream_chunks_into_one_persisted_message(self, client):
+        """Streaming chunks should update one assistant DB row instead of duplicating final content."""
+        from abo.cli.runner import StreamEvent
+        from abo.store.conversations import conversation_store
+
+        mock_cli = MagicMock()
+        mock_cli.id = "codex"
+        mock_cli.name = "Codex"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            create_response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "codex", "title": "Stream Merge"},
+            )
+            conv_id = create_response.json()["id"]
+
+        mock_runner = AsyncMock()
+
+        async def fake_send_message(_message: str, msg_id: str, on_event):
+            await on_event(StreamEvent(type="start", data="", msg_id=msg_id))
+            await on_event(StreamEvent(type="content", data="第一段", msg_id=msg_id))
+            await on_event(StreamEvent(type="content", data="第二段", msg_id=msg_id))
+            await on_event(StreamEvent(type="finish", data="", msg_id=msg_id))
+
+        mock_runner.send_message.side_effect = fake_send_message
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli), patch(
+            "abo.chat.runtime_manager.RunnerFactory.create",
+            return_value=mock_runner,
+        ):
+            response = client.post(
+                f"/api/chat/conversations/{conv_id}/messages",
+                json={"message": "测试流式落库。", "conversation_id": conv_id},
+            )
+
+        assert response.status_code == 200
+        messages = conversation_store.get_messages(conv_id, limit=10)
+        assistant_messages = [message for message in messages if message.role == "assistant" and message.content_type == "text"]
+        assert len(assistant_messages) == 1
+        assert assistant_messages[0].content == "第一段第二段"
+        assert assistant_messages[0].status == "completed"
+
 
 class TestConnectionStatusEndpoints:
     """Tests for connection status endpoints."""
@@ -457,6 +863,65 @@ class TestConnectionStatusEndpoints:
         assert isinstance(data["connections"], list)
         assert "count" in data
         assert isinstance(data["count"], int)
+
+    def test_conversation_runtime_state_and_warmup(self, client):
+        """Runtime state should expose cache/resume state and support lightweight warmup."""
+        mock_cli = MagicMock()
+        mock_cli.id = "codex"
+        mock_cli.name = "Codex"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            create_response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "codex", "title": "Runtime State"},
+            )
+            conv_id = create_response.json()["id"]
+
+        before = client.get(f"/api/chat/conversations/{conv_id}/runtime")
+        assert before.status_code == 200
+        assert before.json()["has_runtime"] is False
+        assert before.json()["busy"] is False
+
+        with patch("abo.chat.runtime_manager.detector.get_cli_info", return_value=mock_cli):
+            warmed = client.post(f"/api/chat/conversations/{conv_id}/warmup")
+
+        assert warmed.status_code == 200
+        assert warmed.json()["has_runtime"] is True
+        assert warmed.json()["busy"] is False
+
+        after = client.get(f"/api/chat/conversations/{conv_id}/runtime")
+        assert after.json()["has_runtime"] is True
+
+    def test_stop_conversation_turn_closes_runtime_runner(self, client):
+        """Stop endpoint should close the active runner without deleting the conversation."""
+        from abo.routes import chat as chat_routes
+
+        mock_cli = MagicMock()
+        mock_cli.id = "codex"
+        mock_cli.name = "Codex"
+        mock_cli.is_available = True
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            create_response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "codex", "title": "Stop Runtime"},
+            )
+            conv_id = create_response.json()["id"]
+
+        conv = chat_routes.conversation_store.get_conversation(conv_id)
+        runtime = asyncio.run(conversation_runtime_manager.get_or_create(conv))
+        mock_runner = AsyncMock()
+        mock_runner.close = AsyncMock()
+        runtime._runner = mock_runner
+
+        response = client.post(f"/api/chat/conversations/{conv_id}/stop")
+
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        assert response.json()["stopped"] is True
+        assert chat_routes.conversation_store.get_conversation(conv_id) is not None
+        mock_runner.close.assert_awaited_once()
 
 
 class TestWebSocketProtocol:
@@ -482,14 +947,16 @@ class TestWebSocketProtocol:
 
         manager = ConnectionManager()
         mock_ws = AsyncMock()
-        mock_runner = AsyncMock()
 
         asyncio.run(manager.connect(mock_ws, "claude:test-session", "claude", "test-session"))
-        manager.runners["claude:test-session"] = mock_runner
+        message_task = asyncio.create_task(asyncio.sleep(0))
+        manager.track_message_task("claude:test-session", message_task)
 
         manager.disconnect("claude:test-session")
 
         assert "claude:test-session" not in manager.active_connections
+        assert manager.get_message_task("claude:test-session") is message_task
+        asyncio.run(message_task)
 
     def test_send_json_to_client(self):
         """Test sending JSON message to connected client."""
@@ -557,6 +1024,66 @@ class TestWebSocketProtocol:
         # Cancel heartbeat
         if "claude:test-session" in manager._heartbeat_tasks:
             manager._heartbeat_tasks["claude:test-session"].cancel()
+
+    def test_websocket_message_includes_assistant_context_scope(self, client):
+        """WebSocket chat should inject assistant context when requested by the caller."""
+        from abo.cli.runner import StreamEvent
+
+        mock_cli = MagicMock()
+        mock_cli.id = "codex"
+        mock_cli.name = "Codex"
+        mock_cli.is_available = True
+        mock_cli.protocol = "raw"
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli):
+            create_response = client.post(
+                "/api/chat/conversations",
+                json={"cli_type": "codex", "title": "WS Assistant Chat"},
+            )
+            payload = create_response.json()
+
+        captured: dict[str, str] = {}
+        mock_runner = AsyncMock()
+
+        async def fake_send_message(message: str, msg_id: str, on_event):
+            captured["message"] = message
+            await on_event(StreamEvent(type="start", data="", msg_id=msg_id))
+            await on_event(StreamEvent(type="content", data="ok", msg_id=msg_id))
+            await on_event(StreamEvent(type="finish", data="", msg_id=msg_id))
+
+        mock_runner.send_message.side_effect = fake_send_message
+
+        with patch("abo.routes.chat.detector.get_cli_info", return_value=mock_cli), patch(
+            "abo.routes.chat.build_assistant_chat_context",
+            return_value="助手工作台上下文：WS 测试上下文。",
+        ), patch(
+            "abo.chat.runtime_manager.RunnerFactory.create",
+            return_value=mock_runner,
+        ):
+            with client.websocket_connect(f"/api/chat/ws/{payload['cli_type']}/{payload['session_id']}") as websocket:
+                websocket.receive_json()
+                websocket.send_json(
+                    {
+                        "type": "message",
+                        "content": "通过 WebSocket 发送",
+                        "conversation_id": payload["id"],
+                        "context_scope": "assistant",
+                    }
+                )
+
+                events = []
+                content_event = None
+                while content_event is None:
+                    event = websocket.receive_json()
+                    events.append(event)
+                    if event["type"] == "content":
+                        content_event = event
+                start_event = next(event for event in events if event["type"] == "start")
+                assert start_event["type"] == "start"
+                assert content_event["type"] == "content"
+
+        assert "助手工作台上下文" in captured["message"]
+        assert "当前用户请求：\n通过 WebSocket 发送" in captured["message"]
 
 
 class TestRequestResponseModels:

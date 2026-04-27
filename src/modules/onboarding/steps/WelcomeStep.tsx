@@ -1,226 +1,300 @@
-import { Sparkles, Target, Gamepad2, ArrowRight } from "lucide-react";
+import {
+  ArrowRight,
+  BookHeart,
+  Bot,
+  Compass,
+  Database,
+  Inbox,
+  Sparkles,
+} from "lucide-react";
+import { corePromises, sidebarSections } from "../onboardingContent";
 
 interface WelcomeStepProps {
   onNext: () => void;
 }
 
-interface FeatureCardProps {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-  gradient: string;
-}
+const firstRunChecklist = [
+  "选好情报库和文献库",
+  "一键连接小红书 / B 站 Cookie",
+  "设置论文、AI 和每日推送偏好",
+  "看懂左侧导航该从哪里开始",
+];
 
-function FeatureCard({ icon, title, description, gradient }: FeatureCardProps) {
-  return (
-    <div
-      style={{
-        padding: "28px",
-        borderRadius: "var(--radius-xl)",
-        background: "var(--bg-card)",
-        border: "1px solid var(--border-light)",
-        boxShadow: "var(--shadow-soft)",
-        transition: "all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)",
-        cursor: "default",
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.transform = "translateY(-8px) scale(1.02)";
-        e.currentTarget.style.boxShadow = "var(--shadow-medium)";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.transform = "translateY(0) scale(1)";
-        e.currentTarget.style.boxShadow = "var(--shadow-soft)";
-      }}
-    >
-      <div
-        style={{
-          width: "56px",
-          height: "56px",
-          borderRadius: "var(--radius-lg)",
-          background: gradient,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          marginBottom: "20px",
-          boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
-        }}
-      >
-        {icon}
-      </div>
-      <h3
-        style={{
-          fontSize: "1.125rem",
-          fontWeight: 700,
-          color: "var(--text-main)",
-          marginBottom: "10px",
-        }}
-      >
-        {title}
-      </h3>
-      <p
-        style={{
-          fontSize: "0.9375rem",
-          color: "var(--text-secondary)",
-          lineHeight: 1.6,
-        }}
-      >
-        {description}
-      </p>
-    </div>
-  );
-}
+const heroStats = [
+  { label: "主入口", value: "8", hint: "角色主页到手记" },
+  { label: "主动工具", value: "5", hint: "先试跑再定时" },
+  { label: "配置时间", value: "10s", hint: "基础跑通" },
+];
 
 export default function WelcomeStep({ onNext }: WelcomeStepProps) {
-  const features = [
-    {
-      icon: <Target style={{ width: "28px", height: "28px", color: "white" }} />,
-      title: "自动追踪",
-      description: "7个智能爬虫模块自动追踪 ArXiv、小红书、B站等平台，不错过任何有价值的信息",
-      gradient: "linear-gradient(135deg, #BCA4E3, #9D7BDB)",
-    },
-    {
-      icon: <Sparkles style={{ width: "28px", height: "28px", color: "white" }} />,
-      title: "智能筛选",
-      description: "AI 自动评分和摘要，根据你的偏好智能排序，让重要内容优先呈现",
-      gradient: "linear-gradient(135deg, #A8E6CF, #7DD3C0)",
-    },
-    {
-      icon: <Gamepad2 style={{ width: "28px", height: "28px", color: "white" }} />,
-      title: "游戏化",
-      description: "六维能力雷达、像素小人、技能节点，让研究工作充满成就感和乐趣",
-      gradient: "linear-gradient(135deg, #FFB7B2, #E89B96)",
-    },
-  ];
+  const primaryNavigation = sidebarSections[0].items.slice(0, 4);
 
   return (
     <div
+      className="onboarding-welcome-grid"
       style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
         minHeight: "100%",
-        padding: "48px 32px",
-        textAlign: "center",
+        padding: "clamp(32px, 5vw, 64px)",
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1.08fr) minmax(320px, 0.92fr)",
+        gap: "clamp(28px, 5vw, 56px)",
+        alignItems: "center",
+        maxWidth: "1180px",
+        margin: "0 auto",
       }}
     >
-      {/* Logo Animation */}
-      <div
-        style={{
-          width: "100px",
-          height: "100px",
-          borderRadius: "var(--radius-xl)",
-          background: "linear-gradient(135deg, var(--color-primary), var(--color-secondary))",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          marginBottom: "32px",
-          boxShadow: "0 12px 48px rgba(188, 164, 227, 0.4)",
-          animation: "float 3s ease-in-out infinite",
-        }}
-      >
-        <Sparkles style={{ width: "48px", height: "48px", color: "white" }} />
-      </div>
+      <section>
+        <div
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "8px",
+            padding: "8px 12px",
+            borderRadius: "999px",
+            background: "rgba(188, 164, 227, 0.14)",
+            color: "var(--color-primary-dark)",
+            fontSize: "0.8125rem",
+            fontWeight: 800,
+            marginBottom: "22px",
+          }}
+        >
+          <Compass style={{ width: "16px", height: "16px" }} />
+          第一次启动 · 研究工作台初始化
+        </div>
 
-      {/* Title */}
-      <h1
-        style={{
-          fontFamily: "'M PLUS Rounded 1c', sans-serif",
-          fontSize: "clamp(2rem, 5vw, 2.75rem)",
-          fontWeight: 800,
-          background: "linear-gradient(135deg, var(--color-primary), var(--color-secondary))",
-          WebkitBackgroundClip: "text",
-          WebkitTextFillColor: "transparent",
-          backgroundClip: "text",
-          marginBottom: "12px",
-        }}
-      >
-        欢迎使用 ABO
-      </h1>
+        <h1
+          style={{
+            fontFamily: "'M PLUS Rounded 1c', sans-serif",
+            fontSize: "clamp(2.2rem, 5.4vw, 4.6rem)",
+            fontWeight: 900,
+            lineHeight: 1.02,
+            letterSpacing: "-0.04em",
+            color: "var(--text-main)",
+            marginBottom: "22px",
+          }}
+        >
+          把散落的收藏、论文，整理成自己的大脑操作台。
+        </h1>
 
-      <p
-        style={{
-          fontSize: "clamp(1rem, 2vw, 1.125rem)",
-          color: "var(--text-secondary)",
-          marginBottom: "48px",
-          maxWidth: "480px",
-          lineHeight: 1.7,
-        }}
-      >
-        你的本地个人情报引擎 + 研究者成长系统
-        <br />
-        让研究自动化，让成长可视化
-      </p>
+        <p
+          style={{
+            fontSize: "clamp(1rem, 1.7vw, 1.125rem)",
+            color: "var(--text-secondary)",
+            lineHeight: 1.8,
+            maxWidth: "680px",
+            marginBottom: "30px",
+          }}
+        >
+          ABO 不是单个爬虫按钮。它的主线是“注意力 {"->"} 知识 {"->"} 入库 {"->"} Wiki / 助手推进 {"->"} 手记复盘”。
+          这份向导会先帮你完成必要配置，再用真实侧边栏教你每天该怎么用。
+        </p>
 
-      {/* Feature Cards */}
-      <div
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+            gap: "12px",
+            marginBottom: "30px",
+            maxWidth: "620px",
+          }}
+        >
+          {heroStats.map((stat) => (
+            <div
+              key={stat.label}
+              style={{
+                padding: "16px",
+                borderRadius: "18px",
+                background: "var(--bg-card)",
+                border: "1px solid var(--border-light)",
+                boxShadow: "var(--shadow-soft)",
+              }}
+            >
+              <div style={{ fontSize: "1.55rem", fontWeight: 900, color: "var(--text-main)", lineHeight: 1 }}>
+                {stat.value}
+              </div>
+              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "6px", fontWeight: 700 }}>
+                {stat.label} · {stat.hint}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <button
+          type="button"
+          onClick={onNext}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "12px",
+            padding: "15px 28px",
+            borderRadius: "999px",
+            background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+            border: "none",
+            color: "white",
+            fontSize: "1rem",
+            fontWeight: 800,
+            cursor: "pointer",
+            boxShadow: "0 14px 34px rgba(188, 164, 227, 0.38)",
+            transition: "transform 180ms ease, box-shadow 180ms ease",
+          }}
+          onMouseEnter={(event) => {
+            event.currentTarget.style.transform = "translateY(-2px)";
+            event.currentTarget.style.boxShadow = "0 18px 42px rgba(188, 164, 227, 0.46)";
+          }}
+          onMouseLeave={(event) => {
+            event.currentTarget.style.transform = "translateY(0)";
+            event.currentTarget.style.boxShadow = "0 14px 34px rgba(188, 164, 227, 0.38)";
+          }}
+        >
+          开始 10 秒钟配置
+          <ArrowRight style={{ width: "20px", height: "20px" }} />
+        </button>
+      </section>
+
+      <aside
         style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-          gap: "24px",
-          width: "100%",
-          maxWidth: "900px",
-          marginBottom: "48px",
+          position: "relative",
+          padding: "22px",
+          borderRadius: "32px",
+          background: "linear-gradient(145deg, var(--bg-card), rgba(188, 164, 227, 0.08))",
+          border: "1px solid rgba(188, 164, 227, 0.24)",
+          boxShadow: "0 28px 80px rgba(72, 62, 110, 0.12)",
+          overflow: "hidden",
         }}
       >
-        {features.map((feature, index) => (
+        <div
+          style={{
+            position: "absolute",
+            width: "180px",
+            height: "180px",
+            borderRadius: "50%",
+            right: "-56px",
+            top: "-70px",
+            background: "radial-gradient(circle, rgba(168, 230, 207, 0.48), transparent 64%)",
+            pointerEvents: "none",
+          }}
+        />
+
+        <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "18px", position: "relative" }}>
           <div
-            key={feature.title}
             style={{
-              animation: `fadeInUp 0.6s ease ${index * 0.15}s both`,
+              width: "46px",
+              height: "46px",
+              borderRadius: "16px",
+              background: "linear-gradient(135deg, var(--color-primary), var(--color-secondary))",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "white",
+              boxShadow: "0 10px 26px rgba(188, 164, 227, 0.34)",
             }}
           >
-            <FeatureCard {...feature} />
+            <Sparkles style={{ width: "24px", height: "24px" }} />
           </div>
-        ))}
-      </div>
+          <div>
+            <div style={{ fontSize: "1.05rem", fontWeight: 900, color: "var(--text-main)" }}>你会得到什么</div>
+            <div style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginTop: "2px" }}>按这个流程走完即可开始使用</div>
+          </div>
+        </div>
 
-      {/* CTA Button */}
-      <button
-        onClick={onNext}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "12px",
-          padding: "16px 40px",
-          borderRadius: "var(--radius-full)",
-          background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
-          border: "none",
-          color: "white",
-          fontSize: "1.0625rem",
-          fontWeight: 700,
-          cursor: "pointer",
-          transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
-          boxShadow: "0 8px 32px rgba(188, 164, 227, 0.4)",
-          animation: "fadeInUp 0.6s ease 0.5s both",
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.transform = "translateY(-3px) scale(1.05)";
-          e.currentTarget.style.boxShadow = "0 12px 48px rgba(188, 164, 227, 0.5)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.transform = "translateY(0) scale(1)";
-          e.currentTarget.style.boxShadow = "0 8px 32px rgba(188, 164, 227, 0.4)";
-        }}
-      >
-        开始配置
-        <ArrowRight style={{ width: "22px", height: "22px" }} />
-      </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px", position: "relative" }}>
+          {corePromises.map((promise, index) => {
+            const icons = [
+              <Inbox key="inbox" style={{ width: "18px", height: "18px" }} />,
+              <Database key="db" style={{ width: "18px", height: "18px" }} />,
+              <Bot key="bot" style={{ width: "18px", height: "18px" }} />,
+            ];
+            return (
+              <div
+                key={promise.title}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "38px 1fr",
+                  gap: "12px",
+                  padding: "14px",
+                  borderRadius: "18px",
+                  background: "var(--bg-card)",
+                  border: "1px solid var(--border-light)",
+                }}
+              >
+                <div
+                  style={{
+                    width: "38px",
+                    height: "38px",
+                    borderRadius: "13px",
+                    background: index === 1 ? "rgba(168, 230, 207, 0.24)" : index === 2 ? "rgba(255, 183, 178, 0.22)" : "rgba(188, 164, 227, 0.2)",
+                    color: index === 1 ? "#4f9b80" : index === 2 ? "#c56f69" : "var(--color-primary-dark)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  {icons[index]}
+                </div>
+                <div>
+                  <div style={{ fontSize: "0.93rem", fontWeight: 850, color: "var(--text-main)", marginBottom: "4px" }}>
+                    {promise.title}
+                  </div>
+                  <div style={{ fontSize: "0.8rem", color: "var(--text-secondary)", lineHeight: 1.6 }}>
+                    {promise.summary}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
 
-      {/* Animation Styles */}
+        <div
+          style={{
+            marginTop: "16px",
+            padding: "14px",
+            borderRadius: "20px",
+            background: "var(--bg-hover)",
+            border: "1px dashed var(--border-light)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px" }}>
+            <BookHeart style={{ width: "16px", height: "16px", color: "var(--color-primary)" }} />
+            <span style={{ fontSize: "0.82rem", fontWeight: 850, color: "var(--text-main)" }}>向导会覆盖</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "8px" }}>
+            {firstRunChecklist.map((item) => (
+              <div
+                key={item}
+                style={{
+                  fontSize: "0.76rem",
+                  color: "var(--text-secondary)",
+                  lineHeight: 1.45,
+                  padding: "8px 10px",
+                  borderRadius: "12px",
+                  background: "var(--bg-card)",
+                }}
+              >
+                {item}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ marginTop: "16px", display: "flex", flexDirection: "column", gap: "8px" }}>
+          <div style={{ fontSize: "0.76rem", fontWeight: 850, color: "var(--text-muted)", letterSpacing: "0.04em" }}>
+            先认识这几个入口
+          </div>
+          {primaryNavigation.map((item) => (
+            <div key={item.label} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+              <span style={{ fontSize: "0.82rem", fontWeight: 800, color: "var(--text-main)" }}>{item.label}</span>
+              <span style={{ flex: 1, fontSize: "0.75rem", color: "var(--text-muted)", textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {item.summary}
+              </span>
+            </div>
+          ))}
+        </div>
+      </aside>
+
       <style>{`
-        @keyframes float {
-          0%, 100% { transform: translateY(0); }
-          50% { transform: translateY(-10px); }
-        }
-        @keyframes fadeInUp {
-          from {
-            opacity: 0;
-            transform: translateY(30px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
+        @media (max-width: 920px) {
+          .onboarding-welcome-grid {
+            grid-template-columns: 1fr !important;
           }
         }
       `}</style>

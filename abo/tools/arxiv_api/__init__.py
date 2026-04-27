@@ -1,38 +1,282 @@
 """arXiv API tool - on-demand paper search using the official arxiv package"""
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from html import unescape
+from io import BytesIO
 from typing import Literal, Optional
 import asyncio
 import logging
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import arxiv
 import httpx
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ArxivAPITool", "ArxivPaper", "arxiv_api_search"]
+__all__ = [
+    "ArxivAPITool",
+    "ArxivPaper",
+    "arxiv_api_search",
+    "extract_introduction_from_arxiv_html",
+    "extract_introduction_from_pdf_text",
+    "build_structured_digest_markdown",
+    "build_arxiv_html_urls",
+    "extract_figure_candidates_from_html",
+]
 
 _ARXIV_FIGURE_PATH_WITH_ID = re.compile(
     r"^(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?/"
 )
+_ARXIV_HTML_BASES = (
+    "https://arxiv.org",
+    "https://ar5iv.labs.arxiv.org",
+)
+_FIGURE_PRIORITY_KEYWORDS = [
+    ("pipeline", 30),
+    ("architecture", 25),
+    ("framework", 25),
+    ("overview", 20),
+    ("method", 20),
+    ("system", 15),
+    ("flowchart", 20),
+    ("diagram", 15),
+    ("structure", 15),
+    ("model", 10),
+    ("approach", 10),
+    ("fig", 10),
+    ("figure", 10),
+]
+_FIGURE_METHOD_KEYWORDS = {
+    "architecture",
+    "approach",
+    "diagram",
+    "fig",
+    "figure",
+    "flowchart",
+    "framework",
+    "illustration",
+    "method",
+    "model",
+    "network",
+    "overview",
+    "pipeline",
+    "proposed",
+    "schematic",
+    "structure",
+    "system",
+}
+_FIGURE_SKIP_TOKENS = ("icon", "logo", "button", "spacer", "avatar", "arrow")
 
 
-def resolve_arxiv_figure_url(arxiv_id: str, src: str) -> str:
-    """Normalize figure URLs extracted from arXiv HTML pages."""
+def build_arxiv_html_urls(arxiv_id: str) -> list[str]:
+    return [f"{base}/html/{arxiv_id}" for base in _ARXIV_HTML_BASES]
+
+
+def resolve_arxiv_figure_url(arxiv_id: str, src: str, html_url: str | None = None) -> str:
+    """Normalize figure URLs extracted from arXiv/ar5iv HTML pages."""
     raw = (src or "").strip()
     if not raw or raw.startswith("data:"):
         return ""
     if raw.startswith(("http://", "https://")):
         return raw
+
+    base_html_url = (html_url or f"https://arxiv.org/html/{arxiv_id}").rstrip("/")
+    parsed = urlsplit(base_html_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://arxiv.org"
     if raw.startswith("/"):
-        return f"https://arxiv.org{raw}"
+        return f"{origin}{raw}"
 
     normalized = raw.lstrip("./")
     if _ARXIV_FIGURE_PATH_WITH_ID.match(normalized):
-        return f"https://arxiv.org/html/{normalized}"
-    return f"https://arxiv.org/html/{arxiv_id}/{normalized}"
+        return f"{origin}/html/{normalized}"
+    return f"{base_html_url}/{normalized}"
+
+
+def _score_figure_caption(alt: str) -> int:
+    alt_lower = (alt or "").lower()
+    return sum(points for keyword, points in _FIGURE_PRIORITY_KEYWORDS if keyword in alt_lower)
+
+
+def extract_figure_candidates_from_html(
+    html: str,
+    arxiv_id: str,
+    html_url: str,
+    max_candidates: int = 20,
+) -> list[dict]:
+    if not html:
+        return []
+
+    img_pattern = r'<img[^>]+src="([^"]+)"[^>]*>'
+    img_matches = list(re.finditer(img_pattern, html, re.IGNORECASE))
+
+    figure_candidates: list[dict] = []
+    found_urls: set[str] = set()
+
+    for i, match in enumerate(img_matches[:max_candidates]):
+        src = match.group(1)
+        if not src:
+            continue
+
+        src_lower = src.lower()
+        if src_lower.startswith("data:") or any(skip in src_lower for skip in _FIGURE_SKIP_TOKENS):
+            continue
+
+        img_tag = match.group(0)
+        alt_match = re.search(r'alt="([^"]*)"', img_tag, re.IGNORECASE)
+        alt = alt_match.group(1) if alt_match else ""
+
+        normalized_src = resolve_arxiv_figure_url(arxiv_id, src, html_url=html_url)
+        if not normalized_src or normalized_src in found_urls:
+            continue
+        found_urls.add(normalized_src)
+
+        alt_lower = alt.lower()
+        figure_candidates.append({
+            "url": normalized_src,
+            "caption": alt[:120] if alt else f"Figure {i + 1}",
+            "score": _score_figure_caption(alt),
+            "is_method": any(keyword in alt_lower for keyword in _FIGURE_METHOD_KEYWORDS),
+            "type": "img",
+            "index": i,
+        })
+
+    return figure_candidates
+
+
+def _normalize_heading_text(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", unescape(text or "")).strip().casefold()
+    normalized = re.sub(r"^(section|chapter)\s+", "", normalized)
+    normalized = re.sub(r"^\d+(?:[.\-]\d+)*\s*", "", normalized)
+    normalized = re.sub(r"^(?:[ivxlcdm]+(?:[.\-][ivxlcdm]+)*)\s+", "", normalized)
+    return normalized.strip(" :.-")
+
+
+def _clean_html_text(fragment: str) -> str:
+    text = re.sub(r"<(?:script|style|svg|math)\b.*?</(?:script|style|svg|math)>", " ", fragment, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</p\s*>", "\n\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</div\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = unescape(text)
+    text = re.sub(r"\[[^\]]+\]", " ", text)
+    text = re.sub(r"\s+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
+def extract_introduction_from_arxiv_html(html: str, max_paragraphs: int = 8, max_chars: int = 6000) -> str:
+    """Extract the Introduction section text from arXiv HTML."""
+    if not html:
+        return ""
+
+    heading_pattern = re.compile(
+        r"<h(?P<level>[1-6])\b[^>]*>(?P<content>.*?)</h(?P=level)>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(heading_pattern.finditer(html))
+    if not matches:
+        return ""
+
+    intro_index = -1
+    intro_level = 0
+    for index, match in enumerate(matches):
+        heading_text = _normalize_heading_text(_clean_html_text(match.group("content")))
+        if heading_text.startswith("introduction"):
+            intro_index = index
+            intro_level = int(match.group("level"))
+            break
+
+    if intro_index < 0:
+        return ""
+
+    start = matches[intro_index].end()
+    end = len(html)
+    for next_match in matches[intro_index + 1:]:
+        if int(next_match.group("level")) <= intro_level:
+            end = next_match.start()
+            break
+
+    fragment = html[start:end]
+    paragraph_matches = re.findall(r"<p\b[^>]*>(.*?)</p>", fragment, flags=re.IGNORECASE | re.DOTALL)
+    if not paragraph_matches:
+        paragraph_matches = re.findall(r'<div\b[^>]*class="[^"]*ltx_para[^"]*"[^>]*>(.*?)</div>', fragment, flags=re.IGNORECASE | re.DOTALL)
+
+    paragraphs: list[str] = []
+    current_length = 0
+    for paragraph_html in paragraph_matches:
+        paragraph = _clean_html_text(paragraph_html)
+        if len(paragraph) < 40:
+            continue
+        paragraphs.append(paragraph)
+        current_length += len(paragraph)
+        if len(paragraphs) >= max_paragraphs or current_length >= max_chars:
+            break
+
+    return "\n\n".join(paragraphs).strip()
+
+
+def extract_introduction_from_pdf_text(text: str, max_chars: int = 6000) -> str:
+    """Extract the Introduction section from PDF-extracted plain text."""
+    if not text:
+        return ""
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"-\n(?=\w)", "", normalized)
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+
+    start_match = re.search(
+        r"(?im)^\s*(?:\d+(?:\.\d+)*|[ivxlcdm]+(?:\.[ivxlcdm]+)*)[.)]?\s+introduction\s*$|^\s*introduction\s*$",
+        normalized,
+    )
+    if not start_match:
+        return ""
+
+    remainder = normalized[start_match.end():].lstrip()
+    end_match = re.search(
+        r"(?im)^\s*(?:\d+(?:\.\d+)*|[ivxlcdm]+(?:\.[ivxlcdm]+)*)[.)]?\s+"
+        r"(?:related work|background|preliminaries|method|methods|approach|experiments|conclusion|references)\s*$",
+        remainder,
+    )
+    snippet = remainder[:end_match.start()] if end_match else remainder[:max_chars]
+    snippet = snippet.strip()
+    if not snippet:
+        return ""
+
+    paragraphs = [re.sub(r"\s+", " ", paragraph).strip() for paragraph in re.split(r"\n\s*\n", snippet) if paragraph.strip()]
+    collected: list[str] = []
+    current_length = 0
+    for paragraph in paragraphs:
+        if len(paragraph) < 40:
+            continue
+        collected.append(paragraph)
+        current_length += len(paragraph)
+        if current_length >= max_chars:
+            break
+
+    return "\n\n".join(collected).strip()
+
+
+def build_structured_digest_markdown(abstract: str, introduction: str) -> str:
+    """Build a predictable markdown digest block for downstream summarization."""
+    abstract_text = (abstract or "").strip()
+    introduction_text = (introduction or "").strip()
+
+    parts = [
+        "<!-- ABO_DIGEST_START -->",
+        "## ABO Digest",
+        "",
+        "### Abstract",
+        abstract_text or "N/A",
+        "",
+        "### Introduction",
+        introduction_text or "N/A",
+        "<!-- ABO_DIGEST_END -->",
+    ]
+    return "\n".join(parts).strip()
 
 
 @dataclass
@@ -113,7 +357,7 @@ class ArxivAPITool:
         keywords: list[str],
         categories: Optional[list[str]] = None,
         mode: Literal["AND", "OR"] = "OR",
-        max_results: int = 50,
+        max_results: int | None = 50,
         days_back: Optional[int] = None,
         sort_by: Literal["submittedDate", "relevance", "lastUpdatedDate"] = "submittedDate",
         sort_order: Literal["descending", "ascending"] = "descending",
@@ -126,7 +370,7 @@ class ArxivAPITool:
             keywords: List of search keywords
             categories: Optional list of arXiv categories (e.g., ["cs.AI", "cs.LG"])
             mode: "AND" or "OR" for combining keywords
-            max_results: Maximum number of results to return
+            max_results: Maximum number of results to return, or None for all available
             days_back: Optional filter for papers published within N days
             sort_by: Sort criterion ("submittedDate", "relevance", "lastUpdatedDate")
             sort_order: Sort direction ("descending" or "ascending")
@@ -196,69 +440,36 @@ class ArxivAPITool:
 
     async def fetch_figures(self, arxiv_id: str) -> list[dict]:
         """Fetch figures from arXiv HTML version."""
-        html_url = f"https://arxiv.org/html/{arxiv_id}"
         figures = []
 
         try:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                resp = await self._rate_limited_request(client, html_url, timeout=15)
+                found_urls: set[str] = set()
 
-            if resp.status_code != 200:
-                return figures
-
-            html = resp.text
-
-            # Look for img tags that are likely pipeline/method figures
-            img_pattern = r'<img[^>]+src="([^"]+)"[^>]*>'
-
-            found_urls = set()
-            img_matches = list(re.finditer(img_pattern, html, re.IGNORECASE))
-
-            for i, match in enumerate(img_matches):
-                try:
-                    src = match.group(1)
-                    if not src:
+                for html_url in build_arxiv_html_urls(arxiv_id):
+                    source_added = 0
+                    resp = await self._rate_limited_request(client, html_url, timeout=15)
+                    if resp.status_code != 200:
                         continue
 
-                    # Extract alt from the same img tag
-                    img_tag = match.group(0)
-                    alt_match = re.search(r'alt="([^"]*)"', img_tag, re.IGNORECASE)
-                    alt = alt_match.group(1) if alt_match else ""
+                    candidates = extract_figure_candidates_from_html(resp.text, arxiv_id, html_url)
+                    for candidate in candidates:
+                        src = candidate["url"]
+                        if src in found_urls:
+                            continue
+                        found_urls.add(src)
+                        figures.append({
+                            "url": src,
+                            "caption": candidate["caption"][:100] if candidate["caption"] else "",
+                            "is_method": candidate["is_method"],
+                            "type": candidate["type"],
+                        })
+                        source_added += 1
+                        if len(figures) >= 8:
+                            break
 
-                    # Skip non-figure images
-                    src_lower = src.lower()
-                    if src_lower.startswith("data:"):
-                        continue
-                    if any(skip in src_lower for skip in ['icon', 'logo', 'button', 'spacer', 'avatar']):
-                        continue
-
-                    src = resolve_arxiv_figure_url(arxiv_id, src)
-                    if not src:
-                        continue
-
-                    if src in found_urls:
-                        continue
-                    found_urls.add(src)
-
-                    # Check if it's a method/pipeline related figure
-                    alt_lower = alt.lower()
-                    is_method_figure = any(kw in alt_lower for kw in [
-                        'method', 'pipeline', 'architecture', 'framework',
-                        'overview', 'structure', 'model', 'system', 'approach',
-                        'flowchart', 'diagram', 'fig', 'figure', 'network',
-                        'proposed', 'illustration', 'schematic'
-                    ])
-
-                    figures.append({
-                        'url': src,
-                        'caption': alt[:100] if alt else f"Figure {i+1}",
-                        'is_method': is_method_figure,
-                        'type': 'img'
-                    })
-                    if len(figures) >= 8:
+                    if source_added or len(figures) >= 8:
                         break
-                except Exception:
-                    continue
 
             # Sort: prioritize method figures, then by caption
             figures.sort(key=lambda x: (not x['is_method'], x['caption']))
@@ -268,6 +479,42 @@ class ArxivAPITool:
             logger.warning(f"Failed to fetch figures for {arxiv_id}: {e}")
 
         return figures
+
+    async def fetch_introduction(self, arxiv_id: str) -> str:
+        """Fetch the Introduction section with HTML and PDF fallbacks."""
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                for html_url in build_arxiv_html_urls(arxiv_id):
+                    introduction = await self._fetch_introduction_from_html(client, html_url)
+                    if introduction:
+                        return introduction
+
+                return await self._fetch_introduction_from_pdf(client, arxiv_id)
+        except Exception as e:
+            logger.warning(f"Failed to fetch introduction for {arxiv_id}: {e}")
+            return ""
+
+    async def _fetch_introduction_from_html(self, client: httpx.AsyncClient, html_url: str) -> str:
+        resp = await self._rate_limited_request(client, html_url, timeout=20)
+        if resp.status_code != 200:
+            return ""
+        return extract_introduction_from_arxiv_html(resp.text)
+
+    async def _fetch_introduction_from_pdf(self, client: httpx.AsyncClient, arxiv_id: str) -> str:
+        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+        resp = await client.get(pdf_url, headers={"User-Agent": "ABO-arXiv-API/1.0"}, timeout=40)
+        if resp.status_code != 200 or resp.content[:4] != b"%PDF":
+            return ""
+
+        try:
+            from pypdf import PdfReader
+
+            reader = PdfReader(BytesIO(resp.content))
+            text = "\n".join((page.extract_text() or "") for page in reader.pages[:8])
+            return extract_introduction_from_pdf_text(text)
+        except Exception as e:
+            logger.warning(f"Failed to parse PDF introduction for {arxiv_id}: {e}")
+            return ""
 
     def to_dict(self, paper: ArxivPaper) -> dict:
         """Convert an ArxivPaper to a dictionary.
@@ -299,7 +546,7 @@ async def arxiv_api_search(
     keywords: list[str],
     categories: Optional[list[str]] = None,
     mode: Literal["AND", "OR"] = "OR",
-    max_results: int = 50,
+    max_results: int | None = 50,
     days_back: Optional[int] = None,
     sort_by: Literal["submittedDate", "relevance", "lastUpdatedDate"] = "submittedDate",
     sort_order: Literal["descending", "ascending"] = "descending",
@@ -312,7 +559,7 @@ async def arxiv_api_search(
         keywords: List of search keywords
         categories: Optional list of arXiv categories (e.g., ["cs.AI", "cs.LG"])
         mode: "AND" or "OR" for combining keywords
-        max_results: Maximum number of results to return
+        max_results: Maximum number of results to return, or None for all available
         days_back: Optional filter for papers published within N days
         sort_by: Sort criterion ("submittedDate", "relevance", "lastUpdatedDate")
         sort_order: Sort direction ("descending" or "ascending")

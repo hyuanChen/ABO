@@ -15,6 +15,7 @@ import { BilibiliFavoritesPage } from "./bilibili/BilibiliFavoritesPage";
 import { ArxivAPITool } from "./arxiv/ArxivAPITool";
 import Dashboard from "./dashboard/Dashboard";
 import Wiki from "./wiki/Wiki";
+import AssistantWorkspace from "./assistant/AssistantWorkspace";
 
 export default function MainContent() {
   const activeTab = useStore((s) => s.activeTab);
@@ -53,12 +54,15 @@ export default function MainContent() {
       }}
     >
       {activeTab === "profile"    && <Profile />}
+      {activeTab === "assistant"  && <AssistantWorkspace />}
       {activeTab === "vault"      && <BubbleVault />}
       {activeTab === "literature" && <Literature />}
       {activeTab === "journal"    && <Journal />}
       {activeTab === "claude"     && <ChatPanel />}
       {activeTab === "chat"       && <ChatPanel />}
-      {activeTab === "arxiv"      && <ArxivTracker />}
+      <div style={persistentTabStyle(activeTab === "arxiv")}>
+        <ArxivTracker />
+      </div>
       {activeTab === "health"     && <HealthDashboard />}
       {activeTab === "settings"   && <Settings />}
       {activeTab === "modules"    && <ModuleManagementPanel />}

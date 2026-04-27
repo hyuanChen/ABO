@@ -1,7 +1,8 @@
 import asyncio
 import httpx
-from datetime import datetime
 
+from abo.config import is_paper_ai_scoring_enabled
+from abo.paper_paths import sanitize_paper_title_for_path
 from abo.sdk import Module, Item, Card, agent_json
 
 
@@ -10,7 +11,7 @@ class SemanticScholarTracker(Module):
 
     id = "semantic-scholar-tracker"
     name = "Semantic Scholar 后续论文"
-    schedule = "0 10 * * *"  # Daily at 10 AM
+    schedule = "0 9 * * *"  # Daily at 9 AM
     icon = "git-branch"
     output = ["obsidian", "ui"]
 
@@ -307,6 +308,7 @@ class SemanticScholarTracker(Module):
     async def process(self, items: list[Item], prefs: dict) -> list[Card]:
         """Process Semantic Scholar papers into cards."""
         cards = []
+        ai_scoring_enabled = is_paper_ai_scoring_enabled()
 
         for item in items:
             p = item.raw
@@ -315,26 +317,25 @@ class SemanticScholarTracker(Module):
             if not p.get("abstract"):
                 continue
 
-            prompt = (
-                f'分析以下学术论文，返回 JSON（不要有其他文字）：\n'
-                f'{{"score":<1-10整数>,"summary":"<50字以内中文摘要>",'
-                f'"tags":["<tag1>","<tag2>","<tag3>"],"contribution":"<一句话核心创新>"}}\n\n'
-                f"标题：{p['title']}\n摘要：{p['abstract'][:600]}"
-            )
+            result = {}
+            if ai_scoring_enabled:
+                prompt = (
+                    f'分析以下学术论文，返回 JSON（不要有其他文字）：\n'
+                    f'{{"score":<1-10整数>,"summary":"<50字以内中文摘要>",'
+                    f'"tags":["<tag1>","<tag2>","<tag3>"],"contribution":"<一句话核心创新>"}}\n\n'
+                    f"标题：{p['title']}\n摘要：{p['abstract'][:600]}"
+                )
 
-            try:
-                result = await agent_json(prompt, prefs=prefs)
-            except Exception:
-                result = {}
+                try:
+                    result = await agent_json(prompt, prefs=prefs)
+                except Exception:
+                    result = {}
 
-            # Get first author for filename
             authors = p.get("authors", [])
-            first_author = authors[0].split()[-1] if authors else "Unknown"
-            year = str(p.get("year", datetime.now().year))
-
-            # Create safe filename from title
-            safe_title = (
-                p["title"][:40].replace(" ", "-").replace("/", "-").replace(":", "-")
+            safe_title = sanitize_paper_title_for_path(
+                p["title"],
+                fallback=item.id,
+                max_length=120,
             )
 
             # Get source arXiv ID for subfolder naming
@@ -353,7 +354,7 @@ class SemanticScholarTracker(Module):
                     score=min(result.get("score", 5), 10) / 10,
                     tags=result.get("tags", []) + [f"S2-{rel_label}"],
                     source_url=p.get("url", ""),
-                    obsidian_path=f"Literature/FollowUps/{subfolder}/{first_author}{year}-{safe_title}.md",
+                    obsidian_path=f"Literature/FollowUps/{subfolder}/{safe_title}/{safe_title}.md",
                     metadata={
                         "abo-type": "semantic-scholar-paper",
                         "authors": authors,

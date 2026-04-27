@@ -10,14 +10,15 @@ interface Step {
 }
 
 const steps: Step[] = [
-  { id: 0, title: "欢迎" },
-  { id: 1, title: "存储路径" },
-  { id: 2, title: "模块配置" },
-  { id: 3, title: "功能引导" },
+  { id: 0, title: "认识 ABO" },
+  { id: 1, title: "连接知识库" },
+  { id: 2, title: "一键配置" },
+  { id: 3, title: "上手路线" },
 ];
 
 export default function ProgressIndicator({ currentStep, totalSteps, onStepClick }: ProgressIndicatorProps) {
   const progress = ((currentStep + 1) / totalSteps) * 100;
+  const canClickSteps = Boolean(onStepClick);
 
   return (
     <div
@@ -62,19 +63,30 @@ export default function ProgressIndicator({ currentStep, totalSteps, onStepClick
           const isCurrent = index === currentStep;
           const isPending = index > currentStep;
 
-          const canClick = isCompleted && onStepClick;
-
           return (
             <div
               key={step.id}
-              onClick={() => canClick && onStepClick(index)}
+              role={canClickSteps ? "button" : undefined}
+              tabIndex={canClickSteps ? 0 : undefined}
+              title={canClickSteps ? `跳转到：${step.title}` : undefined}
+              onClick={() => {
+                if (onStepClick) onStepClick(index);
+              }}
+              onKeyDown={(event) => {
+                if (!onStepClick) return;
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onStepClick(index);
+                }
+              }}
               style={{
                 display: "flex",
                 alignItems: "center",
                 gap: "10px",
-                opacity: isPending ? 0.5 : 1,
+                opacity: isPending ? 0.72 : 1,
                 transition: "opacity 0.3s ease",
-                cursor: canClick ? "pointer" : "default",
+                cursor: canClickSteps ? "pointer" : "default",
+                outline: "none",
               }}
             >
               {/* Step Number */}

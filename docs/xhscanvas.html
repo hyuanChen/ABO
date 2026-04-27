@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>论文阅读与知识库自动化工作流</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #fcfcfc;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: #333;
+        }
+        
+        /* 自定义马卡龙色彩系统 */
+        .theme-green { background-color: #eef7ee; border-color: #bce3be; }
+        .theme-green-text { color: #2e6631; }
+        
+        .theme-yellow { background-color: #fbf9f1; border-color: #e8ddc5; }
+        .theme-yellow-text { color: #6a5a3a; }
+        
+        .theme-purple-border { border-color: #7b6acc; }
+        .theme-purple-light { background-color: #f1effd; border-color: #d1c8f8; }
+        .theme-purple-text { color: #443785; }
+        
+        .theme-gray { background-color: #f8f8f8; border-color: #e2e2e2; }
+        
+        .theme-orange { background-color: #fcf4ea; border-color: #f2dec5; }
+        .theme-orange-text { color: #875c27; }
+
+        .arrow-down {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 24px;
+            color: #888;
+            font-size: 1.2rem;
+            margin: 4px 0;
+        }
+
+        .box-hover {
+            transition: all 0.2s ease;
+        }
+        .box-hover:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8 flex justify-center">
+
+    <div class="max-w-4xl w-full flex flex-col gap-1">
+
+        <!-- ① 论文发现 -->
+        <div class="mb-2">
+            <div class="text-sm text-gray-600 mb-1">① 论文发现 (arXiv 专向)</div>
+            <div class="flex flex-col md:flex-row gap-4">
+                <!-- arXiv -->
+                <div class="flex-1 theme-green border rounded-xl p-4 text-center box-hover">
+                    <div class="font-bold text-lg theme-green-text mb-1">arXiv 原生追踪</div>
+                    <div class="text-sm theme-green-text opacity-90">RSS · 邮件订阅 · API · arxiv-sanity-lite</div>
+                </div>
+                <!-- Semantic Scholar -->
+                <div class="flex-1 theme-green border rounded-xl p-4 text-center box-hover">
+                    <div class="font-bold text-lg theme-green-text mb-1">Semantic Scholar</div>
+                    <div class="text-sm theme-green-text opacity-90">TLDR 摘要 · 引用追踪 · Alert 订阅</div>
+                </div>
+            </div>
+            <div class="text-center text-sm text-gray-500 mt-3">补充: Connected Papers — 从种子论文生成引用图谱 (免费 2 张 / 月)</div>
+        </div>
+
+        <div class="arrow-down"><i class="fa-solid fa-arrow-down"></i></div>
+
+        <!-- ② 入库 -->
+        <div>
+            <div class="text-sm text-gray-600 mb-1">② 入库 → raw/ 目录</div>
+            <div class="w-full theme-yellow border rounded-xl p-4 text-center box-hover">
+                <div class="font-bold text-lg theme-yellow-text mb-1">MinerU / Marker → raw/ · Obsidian Web Clipper → raw/</div>
+                <div class="text-sm theme-yellow-text opacity-90">PDF 转 Markdown · 公式保留 LaTeX · 图表转 HTML · 只增不改</div>
+            </div>
+        </div>
+
+        <div class="arrow-down"><i class="fa-solid fa-arrow-down"></i></div>
+
+        <!-- ③ LLM Wiki 核心 -->
+        <div>
+            <div class="w-full border-2 theme-purple-border rounded-2xl p-5 bg-white box-hover relative">
+                <div class="text-center font-bold text-lg mb-1">③ LLM Wiki 核心 — 主动编译，知识持续积累</div>
+                <div class="text-center text-sm text-gray-500 mb-5">区别于 RAG: LLM 主动写作结构化知识 ≠ 查询时被动检索重建</div>
+
+                <!-- 核心横向流程 -->
+                <div class="flex flex-col md:flex-row items-center justify-between gap-3 bg-gray-50 p-4 rounded-xl border border-gray-100">
+                    
+                    <!-- raw 目录 -->
+                    <div class="w-full md:w-1/4 theme-gray border rounded-xl p-4 text-center h-full flex flex-col justify-center">
+                        <div class="font-bold mb-1">raw/ 目录</div>
+                        <div class="text-xs text-gray-500">只增不改</div>
+                    </div>
+
+                    <div class="text-gray-400 rotate-90 md:rotate-0"><i class="fa-solid fa-arrow-right"></i></div>
+
+                    <!-- Claude Code 编译 -->
+                    <div class="w-full md:w-1/3 theme-purple-light border rounded-xl p-4 text-center h-full">
+                        <div class="font-bold theme-purple-text text-lg mb-1">Claude Code 编译</div>
+                        <div class="text-sm theme-purple-text opacity-90">读取全部 raw/ 文档<br>主动写作结构化内容</div>
+                    </div>
+
+                    <div class="text-gray-400 rotate-90 md:rotate-0"><i class="fa-solid fa-arrow-right"></i></div>
+
+                    <!-- wiki 知识库 -->
+                    <div class="w-full md:w-1/3 theme-purple-light border rounded-xl p-4 text-left h-full">
+                        <div class="font-bold theme-purple-text text-lg mb-2 text-center border-b border-[#d1c8f8] pb-1">wiki/ 知识库</div>
+                        <ul class="text-xs theme-purple-text opacity-90 list-disc list-inside space-y-1 ml-2">
+                            <li>论文摘要 (paper-level)</li>
+                            <li>概念文章 (跨论文综合)</li>
+                            <li>反向链接 [[backlink]]</li>
+                            <li>Gap 研究空白</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- 内部循环 -->
+                <div class="text-center mt-4 text-sm text-gray-600 flex items-center justify-center gap-2">
+                    <i class="fa-solid fa-rotate-right text-gray-400"></i>
+                    <span>Lint 健康检查 · 检测矛盾 · 补充引用 · 发现跨论文连接</span>
+                </div>
+                
+                <hr class="my-3 border-gray-100">
+
+                <!-- 总结 -->
+                <div class="text-center text-sm font-medium text-gray-700">
+                    知识持续积累 · 无需重建向量索引 · 概念网络随新论文自动更新
+                </div>
+            </div>
+        </div>
+
+        <div class="arrow-down"><i class="fa-solid fa-arrow-down"></i></div>
+
+        <!-- ④ Obsidian -->
+        <div>
+            <div class="text-sm text-gray-600 mb-1">④ Obsidian — 可视化层 (读取 wiki/, 不写入)</div>
+            <div class="w-full theme-gray border rounded-xl p-4 text-center box-hover">
+                <div class="font-bold text-[15px] mb-1">图谱视图 (反链可视化) · Canvas (逻辑图) · Dataview (查询统计)</div>
+                <div class="text-sm text-gray-500">MCP Filesystem server 挂载 wiki/ · Zotero 联动管理引用</div>
+            </div>
+        </div>
+
+        <div class="arrow-down"><i class="fa-solid fa-arrow-down"></i></div>
+
+        <!-- ⑤ 多模型协作讨论 -->
+        <div>
+            <div class="text-sm text-gray-600 mb-1">⑤ 多模型协作讨论 (shared research.md 三端共享上下文)</div>
+            <div class="flex flex-col md:flex-row gap-4">
+                <div class="flex-1 theme-purple-light border rounded-xl p-4 text-center box-hover">
+                    <div class="font-bold text-lg theme-purple-text mb-1">Claude Code</div>
+                    <div class="text-sm theme-purple-text opacity-90">综合 · 对齐 wiki · 仲裁</div>
+                </div>
+                <div class="flex-1 theme-green border rounded-xl p-4 text-center box-hover">
+                    <div class="font-bold text-lg theme-green-text mb-1">Gemini CLI</div>
+                    <div class="text-sm theme-green-text opacity-90">联网验证 · 搜最新论文</div>
+                </div>
+                <div class="flex-1 theme-yellow border rounded-xl p-4 text-center box-hover">
+                    <div class="font-bold text-lg theme-yellow-text mb-1">Codex CLI</div>
+                    <div class="text-sm theme-yellow-text opacity-90">挑漏洞 · 找已有反例</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="arrow-down"><i class="fa-solid fa-arrow-down"></i></div>
+
+        <!-- ⑥ 输出 -->
+        <div>
+            <div class="text-sm text-gray-600 mb-1">⑥ 输出 → 写回 wiki/ → ↻ 下一轮迭代</div>
+            <div class="w-full theme-orange border rounded-xl p-4 text-center box-hover">
+                <div class="font-bold text-lg theme-orange-text mb-1">Perplexity 新颖性验证 · Claude Code 追加至 gaps/ · Lint 更新知识图谱</div>
+                <div class="text-sm theme-orange-text opacity-90 flex items-center justify-center gap-1">
+                    <i class="fa-solid fa-rotate-right text-[12px]"></i> 创新点沉淀 → 触发下一轮编译 · Obsidian 图谱自动刷新
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+</body>
+</html>

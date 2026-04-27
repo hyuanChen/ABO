@@ -12,19 +12,85 @@ export interface BiliDynamic {
   images: string[];
   bvid: string;
   tags: string[];
+  matched_keywords?: string[];
+  matched_tags?: string[];
+  monitor_label?: string;
+  monitor_subfolder?: string;
+  crawl_source?: string;
+  crawl_source_label?: string;
 }
 
 export interface FetchFollowedRequest {
   sessdata: string;
   keywords?: string[];
+  tag_filters?: string[];
+  author_ids?: string[];
   dynamic_types?: number[];
   limit?: number;
   days_back?: number;
+  page_limit?: number;
+  scan_cutoff_days?: number;
+  monitor_label?: string;
+  monitor_subfolder?: string;
+}
+
+export interface BilibiliDailyDynamicMonitor {
+  id: string;
+  label: string;
+  keywords: string[];
+  tag_filters: string[];
+  enabled: boolean;
+  days_back: number;
+  limit: number;
+  page_limit: number;
+}
+
+export interface BilibiliFollowedGroupMonitor {
+  id: string;
+  group_value: string;
+  label: string;
+  enabled: boolean;
+  days_back: number;
+  limit: number;
+  page_limit: number;
+}
+
+export interface BiliDynamicFetchStats {
+  source?: "global-followed" | "author-space";
+  pages_scanned?: number;
+  pages_with_recent_candidates?: number;
+  matched_count_before_keep?: number;
+  kept_count?: number;
+  keep_limit?: number;
+  scan_result_limit?: number;
+  scanned_author_count?: number;
+  authors_with_hits?: number;
 }
 
 export interface FetchFollowedResponse {
   total_found: number;
+  fetch_stats?: BiliDynamicFetchStats;
   dynamics: BiliDynamic[];
+}
+
+export interface StartFollowedDynamicsCrawlResponse {
+  success: boolean;
+  task_id: string;
+}
+
+export interface FollowedDynamicsCrawlTask {
+  task_id: string;
+  kind: "followed-dynamics";
+  status: BilibiliTaskStatus;
+  stage: string;
+  updated_at: string;
+  can_cancel?: boolean;
+  error?: string | null;
+  total_found?: number;
+  pages_scanned?: number;
+  matched_count_before_keep?: number;
+  kept_count?: number;
+  result?: FetchFollowedResponse | null;
 }
 
 export interface BiliFollowedUp {
@@ -56,6 +122,13 @@ export interface FetchFollowedUpsResponse {
   ups: BiliFollowedUp[];
 }
 
+export type BilibiliTaskStatus =
+  | "running"
+  | "cancelling"
+  | "cancelled"
+  | "completed"
+  | "failed";
+
 export interface StartFollowedUpsCrawlResponse {
   success: boolean;
   task_id: string;
@@ -64,12 +137,13 @@ export interface StartFollowedUpsCrawlResponse {
 export interface FollowedUpsCrawlTask {
   task_id: string;
   kind: "followed-ups";
-  status: "running" | "completed" | "failed";
+  status: BilibiliTaskStatus;
   stage: string;
   current_page: number;
   page_size: number;
   fetched_count: number;
   updated_at: string;
+  can_cancel?: boolean;
   error?: string | null;
   result?: FetchFollowedUpsResponse | null;
 }
@@ -85,8 +159,11 @@ export interface BilibiliSmartGroupOption {
 export interface BilibiliSmartGroupProfile {
   author?: string;
   author_id?: string;
+  pending_author_id?: boolean;
   matched_author?: string;
   manual_override?: boolean;
+  manual_original_group_ids?: number[];
+  manual_original_group_labels?: string[];
   favorite_note_count?: number;
   smart_groups?: string[];
   smart_group_labels?: string[];
@@ -94,11 +171,14 @@ export interface BilibiliSmartGroupProfile {
   sample_titles?: string[];
   sample_tags?: string[];
   sample_folders?: string[];
+  sample_oids?: string[];
+  sample_urls?: string[];
   source_summary?: string;
 }
 
 export interface BilibiliSmartGroupResult {
   success: boolean;
+  workflow_mode?: "full" | "creator-only";
   bilibili_dir: string;
   favorites_dir: string;
   total_files: number;
@@ -114,7 +194,8 @@ export interface BilibiliSmartGroupResult {
 export interface BilibiliSmartGroupTask {
   task_id: string;
   kind: "followed-up-smart-groups";
-  status: "running" | "completed" | "failed";
+  workflow_mode?: "full" | "creator-only";
+  status: BilibiliTaskStatus;
   stage: string;
   progress: number;
   total_files: number;
@@ -122,7 +203,13 @@ export interface BilibiliSmartGroupTask {
   matched_followed_count: number;
   total_groups: number;
   total_followed_count?: number;
+  processed_followed_count?: number;
+  current_followed_name?: string;
+  fetched_count?: number;
+  current_page?: number;
+  page_size?: number;
   updated_at: string;
+  can_cancel?: boolean;
   error?: string | null;
   result?: BilibiliSmartGroupResult | null;
 }
@@ -131,6 +218,7 @@ export interface BilibiliSmartGroupRequest {
   sessdata: string;
   vault_path?: string;
   max_count?: number;
+  mode?: "full" | "creator-only";
 }
 
 export interface VerifySessdataRequest {
@@ -235,12 +323,13 @@ export interface FavoriteFoldersResponse {
 export interface FavoriteFoldersTask {
   task_id: string;
   kind: "favorite-folders";
-  status: "running" | "completed" | "failed";
+  status: BilibiliTaskStatus;
   stage: string;
   processed_folders: number;
   total_folders: number;
   current_folder: string;
   updated_at: string;
+  can_cancel?: boolean;
   error?: string | null;
   result?: FavoriteFoldersResponse | null;
 }
@@ -271,7 +360,7 @@ export interface FavoriteCrawlResponse extends CrawlToVaultResponse {
 export interface FavoriteCrawlTask {
   task_id: string;
   kind: "favorite-crawl";
-  status: "running" | "completed" | "failed";
+  status: BilibiliTaskStatus;
   stage: string;
   selected_folder_count: number;
   current_step: string;
@@ -281,11 +370,24 @@ export interface FavoriteCrawlTask {
   saved_count: number;
   skipped_count: number;
   updated_at: string;
+  can_cancel?: boolean;
   error?: string | null;
   result?: FavoriteCrawlResponse | null;
 }
 
+export interface BilibiliTaskCancelResponse {
+  success: boolean;
+  status: BilibiliTaskStatus;
+}
+
 const API_BASE = "http://127.0.0.1:8765/api/tools";
+export const BILIBILI_TASK_STORAGE_KEYS = [
+  "bilibili_followed_dynamics_task_id",
+  "bilibili_followed_ups_task_id",
+  "bilibili_followed_smart_group_task_id",
+  "bilibili_favorites_list_task_id",
+  "bilibili_favorites_crawl_task_id",
+] as const;
 
 async function readError(res: Response, fallback: string): Promise<string> {
   const text = await res.text();
@@ -294,6 +396,21 @@ async function readError(res: Response, fallback: string): Promise<string> {
     return data.detail || data.error || text || fallback;
   } catch {
     return text || fallback;
+  }
+}
+
+async function readJsonResponse<T>(res: Response, fallback: string): Promise<T> {
+  const text = await res.text();
+  if (!text.trim()) {
+    throw new Error(fallback);
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch (error) {
+    const preview = text.slice(0, 240);
+    throw new Error(
+      `${fallback}: ${error instanceof Error ? error.message : "返回内容无法解析"}${preview ? `；响应片段：${preview}` : ""}`
+    );
   }
 }
 
@@ -306,10 +423,39 @@ export async function bilibiliFetchFollowed(
     body: JSON.stringify(req),
   });
   if (!res.ok) {
-    const error = await res.text();
-    throw new Error(error || "Fetch failed");
+    throw new Error(await readError(res, "Fetch failed"));
   }
-  return res.json();
+  return readJsonResponse<FetchFollowedResponse>(res, "Fetch succeeded but response body was invalid");
+}
+
+export async function bilibiliStartFollowedCrawl(
+  req: FetchFollowedRequest
+): Promise<StartFollowedDynamicsCrawlResponse> {
+  const res = await fetch(`${API_BASE}/bilibili/followed/crawl`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    throw new Error(await readError(res, "Start followed dynamics crawl failed"));
+  }
+  return readJsonResponse<StartFollowedDynamicsCrawlResponse>(
+    res,
+    "Followed dynamics crawl started but response body was invalid",
+  );
+}
+
+export async function bilibiliGetFollowedCrawlTask(
+  taskId: string
+): Promise<FollowedDynamicsCrawlTask> {
+  const res = await fetch(`${API_BASE}/bilibili/followed/crawl/${taskId}`);
+  if (!res.ok) {
+    throw new Error(await readError(res, "Read followed dynamics crawl progress failed"));
+  }
+  return readJsonResponse<FollowedDynamicsCrawlTask>(
+    res,
+    "Followed dynamics crawl progress response was invalid",
+  );
 }
 
 export async function bilibiliFetchFollowedUps(
@@ -321,10 +467,9 @@ export async function bilibiliFetchFollowedUps(
     body: JSON.stringify(req),
   });
   if (!res.ok) {
-    const error = await res.text();
-    throw new Error(error || "Fetch followed ups failed");
+    throw new Error(await readError(res, "Fetch followed ups failed"));
   }
-  return res.json();
+  return readJsonResponse<FetchFollowedUpsResponse>(res, "Fetch followed ups response was invalid");
 }
 
 export async function bilibiliStartFollowedUpsCrawl(
@@ -336,10 +481,9 @@ export async function bilibiliStartFollowedUpsCrawl(
     body: JSON.stringify(req),
   });
   if (!res.ok) {
-    const error = await res.text();
-    throw new Error(error || "Start followed ups crawl failed");
+    throw new Error(await readError(res, "Start followed ups crawl failed"));
   }
-  return res.json();
+  return readJsonResponse<StartFollowedUpsCrawlResponse>(res, "Followed ups crawl start response was invalid");
 }
 
 export async function bilibiliGetFollowedUpsCrawlTask(
@@ -350,7 +494,7 @@ export async function bilibiliGetFollowedUpsCrawlTask(
     const error = await readError(res, "Read followed ups crawl progress failed");
     throw new Error(error);
   }
-  return res.json();
+  return readJsonResponse<FollowedUpsCrawlTask>(res, "Followed ups crawl progress response was invalid");
 }
 
 export async function bilibiliStartSmartGroupTask(
@@ -529,6 +673,73 @@ export async function bilibiliGetCrawlFavoriteFoldersTask(
     throw new Error(await readError(res, "Favorite crawl progress failed"));
   }
   return res.json();
+}
+
+export async function bilibiliCancelTask(
+  taskId: string
+): Promise<BilibiliTaskCancelResponse> {
+  const res = await fetch(`${API_BASE}/bilibili/tasks/${taskId}/cancel`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    throw new Error(await readError(res, "Cancel bilibili task failed"));
+  }
+  return res.json();
+}
+
+export function bilibiliCancelTaskSilently(taskId: string): void {
+  const url = `${API_BASE}/bilibili/tasks/${taskId}/cancel`;
+  try {
+    if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+      const sent = navigator.sendBeacon(url);
+      if (sent) {
+        return;
+      }
+    }
+  } catch {
+    // Ignore and fall back to keepalive fetch below.
+  }
+  void fetch(url, { method: "POST", keepalive: true }).catch(() => {
+    // Page is leaving or backend is already gone; nothing else to do.
+  });
+}
+
+function readStoredBilibiliTaskIds(): string[] {
+  if (typeof localStorage === "undefined") {
+    return [];
+  }
+  const taskIds = BILIBILI_TASK_STORAGE_KEYS
+    .map((key) => localStorage.getItem(key))
+    .filter((taskId): taskId is string => Boolean(taskId));
+  return Array.from(new Set(taskIds));
+}
+
+function clearStoredBilibiliTaskIds(): void {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+  BILIBILI_TASK_STORAGE_KEYS.forEach((key) => {
+    localStorage.removeItem(key);
+  });
+}
+
+export async function bilibiliCancelAllKnownTasks(): Promise<number> {
+  const taskIds = readStoredBilibiliTaskIds();
+  clearStoredBilibiliTaskIds();
+  if (taskIds.length === 0) {
+    return 0;
+  }
+  await Promise.allSettled(taskIds.map((taskId) => bilibiliCancelTask(taskId)));
+  return taskIds.length;
+}
+
+export function bilibiliCancelAllKnownTasksSilently(): number {
+  const taskIds = readStoredBilibiliTaskIds();
+  clearStoredBilibiliTaskIds();
+  taskIds.forEach((taskId) => {
+    bilibiliCancelTaskSilently(taskId);
+  });
+  return taskIds.length;
 }
 
 export interface DebugTestResult {

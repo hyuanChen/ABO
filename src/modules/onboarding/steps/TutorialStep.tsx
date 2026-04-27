@@ -1,426 +1,421 @@
 import { useState } from "react";
 import {
-  Sparkles,
-  Check,
   ArrowRight,
-  MousePointer,
-  User,
-  Star,
-  MessageSquare,
-  Zap,
+  BookOpen,
+  Check,
+  Compass,
+  FileText,
+  FolderDown,
+  Layers,
+  Route,
+  Settings,
+  Sparkles,
 } from "lucide-react";
+import {
+  configurationFlow,
+  coreUsageWorkflows,
+  dailyWorkflow,
+  guideDocumentPath,
+  nestedSidebarSections,
+  sidebarSections,
+} from "../onboardingContent";
 
 interface TutorialStepProps {
   onComplete: () => void;
 }
 
-interface TutorialItem {
-  id: string;
-  title: string;
-  description: string;
-  icon: React.ReactNode;
-  highlight: string;
-  tips: string[];
-}
+type GuideTab = "core" | "map" | "config" | "routine" | "reference";
+
+const tabs: Array<{ id: GuideTab; label: string; icon: React.ReactNode }> = [
+  { id: "core", label: "核心流程", icon: <FolderDown style={{ width: "16px", height: "16px" }} /> },
+  { id: "map", label: "侧边栏地图", icon: <Compass style={{ width: "16px", height: "16px" }} /> },
+  { id: "config", label: "配置流程", icon: <Settings style={{ width: "16px", height: "16px" }} /> },
+  { id: "routine", label: "日常路线", icon: <Route style={{ width: "16px", height: "16px" }} /> },
+  { id: "reference", label: "参考指南", icon: <FileText style={{ width: "16px", height: "16px" }} /> },
+];
+
+const nextActions = [
+  "先去今日情报看是否已有卡片；没有也正常，说明还没跑过工具或定时任务。",
+  "到小红书工具或哔哩哔哩工具手动跑一次预览，确认 Cookie、筛选和保存路径都可用。",
+  "到论文追踪里配置一个 arXiv 关键词监控，或者用 Semantic Scholar 查一篇论文的 Follow Up。",
+  "保存几条内容后进入 Wiki，生成 Internet Wiki 或 Literature Wiki，再让助手基于这些页面继续推进。",
+];
 
 export default function TutorialStep({ onComplete }: TutorialStepProps) {
-  const [currentStep, setCurrentStep] = useState(0);
-  const [completedSteps, setCompletedSteps] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState<GuideTab>("core");
 
-  const tutorials: TutorialItem[] = [
-    {
-      id: "feed",
-      title: "情报 Feed",
-      description: "Feed 是 ABO 的核心，展示所有模块抓取的内容",
-      icon: <MousePointer style={{ width: "24px", height: "24px", color: "white" }} />,
-      highlight: "卡片操作",
-      tips: [
-        "点击卡片标题可跳转到原文",
-        "点击 ☆ 收藏卡片，方便日后回顾",
-        "点击 👁 标记已读，保持 Feed 整洁",
-        "使用快捷键 J/K 快速浏览卡片",
-      ],
-    },
-    {
-      id: "profile",
-      title: "角色主页",
-      description: "查看你的研究者成长数据和六维能力雷达",
-      icon: <User style={{ width: "24px", height: "24px", color: "white" }} />,
-      highlight: "成长系统",
-      tips: [
-        "六维雷达图展示你的研究能力分布",
-        "完成任务获得 XP，提升等级",
-        "像素小人会随着你的成长而变化",
-        "每日签到获得能量和 SAN 值",
-      ],
-    },
-    {
-      id: "modules",
-      title: "模块管理",
-      description: "管理所有爬虫模块，配置关键词和 Cookie",
-      icon: <Zap style={{ width: "24px", height: "24px", color: "white" }} />,
-      highlight: "运行模块",
-      tips: [
-        "手动运行模块获取最新内容",
-        "在设置中配置各模块的关键词",
-        "需要 Cookie 的模块会有特殊标记",
-        "模块运行状态会实时显示",
-      ],
-    },
-    {
-      id: "interaction",
-      title: "互动反馈",
-      description: "通过反馈让 ABO 更了解你的偏好",
-      icon: <MessageSquare style={{ width: "24px", height: "24px", color: "white" }} />,
-      highlight: "偏好学习",
-      tips: [
-        "标记感兴趣的内容，提升相关推荐",
-        "标记不感兴趣的内容，减少类似推送",
-        "ABO 会学习你的阅读习惯",
-        "关键词偏好会自动调整排序",
-      ],
-    },
-  ];
+  const renderCoreFlow = () => (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: "14px" }}>
+      {coreUsageWorkflows.map((workflow, index) => (
+        <article
+          key={workflow.title}
+          style={{
+            padding: "18px",
+            borderRadius: "22px",
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-light)",
+            boxShadow: "var(--shadow-soft)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "flex-start", gap: "12px", marginBottom: "12px" }}>
+            <div
+              style={{
+                width: "38px",
+                height: "38px",
+                borderRadius: "14px",
+                background: "rgba(188, 164, 227, 0.16)",
+                color: "var(--color-primary-dark)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: "0.9rem",
+                fontWeight: 900,
+                flexShrink: 0,
+              }}
+            >
+              {index + 1}
+            </div>
+            <div>
+              <div style={{ fontSize: "1rem", fontWeight: 900, color: "var(--text-main)", marginBottom: "4px" }}>
+                {workflow.title}
+              </div>
+              <div style={{ fontSize: "0.8rem", color: "var(--text-secondary)", lineHeight: 1.55 }}>
+                {workflow.goal}
+              </div>
+            </div>
+          </div>
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: "14px",
+              background: "var(--bg-hover)",
+              color: "var(--color-primary-dark)",
+              fontSize: "0.78rem",
+              fontWeight: 850,
+              marginBottom: "12px",
+            }}
+          >
+            入口：{workflow.entry}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "12px" }}>
+            {workflow.steps.map((step) => (
+              <div key={step} style={{ display: "grid", gridTemplateColumns: "18px 1fr", gap: "9px", alignItems: "start" }}>
+                <Check style={{ width: "15px", height: "15px", color: "#4f9b80", marginTop: "3px" }} />
+                <span style={{ fontSize: "0.8rem", color: "var(--text-secondary)", lineHeight: 1.55 }}>{step}</span>
+              </div>
+            ))}
+          </div>
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: "14px",
+              background: "rgba(168, 230, 207, 0.14)",
+              color: "#4f9b80",
+              fontSize: "0.78rem",
+              lineHeight: 1.55,
+              fontWeight: 750,
+            }}
+          >
+            结果：{workflow.result}
+          </div>
+        </article>
+      ))}
+    </div>
+  );
 
-  const currentTutorial = tutorials[currentStep];
+  const renderMap = () => (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: "14px" }}>
+      {[...sidebarSections, ...nestedSidebarSections].map((section) => (
+        <article
+          key={section.title}
+          style={{
+            padding: "18px",
+            borderRadius: "20px",
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-light)",
+            boxShadow: "var(--shadow-soft)",
+          }}
+        >
+          <div style={{ fontSize: "1rem", fontWeight: 900, color: "var(--text-main)", marginBottom: "6px" }}>
+            {section.title}
+          </div>
+          <div style={{ fontSize: "0.78rem", color: "var(--text-muted)", lineHeight: 1.55, marginBottom: "12px" }}>
+            {section.subtitle}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            {section.items.map((item) => (
+              <div key={item.label} style={{ display: "grid", gridTemplateColumns: "86px 1fr", gap: "10px", alignItems: "start" }}>
+                <span style={{ fontSize: "0.78rem", fontWeight: 850, color: "var(--color-primary-dark)" }}>{item.label}</span>
+                <span style={{ fontSize: "0.78rem", color: "var(--text-secondary)", lineHeight: 1.55 }}>{item.summary}</span>
+              </div>
+            ))}
+          </div>
+        </article>
+      ))}
+    </div>
+  );
 
-  const handleNext = () => {
-    // Mark current step as completed
-    if (!completedSteps.includes(currentTutorial.id)) {
-      setCompletedSteps([...completedSteps, currentTutorial.id]);
-    }
+  const renderConfig = () => (
+    <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+      {configurationFlow.map((step) => (
+        <div
+          key={step.title}
+          style={{
+            display: "grid",
+            gridTemplateColumns: "44px 1fr",
+            gap: "14px",
+            padding: "16px",
+            borderRadius: "18px",
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-light)",
+          }}
+        >
+          <div
+            style={{
+              width: "44px",
+              height: "44px",
+              borderRadius: "15px",
+              background: "rgba(188, 164, 227, 0.16)",
+              color: "var(--color-primary-dark)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontWeight: 900,
+            }}
+          >
+            {step.title.slice(0, 1)}
+          </div>
+          <div>
+            <div style={{ fontSize: "0.95rem", fontWeight: 900, color: "var(--text-main)", marginBottom: "4px" }}>{step.title}</div>
+            <div style={{ fontSize: "0.86rem", color: "var(--text-secondary)", lineHeight: 1.65 }}>{step.body}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 
-    if (currentStep < tutorials.length - 1) {
-      // Go to next step
-      setCurrentStep(currentStep + 1);
-    } else {
-      // Last step - complete the tutorial
-      onComplete();
-    }
-  };
+  const renderRoutine = () => (
+    <div
+      style={{
+        padding: "22px",
+        borderRadius: "24px",
+        background: "linear-gradient(135deg, rgba(168, 230, 207, 0.14), rgba(188, 164, 227, 0.12))",
+        border: "1px solid rgba(188, 164, 227, 0.22)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "18px" }}>
+        <Layers style={{ width: "20px", height: "20px", color: "var(--color-primary)" }} />
+        <div>
+          <div style={{ fontSize: "1.05rem", fontWeight: 900, color: "var(--text-main)" }}>每天 15 分钟的推荐路线</div>
+          <div style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginTop: "3px" }}>先把注意力夺回来，再把知识留下、把过去写出来。</div>
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+        {dailyWorkflow.map((item, index) => (
+          <div
+            key={item}
+            style={{
+              display: "grid",
+              gridTemplateColumns: "30px 1fr",
+              gap: "12px",
+              alignItems: "start",
+              padding: "12px",
+              borderRadius: "16px",
+              background: "rgba(255,255,255,0.62)",
+              border: "1px solid var(--border-light)",
+            }}
+          >
+            <span
+              style={{
+                width: "30px",
+                height: "30px",
+                borderRadius: "999px",
+                background: "var(--color-primary)",
+                color: "white",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: "0.8rem",
+                fontWeight: 900,
+              }}
+            >
+              {index + 1}
+            </span>
+            <span style={{ fontSize: "0.9rem", color: "var(--text-secondary)", lineHeight: 1.65 }}>{item}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 
-  const handleStepClick = (index: number) => {
-    // Allow clicking to any step, including the last one
-    setCurrentStep(index);
-  };
+  const renderReference = () => (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "18px" }}>
+      <div
+        style={{
+          padding: "22px",
+          borderRadius: "24px",
+          background: "var(--bg-card)",
+          border: "1px solid var(--border-light)",
+          boxShadow: "var(--shadow-soft)",
+        }}
+      >
+        <BookOpen style={{ width: "28px", height: "28px", color: "var(--color-primary)", marginBottom: "12px" }} />
+        <div style={{ fontSize: "1.1rem", fontWeight: 900, color: "var(--text-main)", marginBottom: "8px" }}>完整参考指南已经写入 Markdown</div>
+        <div style={{ fontSize: "0.875rem", color: "var(--text-secondary)", lineHeight: 1.7, marginBottom: "14px" }}>
+          文档包含侧边栏地图、每个入口的主要分组、初始化配置、日常工作流、论文/小红书/B 站路径和排障建议。
+        </div>
+        <code
+          style={{
+            display: "block",
+            padding: "12px",
+            borderRadius: "12px",
+            background: "var(--bg-hover)",
+            color: "var(--text-main)",
+            fontSize: "0.82rem",
+            wordBreak: "break-all",
+          }}
+        >
+          {guideDocumentPath}
+        </code>
+      </div>
 
-  const handleSkip = () => {
-    onComplete();
+      <div
+        style={{
+          padding: "22px",
+          borderRadius: "24px",
+          background: "var(--bg-card)",
+          border: "1px solid var(--border-light)",
+          boxShadow: "var(--shadow-soft)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+          <Sparkles style={{ width: "20px", height: "20px", color: "var(--color-primary)" }} />
+          <div style={{ fontSize: "1rem", fontWeight: 900, color: "var(--text-main)" }}>完成向导后建议做这 4 件事</div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {nextActions.map((action) => (
+            <div key={action} style={{ display: "grid", gridTemplateColumns: "20px 1fr", gap: "10px", alignItems: "start" }}>
+              <Check style={{ width: "16px", height: "16px", color: "#4f9b80", marginTop: "3px" }} />
+              <span style={{ fontSize: "0.86rem", color: "var(--text-secondary)", lineHeight: 1.65 }}>{action}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderActiveContent = () => {
+    if (activeTab === "core") return renderCoreFlow();
+    if (activeTab === "config") return renderConfig();
+    if (activeTab === "routine") return renderRoutine();
+    if (activeTab === "reference") return renderReference();
+    return renderMap();
   };
 
   return (
     <div
       style={{
+        minHeight: "100%",
+        padding: "clamp(28px, 4vw, 48px)",
+        maxWidth: "1120px",
+        margin: "0 auto",
         display: "flex",
         flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        minHeight: "100%",
-        padding: "48px 32px",
-        maxWidth: "680px",
-        margin: "0 auto",
       }}
     >
-      {/* Header */}
-      <div style={{ textAlign: "center", marginBottom: "32px" }}>
+      <header style={{ textAlign: "center", marginBottom: "28px" }}>
         <div
           style={{
             width: "72px",
             height: "72px",
-            borderRadius: "var(--radius-xl)",
+            borderRadius: "24px",
             background: "linear-gradient(135deg, #FFB7B2, #E89B96)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            margin: "0 auto 20px",
-            boxShadow: "0 8px 32px rgba(255, 183, 178, 0.4)",
+            margin: "0 auto 18px",
+            boxShadow: "0 16px 38px rgba(255, 183, 178, 0.34)",
           }}
         >
-          <Sparkles style={{ width: "36px", height: "36px", color: "white" }} />
+          <Sparkles style={{ width: "34px", height: "34px", color: "white" }} />
         </div>
-
         <h2
           style={{
             fontFamily: "'M PLUS Rounded 1c', sans-serif",
-            fontSize: "1.75rem",
-            fontWeight: 700,
+            fontSize: "clamp(1.7rem, 4vw, 2.4rem)",
+            fontWeight: 900,
             color: "var(--text-main)",
             marginBottom: "8px",
           }}
         >
-          功能引导
+          最后一页：怎么真正用起来
         </h2>
-
-        <p
-          style={{
-            fontSize: "0.9375rem",
-            color: "var(--text-secondary)",
-            lineHeight: 1.6,
-          }}
-        >
-          了解 ABO 的核心功能，开始你的研究之旅
+        <p style={{ fontSize: "0.96rem", color: "var(--text-secondary)", lineHeight: 1.7, maxWidth: "680px", margin: "0 auto" }}>
+          ABO 的关键不是一次抓取，而是每天把输入变成可回看的知识结构。先看地图，再按路线使用。
         </p>
-      </div>
+      </header>
 
-      {/* Progress Dots */}
-      <div style={{ display: "flex", gap: "10px", marginBottom: "32px" }}>
-        {tutorials.map((tutorial, index) => (
-          <button
-            key={tutorial.id}
-            onClick={() => handleStepClick(index)}
-            style={{
-              width: "10px",
-              height: "10px",
-              borderRadius: "50%",
-              background:
-                index === currentStep
-                  ? "var(--color-primary)"
-                  : completedSteps.includes(tutorial.id)
-                  ? "#22c55e"
-                  : "var(--border-light)",
-              border: "none",
-              cursor: "pointer",
-              transition: "all 0.3s ease",
-              transform: index === currentStep ? "scale(1.3)" : "scale(1)",
-            }}
-          />
-        ))}
-      </div>
-
-      {/* Tutorial Card */}
-      <div
-        style={{
-          width: "100%",
-          padding: "32px",
-          borderRadius: "var(--radius-xl)",
-          background: "var(--bg-card)",
-          border: "1px solid var(--border-light)",
-          boxShadow: "var(--shadow-soft)",
-          marginBottom: "32px",
-          animation: "fadeIn 0.4s ease",
-        }}
-      >
-        {/* Step Header */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "16px",
-            marginBottom: "24px",
-          }}
-        >
-          <div
-            style={{
-              width: "56px",
-              height: "56px",
-              borderRadius: "var(--radius-lg)",
-              background: "linear-gradient(135deg, var(--color-primary), var(--color-secondary))",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            {currentTutorial.icon}
-          </div>
-          <div>
-            <span
-              style={{
-                fontSize: "0.75rem",
-                fontWeight: 700,
-                color: "var(--color-primary)",
-                textTransform: "uppercase",
-                letterSpacing: "0.5px",
-              }}
-            >
-              步骤 {currentStep + 1} / {tutorials.length}
-            </span>
-            <h3
-              style={{
-                fontSize: "1.375rem",
-                fontWeight: 700,
-                color: "var(--text-main)",
-                marginTop: "4px",
-              }}
-            >
-              {currentTutorial.title}
-            </h3>
-          </div>
-        </div>
-
-        {/* Description */}
-        <p
-          style={{
-            fontSize: "1rem",
-            color: "var(--text-secondary)",
-            lineHeight: 1.7,
-            marginBottom: "24px",
-            padding: "16px 20px",
-            background: "var(--bg-hover)",
-            borderRadius: "var(--radius-lg)",
-            borderLeft: "4px solid var(--color-primary)",
-          }}
-        >
-          {currentTutorial.description}
-        </p>
-
-        {/* Highlight Badge */}
-        <div
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "8px",
-            padding: "8px 16px",
-            borderRadius: "var(--radius-full)",
-            background: "linear-gradient(135deg, rgba(188, 164, 227, 0.15), rgba(255, 183, 178, 0.1))",
-            marginBottom: "20px",
-          }}
-        >
-          <Star style={{ width: "16px", height: "16px", color: "var(--color-primary)" }} />
-          <span
-            style={{
-              fontSize: "0.875rem",
-              fontWeight: 600,
-              color: "var(--color-primary)",
-            }}
-          >
-            重点：{currentTutorial.highlight}
-          </span>
-        </div>
-
-        {/* Tips List */}
-        <div>
-          <h4
-            style={{
-              fontSize: "0.9375rem",
-              fontWeight: 600,
-              color: "var(--text-main)",
-              marginBottom: "14px",
-            }}
-          >
-            使用技巧
-          </h4>
-          <ul
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "10px",
-            }}
-          >
-            {currentTutorial.tips.map((tip, index) => (
-              <li
-                key={index}
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: "10px",
-                  fontSize: "0.9375rem",
-                  color: "var(--text-secondary)",
-                  lineHeight: 1.6,
-                }}
-              >
-                <span
-                  style={{
-                    width: "6px",
-                    height: "6px",
-                    borderRadius: "50%",
-                    background: "var(--color-primary)",
-                    marginTop: "8px",
-                    flexShrink: 0,
-                  }}
-                />
-                {tip}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-
-      {/* Navigation */}
       <div
         style={{
           display: "flex",
-          gap: "16px",
-          width: "100%",
+          gap: "8px",
+          flexWrap: "wrap",
           justifyContent: "center",
+          marginBottom: "22px",
         }}
       >
-        <button
-          onClick={handleSkip}
-          style={{
-            padding: "14px 28px",
-            borderRadius: "var(--radius-full)",
-            background: "transparent",
-            border: "1px solid var(--border-light)",
-            color: "var(--text-muted)",
-            fontSize: "0.9375rem",
-            fontWeight: 500,
-            cursor: "pointer",
-            transition: "all 0.3s ease",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.color = "var(--text-secondary)";
-            e.currentTarget.style.borderColor = "var(--text-muted)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.color = "var(--text-muted)";
-            e.currentTarget.style.borderColor = "var(--border-light)";
-          }}
-        >
-          跳过引导
-        </button>
+        {tabs.map((tab) => {
+          const active = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "10px 14px",
+                borderRadius: "999px",
+                border: `1px solid ${active ? "var(--color-primary)" : "var(--border-light)"}`,
+                background: active ? "rgba(188, 164, 227, 0.14)" : "var(--bg-card)",
+                color: active ? "var(--color-primary)" : "var(--text-secondary)",
+                fontSize: "0.82rem",
+                fontWeight: 850,
+                cursor: "pointer",
+              }}
+            >
+              {tab.icon}
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
 
+      <main style={{ flex: 1, minHeight: 0, marginBottom: "26px" }}>{renderActiveContent()}</main>
+
+      <footer style={{ display: "flex", justifyContent: "center" }}>
         <button
-          onClick={handleNext}
+          onClick={onComplete}
           style={{
             display: "flex",
             alignItems: "center",
             gap: "10px",
-            padding: "14px 36px",
-            borderRadius: "var(--radius-full)",
+            padding: "15px 32px",
+            borderRadius: "999px",
             background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
             border: "none",
             color: "white",
-            fontSize: "0.9375rem",
-            fontWeight: 700,
+            fontSize: "0.96rem",
+            fontWeight: 900,
             cursor: "pointer",
-            transition: "all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)",
-            boxShadow: "0 4px 16px rgba(188, 164, 227, 0.3)",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.transform = "translateY(-2px) scale(1.02)";
-            e.currentTarget.style.boxShadow = "0 6px 24px rgba(188, 164, 227, 0.4)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.transform = "translateY(0) scale(1)";
-            e.currentTarget.style.boxShadow = "0 4px 16px rgba(188, 164, 227, 0.3)";
+            boxShadow: "0 12px 30px rgba(188, 164, 227, 0.34)",
           }}
         >
-          {currentStep === tutorials.length - 1 ? (
-            <>
-              <Check style={{ width: "20px", height: "20px" }} />
-              完成
-            </>
-          ) : (
-            <>
-              下一步
-              <ArrowRight style={{ width: "20px", height: "20px" }} />
-            </>
-          )}
+          <Check style={{ width: "19px", height: "19px" }} />
+          完成并进入 ABO
+          <ArrowRight style={{ width: "19px", height: "19px" }} />
         </button>
-      </div>
-
-      <style>{`
-        @keyframes fadeIn {
-          from {
-            opacity: 0;
-            transform: translateY(10px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-      `}</style>
+      </footer>
     </div>
   );
 }

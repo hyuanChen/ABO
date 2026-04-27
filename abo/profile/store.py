@@ -68,9 +68,24 @@ def save_daily_motto(motto: str, description: str) -> None:
 
 # ── SAN log ──────────────────────────────────────────────────────
 
+def _upsert_daily_score(log: list[dict], score: int) -> list[dict]:
+    today = date.today().isoformat()
+    updated = False
+    normalized: list[dict] = []
+    for entry in log:
+        if entry.get("date") == today:
+            normalized.append({"date": today, "score": score})
+            updated = True
+        else:
+            normalized.append(entry)
+    if not updated:
+        normalized.append({"date": today, "score": score})
+    return normalized
+
+
 def append_san(score: int) -> None:
     log = _normalize_log(_read("san_log.json", []))
-    log.append({"date": date.today().isoformat(), "score": score})
+    log = _upsert_daily_score(log, score)
     _write("san_log.json", log[-90:])  # keep last 90 days
 
 
@@ -95,7 +110,7 @@ def get_san_7d_avg() -> float:
 
 def append_happiness(score: int) -> None:
     log = _normalize_log(_read("happiness_log.json", []))
-    log.append({"date": date.today().isoformat(), "score": score})
+    log = _upsert_daily_score(log, score)
     _write("happiness_log.json", log[-90:])
 
 
@@ -142,12 +157,72 @@ def get_todos_today() -> list:
     return all_todos.get(today, [])
 
 
+def get_manual_todos_today() -> list:
+    return [todo for todo in get_todos_today() if todo.get("source") != "agent"]
+
+
 def save_todos_today(todos: list) -> None:
     all_todos = _read("daily_todos.json", {})
     today = date.today().isoformat()
     all_todos[today] = todos
     sorted_keys = sorted(all_todos.keys())[-30:]
     _write("daily_todos.json", {k: all_todos[k] for k in sorted_keys})
+
+
+# ── Persona profile ──────────────────────────────────────────────
+
+def get_persona_profile() -> dict:
+    return _read("persona_profile.json", {
+        "source_text": "",
+        "summary": "",
+        "homepage": {
+            "codename": "",
+            "long_term_goal": "",
+            "one_liner": "",
+            "narrative": "",
+            "strengths": [],
+            "working_style": [],
+            "preferred_topics": [],
+            "next_focus": [],
+        },
+        "sbti": {
+            "type": "",
+            "confidence": 0.0,
+            "reasoning": [],
+        },
+        "generated_at": "",
+    })
+
+
+def save_persona_profile(persona: dict) -> None:
+    _write("persona_profile.json", persona)
+
+
+# ── Daily briefing ───────────────────────────────────────────────
+
+def get_daily_briefing(date_str: str | None = None) -> dict:
+    briefings = _read("daily_briefings.json", {})
+    today = date_str or date.today().isoformat()
+    return briefings.get(today, {
+        "date": today,
+        "raw_text": "",
+        "summary": "",
+        "focus": "",
+        "preferred_keywords": [],
+        "suggested_todos": [],
+        "intel_cards": [],
+        "reading_digest": {},
+        "generated_at": "",
+    })
+
+
+def save_daily_briefing(briefing: dict, date_str: str | None = None) -> None:
+    briefings = _read("daily_briefings.json", {})
+    today = date_str or date.today().isoformat()
+    data = {"date": today, **briefing}
+    briefings[today] = data
+    sorted_keys = sorted(briefings.keys())[-30:]
+    _write("daily_briefings.json", {k: briefings[k] for k in sorted_keys})
 
 
 # ── Skills ───────────────────────────────────────────────────────

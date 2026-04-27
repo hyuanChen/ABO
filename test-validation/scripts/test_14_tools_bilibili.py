@@ -399,7 +399,17 @@ async def test_bilibili_fetch_followed_keeps_full_content_and_tags(monkeypatch):
 
     full_desc = "A" * 800
 
-    async def fake_fetch(self, dynamic_types=None, keywords=None, limit=20, days_back=7):
+    async def fake_fetch(
+        self,
+        dynamic_types=None,
+        keywords=None,
+        tag_filters=None,
+        author_ids=None,
+        limit=20,
+        days_back=7,
+        monitor_label=None,
+        monitor_subfolder=None,
+    ):
         return [
             BiliDynamic(
                 id="1",
@@ -422,6 +432,57 @@ async def test_bilibili_fetch_followed_keeps_full_content_and_tags(monkeypatch):
     assert result["dynamics"][0]["content"] == full_desc
     assert result["dynamics"][0]["tags"] == ["机器学习", "教程"]
     assert result["dynamics"][0]["bvid"] == "BV1234567890"
+
+
+@pytest.mark.asyncio
+async def test_bilibili_fetch_followed_filters_requested_author_ids(monkeypatch):
+    """Tool-level preview should be able to target selected followed UPs only."""
+    from abo.tools.bilibili import BiliDynamic, bilibili_fetch_followed
+
+    async def fake_fetch(
+        self,
+        dynamic_types=None,
+        keywords=None,
+        tag_filters=None,
+        author_ids=None,
+        limit=20,
+        days_back=7,
+        monitor_label=None,
+        monitor_subfolder=None,
+    ):
+        dynamics = [
+            BiliDynamic(
+                id="1",
+                dynamic_id="1",
+                title="UP 42 的动态",
+                content="",
+                author="UP42",
+                author_id="42",
+                url="https://www.bilibili.com/video/BV42",
+                dynamic_type="video",
+            ),
+            BiliDynamic(
+                id="2",
+                dynamic_id="2",
+                title="UP 99 的动态",
+                content="",
+                author="UP99",
+                author_id="99",
+                url="https://www.bilibili.com/video/BV99",
+                dynamic_type="video",
+            ),
+        ]
+        if author_ids:
+            allowed = {str(author_id) for author_id in author_ids}
+            dynamics = [dynamic for dynamic in dynamics if dynamic.author_id in allowed]
+        return dynamics[:limit]
+
+    monkeypatch.setattr("abo.tools.bilibili.BilibiliToolAPI.fetch_followed_dynamics", fake_fetch)
+
+    result = await bilibili_fetch_followed("dummy", author_ids=["99"], limit=10)
+
+    assert result["total_found"] == 1
+    assert [dynamic["author_id"] for dynamic in result["dynamics"]] == ["99"]
 
 
 def test_bilibili_parse_polymer_opus_sets_preview_cover():
@@ -449,7 +510,6 @@ def test_bilibili_parse_polymer_opus_sets_preview_cover():
                     },
                 },
             },
-            keywords=None,
         )
 
         assert dynamic is not None

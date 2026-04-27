@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { FolderOpen, Check, AlertCircle, Loader2, ArrowLeft, ArrowRight, BookOpen, Database } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../../../core/api";
@@ -29,6 +29,31 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
   });
   const [isSaving, setIsSaving] = useState(false);
   const [useSamePath, setUseSamePath] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadExistingPaths() {
+      try {
+        const config = await api.get<{ vault_path?: string; literature_path?: string }>("/api/config");
+        if (cancelled) return;
+        const vault = config.vault_path || "";
+        const literature = config.literature_path || vault;
+        if (!vault && !literature) return;
+        setPaths({ vault, literature });
+        setUseSamePath(!config.literature_path || config.literature_path === vault);
+        setValidation({
+          vault: vault ? { status: "success", message: "已读取现有情报库路径" } : { status: "idle", message: "" },
+          literature: literature ? { status: "success", message: "已读取现有文献库路径" } : { status: "idle", message: "" },
+        });
+      } catch {
+        // The user can still select paths manually if config loading fails.
+      }
+    }
+    void loadExistingPaths();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const validatePath = useCallback(async (path: string, type: PathType): Promise<boolean> => {
     if (!path) return false;
@@ -123,6 +148,11 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const handleSkipPathSetup = () => {
+    onVaultPathSet("", "");
+    onNext();
   };
 
   const getStatusIcon = (status: ValidationState[PathType]["status"]) => {
@@ -281,7 +311,7 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
           textAlign: "center",
         }}
       >
-        配置存储路径
+        连接你的本地知识库
       </h2>
 
       <p
@@ -293,7 +323,8 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
           lineHeight: 1.6,
         }}
       >
-        设置情报库和文献库的存储位置
+        ABO 会把抓取结果写成 Markdown。第一次使用建议选一个 Obsidian Vault；
+        文献库可以先和情报库共用，后续再拆开。
       </p>
 
       {/* Path Selectors */}
@@ -302,7 +333,7 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
           type="vault"
           icon={BookOpen}
           title="情报库"
-          description="存储小红书、Bilibili、知乎等工具抓取和整理的内容"
+          description="存储小红书、Bilibili、知乎、收藏和网页等非论文内容"
         />
 
         {/* Use same path toggle */}
@@ -349,7 +380,7 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
           type="literature"
           icon={Database}
           title="文献库"
-          description="存储 arXiv、Semantic Scholar 等论文和文献内容"
+          description="存储 arXiv、Semantic Scholar、Follow Up 等论文和文献内容"
           disabled={useSamePath}
         />
       </div>
@@ -364,6 +395,7 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
         }}
       >
         <button
+          type="button"
           onClick={onBack}
           style={{
             display: "flex",
@@ -385,6 +417,7 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
         </button>
 
         <button
+          type="button"
           onClick={handleContinue}
           disabled={!paths.vault || validation.vault.status === "error" || isSaving}
           style={{
@@ -417,6 +450,24 @@ export default function VaultSetupStep({ onNext, onBack, onVaultPathSet }: Vault
           )}
         </button>
       </div>
+
+      <button
+        type="button"
+        onClick={handleSkipPathSetup}
+        style={{
+          marginTop: "14px",
+          border: "none",
+          background: "transparent",
+          color: "var(--text-muted)",
+          fontSize: "0.8125rem",
+          fontWeight: 700,
+          cursor: "pointer",
+          textDecoration: "underline",
+          textUnderlineOffset: "4px",
+        }}
+      >
+        稍后再选库，继续 10 秒钟配置
+      </button>
 
       <style>{`
         @keyframes spin {

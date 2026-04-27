@@ -146,42 +146,42 @@ DEFAULT_MODULES = [
         "name": "arXiv 论文追踪",
         "description": "追踪 arXiv 上符合关键词的最新论文",
         "icon": "book-open",
-        "schedule": "0 8 * * *",
+        "schedule": "0 9 * * *",
     },
     {
         "id": "semantic-scholar-tracker",
         "name": "Semantic Scholar 追踪",
         "description": "追踪 Semantic Scholar 上的最新研究",
         "icon": "graduation-cap",
-        "schedule": "0 10 * * *",
+        "schedule": "0 9 * * *",
     },
     {
         "id": "xiaohongshu-tracker",
         "name": "小红书追踪",
         "description": "追踪小红书上的相关内容",
         "icon": "book-heart",
-        "schedule": "0 10 * * *",
+        "schedule": "30 8 * * *",
     },
     {
         "id": "bilibili-tracker",
         "name": "哔哩哔哩追踪",
         "description": "追踪 B站 上的相关视频",
         "icon": "tv",
-        "schedule": "0 11 * * *",
+        "schedule": "30 8 * * *",
     },
     {
         "id": "xiaoyuzhou-tracker",
         "name": "小宇宙追踪",
         "description": "追踪小宇宙播客",
         "icon": "podcast",
-        "schedule": "0 10 * * *",
+        "schedule": "0 9 * * *",
     },
     {
         "id": "zhihu-tracker",
         "name": "知乎追踪",
         "description": "追踪知乎上的相关内容",
         "icon": "help-circle",
-        "schedule": "0 13 * * *",
+        "schedule": "0 9 * * *",
     },
     {
         "id": "folder-monitor",
@@ -521,9 +521,9 @@ async def toggle_module(module_id: str, body: dict = Body(...)) -> dict:
     return {"module_id": module_id, "status": new_status, "updated_at": datetime.utcnow()}
 
 
-@router.post("/{module_id}/run")
-async def run_module(module_id: str) -> dict:
-    """Run module immediately."""
+@router.post("/dashboard/{module_id}/run")
+async def run_module_dashboard(module_id: str) -> dict:
+    """Run module immediately from the dashboard stub API."""
     default = next((m for m in DEFAULT_MODULES if m["id"] == module_id), None)
     if not default:
         raise HTTPException(status_code=404, detail=f"Module {module_id} not found")
@@ -532,9 +532,9 @@ async def run_module(module_id: str) -> dict:
     return {"module_id": module_id, "started_at": datetime.utcnow(), "status": "running"}
 
 
-@router.post("/{module_id}/config")
-async def update_module_config(module_id: str, request: ConfigUpdateRequest) -> ModuleConfig:
-    """Update module configuration."""
+@router.post("/dashboard/{module_id}/config")
+async def update_module_config_dashboard(module_id: str, request: ConfigUpdateRequest) -> ModuleConfig:
+    """Update module configuration in the dashboard stub API."""
     default = next((m for m in DEFAULT_MODULES if m["id"] == module_id), None)
     if not default:
         raise HTTPException(status_code=404, detail=f"Module {module_id} not found")

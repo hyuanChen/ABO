@@ -117,8 +117,12 @@ async function handleCommand(msg) {
     case "get_viewport_height":
     case "get_url":
     case "get_xhs_page_snapshot":
+    case "get_xhs_profile_cards":
     case "wait_for_xhs_state":
       return await cmdEvaluateInMainWorld(method, params);
+
+    case "xhs_apply_followed_search_filter":
+      return await cmdApplyFollowedSearchFilter(params);
 
     // ── DOM 操作（在页面 MAIN world 执行，无需 content script 就绪） ──
     default:
@@ -158,6 +162,42 @@ async function cmdWaitForLoad({ timeout = 60000, background = false }) {
     await restorePreviousActiveTab(previousActiveTab, tab.id);
   }
   return null;
+}
+
+async function cmdApplyFollowedSearchFilter({
+  timeout = 12000,
+  foreground = false,
+  restore_focus = true,
+} = {}) {
+  const tab = await getOrOpenXhsTab();
+  rememberXhsTab(tab);
+
+  const shouldForeground = Boolean(foreground);
+  const shouldRestoreFocus = shouldForeground && Boolean(restore_focus);
+  const previousActiveTab = shouldForeground ? await getCurrentFocusedActiveTab() : null;
+
+  if (shouldForeground) {
+    await ensureTabVisible(tab);
+    await sleep(250);
+  }
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: domExecutor,
+      args: ["xhs_apply_followed_search_filter", { timeout }],
+    });
+    const result = results?.[0]?.result;
+    if (result && typeof result === "object" && "__xhs_error" in result) {
+      throw new Error(result.__xhs_error);
+    }
+    return result ?? null;
+  } finally {
+    if (shouldRestoreFocus) {
+      await restorePreviousActiveTab(previousActiveTab, tab.id);
+    }
+  }
 }
 
 async function cmdEnsureDedicatedXhsTab({ url = "https://www.xiaohongshu.com/explore" } = {}) {
@@ -563,6 +603,123 @@ function mainWorldExecutor(method, params) {
     return snapshot.hasInitialState || Object.values(paths).some((count) => Number(count || 0) > 0);
   }
 
+  function collectXhsCards(params = {}) {
+    const pageKind = params.kind || "profile";
+    const limit = Math.max(1, Math.min(Number(params.limit || 50), 200));
+    const defaultXsecSource = pageKind === "feed" ? "pc_feed" : (pageKind === "profile" ? "pc_user" : "pc_search");
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const state = window.__INITIAL_STATE__ || {};
+    const roots = [
+      unwrap(state.user?.notes),
+      unwrap(state.user?.noteList),
+      unwrap(state.user?.feeds),
+      unwrap(state.profile?.notes),
+      unwrap(state.profile?.noteList),
+      unwrap(state.search?.feeds),
+      unwrap(state.search?.notes),
+      unwrap(state.feed?.feeds),
+      unwrap(state.note?.noteDetailMap),
+    ].filter(Boolean);
+    const metaById = {};
+    const mergeMeta = (noteId, patch) => {
+      if (!noteId) return;
+      const current = metaById[noteId] || {};
+      metaById[noteId] = {
+        xsec_token: current.xsec_token || patch.xsec_token || "",
+        author: current.author || patch.author || "",
+        author_id: current.author_id || patch.author_id || "",
+      };
+    };
+    const addToken = (value) => {
+      if (!value || typeof value !== "object") return;
+      const noteCard = value.noteCard || {};
+      const noteId = value.noteId || value.note_id || value.id || noteCard.noteId || noteCard.note_id || noteCard.id;
+      const token = value.xsecToken || value.xsec_token || noteCard.xsecToken || noteCard.xsec_token;
+      const user = value.user || value.userInfo || value.authorInfo || noteCard.user || noteCard.userInfo || noteCard.authorInfo || {};
+      const author = user.nickname || user.name || user.userName || value.author || noteCard.author || "";
+      const authorId = user.userId || user.user_id || user.uid || user.id || value.authorId || value.author_id || value.userId || noteCard.authorId || noteCard.author_id || noteCard.userId || "";
+      mergeMeta(noteId, {
+        xsec_token: token ? String(token) : "",
+        author: author ? String(author) : "",
+        author_id: authorId ? String(authorId) : "",
+      });
+    };
+    const queue = roots.map((value) => ({ value, depth: 0 }));
+    const seenObjects = new WeakSet();
+    let visited = 0;
+    while (queue.length && visited < 2500) {
+      const { value, depth } = queue.shift();
+      if (!value || typeof value !== "object" || seenObjects.has(value) || depth > 5) continue;
+      seenObjects.add(value);
+      visited += 1;
+      addToken(value);
+      const children = Array.isArray(value)
+        ? value.slice(0, 120)
+        : Object.keys(value).slice(0, 120).map((key) => {
+            try { return value[key]; } catch (_) { return null; }
+          });
+      for (const child of children) {
+        if (child && typeof child === "object") queue.push({ value: child, depth: depth + 1 });
+      }
+    }
+
+    const cards = [];
+    const seenHrefs = new Set();
+    const anchors = Array.from(document.querySelectorAll('a[href*="/explore/"]'));
+    for (const anchor of anchors) {
+      const rawHref = anchor.href || anchor.getAttribute("href") || "";
+      if (!rawHref) continue;
+      const absoluteHref = rawHref.startsWith("http") ? rawHref : new URL(rawHref, location.origin).href;
+      if (seenHrefs.has(absoluteHref)) continue;
+      seenHrefs.add(absoluteHref);
+      const url = new URL(absoluteHref);
+      const noteId = (url.pathname.match(/\/explore\/([^/?#]+)/) || [])[1] || "";
+      const noteMeta = metaById[noteId] || {};
+      const tokenNode = anchor.closest('[data-xsec-token],[xsec-token]');
+      const card =
+        anchor.closest("section") ||
+        anchor.closest("article") ||
+        anchor.closest('div[class*="note"]') ||
+        anchor.closest('div[class*="feed"]') ||
+        anchor.parentElement;
+      const authorLink = Array.from((card || anchor).querySelectorAll('a[href*="/user/profile/"]')).find((node) => {
+        const text = normalize(node.innerText || node.textContent || "");
+        return text && !/关注|粉丝|获赞|笔记|主页|小红书号/i.test(text);
+      }) || null;
+      const authorHref = authorLink?.href || authorLink?.getAttribute?.("href") || "";
+      const absoluteAuthorHref = authorHref
+        ? (authorHref.startsWith("http") ? authorHref : new URL(authorHref, location.origin).href)
+        : "";
+      const authorId = (absoluteAuthorHref.match(/\/user\/profile\/([^/?#]+)/) || [])[1] || noteMeta.author_id || "";
+      const authorName = normalize(authorLink?.innerText || authorLink?.textContent || "") || normalize(noteMeta.author || "");
+      const text = normalize(card?.innerText || anchor.innerText || "");
+      const lines = text.split("\n").map((line) => normalize(line)).filter(Boolean);
+      const images = Array.from((card || anchor).querySelectorAll("img"))
+        .map((img) => img.src || img.getAttribute("data-src") || "")
+        .filter(Boolean)
+        .filter((src) => !src.includes("avatar"));
+      cards.push({
+        href: rawHref,
+        xsec_token:
+          url.searchParams.get("xsec_token") ||
+          noteMeta.xsec_token ||
+          anchor.dataset.xsecToken ||
+          tokenNode?.dataset?.xsecToken ||
+          tokenNode?.getAttribute?.("xsec-token") ||
+          "",
+        xsec_source: url.searchParams.get("xsec_source") || defaultXsecSource,
+        author: authorName,
+        author_id: authorId,
+        title: lines[0] || "",
+        text,
+        lines,
+        images: images.slice(0, 9),
+      });
+      if (cards.length >= limit) break;
+    }
+    return cards;
+  }
+
   function poll(check, interval, timeout) {
     return new Promise((resolve, reject) => {
       const start = Date.now();
@@ -618,6 +775,9 @@ function mainWorldExecutor(method, params) {
 
     case "get_xhs_page_snapshot":
       return getXhsSnapshot(params || {});
+
+    case "get_xhs_profile_cards":
+      return collectXhsCards({ ...(params || {}), kind: "profile" });
 
     case "wait_for_xhs_state": {
       const timeout = params.timeout || 15000;
@@ -711,6 +871,235 @@ async function cmdDomInMainWorld(method, params) {
  */
 function domExecutor(method, params) {
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  function normalize(value) { return String(value || "").replace(/\s+/g, "").trim(); }
+  function isVisible(el) {
+    if (!el || !(el instanceof HTMLElement)) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    const opacity = Number(style.opacity || "1");
+    const zIndex = Number(style.zIndex || "0");
+    const ariaHidden = String(el.getAttribute?.("aria-hidden") || "").toLowerCase() === "true";
+    if (ariaHidden && opacity < 0.05) return false;
+    if (opacity < 0.05) return false;
+    if (zIndex < 0 && opacity < 0.2) return false;
+    return rect.width > 8 && rect.height > 8 && style.visibility !== "hidden" && style.display !== "none";
+  }
+  function collectNodeTexts(node) {
+    if (!node || !(node instanceof HTMLElement)) return [];
+    return [
+      node.innerText || "",
+      node.textContent || "",
+      node.getAttribute?.("aria-label") || "",
+      node.getAttribute?.("title") || "",
+      node.getAttribute?.("data-testid") || "",
+      node.getAttribute?.("placeholder") || "",
+      node.getAttribute?.("alt") || "",
+    ].map((value) => normalize(value)).filter(Boolean);
+  }
+  function ancestorMatches(node, hints = []) {
+    if (!hints.length) return false;
+    let current = node;
+    while (current && current instanceof HTMLElement) {
+      const haystack = normalize([
+        current.innerText || current.textContent || "",
+        current.className || "",
+        current.id || "",
+        current.getAttribute?.("role") || "",
+        current.getAttribute?.("data-testid") || "",
+      ].join(" "));
+      if (hints.some((hint) => haystack.includes(normalize(hint)))) return true;
+      current = current.parentElement;
+    }
+    return false;
+  }
+  function getClickable(node) {
+    if (!node) return null;
+    return node.closest?.(
+      'button,a[href],input,label,[role="button"],[role="option"],[role="radio"],[role="checkbox"],[tabindex],li,div'
+    ) || node;
+  }
+  function findExactFilterButton() {
+    const selectors = [
+      ".search-layout__top .filter",
+      ".filter",
+    ];
+    for (const selector of selectors) {
+      const node = document.querySelector(selector);
+      if (node instanceof HTMLElement && isVisible(node)) return node;
+    }
+    return null;
+  }
+  function findFollowedFilterOption() {
+    const normalizeLabels = ["只看已关注", "已关注"].map((value) => normalize(value));
+    const filterSections = Array.from(document.querySelectorAll(".filters"));
+    for (const section of filterSections) {
+      if (!(section instanceof HTMLElement) || !isVisible(section)) continue;
+      const labelNode = Array.from(section.children).find((child) => child instanceof HTMLElement && normalize(child.innerText || child.textContent || ""));
+      const sectionLabel = normalize(labelNode?.innerText || labelNode?.textContent || "");
+      if (sectionLabel !== normalize("搜索范围")) continue;
+      const exactTags = Array.from(section.querySelectorAll(".tag-container .tags[data-hp-bound='1']"));
+      for (const node of exactTags) {
+        if (!(node instanceof HTMLElement) || !isVisible(node)) continue;
+        const ariaHidden = String(node.getAttribute("aria-hidden") || "").toLowerCase();
+        if (ariaHidden === "true") continue;
+        const text = normalize(node.innerText || node.textContent || "");
+        if (normalizeLabels.includes(text)) {
+          return node;
+        }
+      }
+    }
+
+    const selectors = [
+      ".filters .tags[data-hp-bound='1']",
+      ".filters .tags",
+      ".filters span",
+      ".filters div",
+      '[role=\"dialog\"] .tags',
+      '[role=\"dialog\"] span',
+      '[role=\"dialog\"] div',
+    ];
+    for (const selector of selectors) {
+      const nodes = Array.from(document.querySelectorAll(selector));
+      for (const node of nodes) {
+        if (!(node instanceof HTMLElement) || !isVisible(node)) continue;
+        const ariaHidden = String(node.getAttribute("aria-hidden") || "").toLowerCase();
+        if (ariaHidden === "true") continue;
+        const texts = collectNodeTexts(node);
+        if (texts.some((text) => normalizeLabels.includes(text))) {
+          return node;
+        }
+      }
+    }
+    return null;
+  }
+  function clickLikeUser(node) {
+    const clickable = getClickable(node);
+    if (!(clickable instanceof HTMLElement)) return false;
+    clickable.scrollIntoView({ block: "center", inline: "center" });
+    clickable.focus?.();
+    const rect = clickable.getBoundingClientRect();
+    const clientX = rect.left + Math.max(4, Math.min(rect.width - 4, rect.width / 2));
+    const clientY = rect.top + Math.max(4, Math.min(rect.height - 4, rect.height / 2));
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      clickable.dispatchEvent(new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX,
+        clientY,
+      }));
+    }
+    try {
+      clickable.click?.();
+    } catch (_err) {
+      return false;
+    }
+    return true;
+  }
+  function clickNative(node) {
+    if (!(node instanceof HTMLElement)) return false;
+    node.scrollIntoView({ block: "center", inline: "center" });
+    try {
+      node.click?.();
+    } catch (_err) {
+      return false;
+    }
+    return true;
+  }
+  function findBestTextCandidate(labels, preferredAncestors = []) {
+    const normalizedLabels = (labels || []).map((label) => normalize(label)).filter(Boolean);
+    const candidates = [];
+    const nodes = Array.from(document.querySelectorAll("button, a, span, div, li, label"));
+    for (const node of nodes) {
+      if (!isVisible(node)) continue;
+      const texts = collectNodeTexts(node);
+      if (!texts.length) continue;
+      let bestScore = -1;
+      let matchedLabel = "";
+      let matchedText = "";
+      for (const text of texts) {
+        if (!text || text.length > 64) continue;
+        for (const label of normalizedLabels) {
+          if (text === label) {
+            bestScore = Math.max(bestScore, 300);
+            matchedLabel = label;
+            matchedText = text;
+          } else if (text.includes(label)) {
+            bestScore = Math.max(bestScore, 220);
+            matchedLabel = label;
+            matchedText = text;
+          }
+        }
+      }
+      if (bestScore < 0) continue;
+      const preferred = ancestorMatches(node, preferredAncestors);
+      const clickable = getClickable(node);
+      const score = bestScore + (preferred ? 180 : 0) + (clickable !== node ? 40 : 0);
+      candidates.push({
+        node,
+        clickable,
+        matchedLabel,
+        matchedText,
+        preferred,
+        score,
+      });
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0] || null;
+  }
+  async function waitForLabels(labels, timeout = 8000, interval = 300) {
+    const normalizedLabels = (labels || []).map((label) => normalize(label)).filter(Boolean);
+    const started = Date.now();
+    let lastText = "";
+    while (Date.now() - started < timeout) {
+      lastText = normalize((document.body?.innerText || "").slice(0, 5000));
+      if (normalizedLabels.some((label) => lastText.includes(label))) return true;
+      await sleep(interval);
+    }
+    return { ok: false, lastText: lastText.slice(0, 800), labels: normalizedLabels };
+  }
+  function getFollowedFilterStatus() {
+    const topFilter = findExactFilterButton();
+    const topFilterText = normalize(topFilter?.innerText || topFilter?.textContent || "");
+    let followedActive = false;
+    const matches = [];
+    const filterSections = Array.from(document.querySelectorAll(".filters"));
+    for (const section of filterSections) {
+      if (!(section instanceof HTMLElement) || !isVisible(section)) continue;
+      const labelNode = Array.from(section.children).find((child) => child instanceof HTMLElement && normalize(child.innerText || child.textContent || ""));
+      const sectionLabel = normalize(labelNode?.innerText || labelNode?.textContent || "");
+      if (sectionLabel !== normalize("搜索范围")) continue;
+      const exactTags = Array.from(section.querySelectorAll(".tag-container .tags[data-hp-bound='1']"));
+      for (const node of exactTags) {
+        if (!(node instanceof HTMLElement) || !isVisible(node)) continue;
+        const text = normalize(node.innerText || node.textContent || "");
+        if (!text.includes(normalize("已关注")) && !text.includes(normalize("只看已关注"))) continue;
+        const style = window.getComputedStyle(node);
+        const classText = normalize(node.className || "");
+        const active =
+          /(active|selected|checked|current|on|enable)/i.test(classText) ||
+          style.fontWeight === "700" ||
+          style.fontWeight === "800" ||
+          style.fontWeight === "900" ||
+          style.color.includes("255, 46, 77");
+        if (active) followedActive = true;
+        matches.push({
+          text,
+          active,
+          className: node.className || "",
+          hpBound: node.getAttribute?.("data-hp-bound") || "",
+          top_filter_text: topFilterText,
+        });
+      }
+    }
+    return {
+      applied: followedActive || topFilterText.includes(normalize("已筛选")),
+      top_filter_text: topFilterText,
+      followed_active: followedActive,
+      matches: matches.slice(0, 8),
+    };
+  }
 
   function requireEl(selector) {
     const el = document.querySelector(selector);
@@ -726,6 +1115,75 @@ function domExecutor(method, params) {
       el.focus();
       el.click();
       return null;
+    }
+
+    case "xhs_apply_followed_search_filter": {
+      return new Promise(async (resolve) => {
+        const timeout = Number(params.timeout || 12000);
+        const debug = { steps: [] };
+        const readySearch = await waitForLabels(["筛选", "综合", "搜索"], Math.min(timeout, 12000), 350);
+        if (readySearch !== true) {
+          resolve({ __xhs_error: `搜索页未出现筛选入口: ${JSON.stringify(readySearch)}` });
+          return;
+        }
+
+        const exactFilterButton = findExactFilterButton();
+        if (exactFilterButton instanceof HTMLElement) {
+          if (!clickNative(exactFilterButton)) {
+            resolve({ __xhs_error: "找到了 .filter，但点击失败" });
+            return;
+          }
+          debug.steps.push({ action: "open-filter", matched: normalize(exactFilterButton.innerText || exactFilterButton.textContent || ""), via: "exact-filter-selector" });
+        } else {
+          const filterButton = findBestTextCandidate(["筛选"]);
+          if (!filterButton || !clickLikeUser(filterButton.node)) {
+            resolve({ __xhs_error: `未找到可点击的筛选按钮: ${JSON.stringify(filterButton)}` });
+            return;
+          }
+          debug.steps.push({ action: "open-filter", matched: filterButton.matchedText, score: filterButton.score, via: "text-candidate" });
+        }
+        await sleep(700);
+        const exactFollowedReady = await waitForLabels(["已关注", "只看已关注", "搜索范围", "排序依据"], 4000, 250);
+        debug.steps.push({ action: "wait-followed-panel", ready: exactFollowedReady === true ? "ok" : exactFollowedReady });
+
+        const exactFollowedOption = findFollowedFilterOption();
+        if (exactFollowedOption instanceof HTMLElement) {
+          const optionText = normalize(exactFollowedOption.innerText || exactFollowedOption.textContent || "");
+          if (!clickNative(exactFollowedOption)) {
+            resolve({ __xhs_error: `找到了已关注选项，但点击失败: ${optionText}` });
+            return;
+          }
+          debug.steps.push({ action: "select-followed", matched: optionText, via: "exact-followed-selector" });
+        } else {
+          const readyFollowed = await waitForLabels(["已关注", "只看已关注", "筛选"], 8000, 300);
+          if (readyFollowed !== true) {
+            resolve({ __xhs_error: `筛选面板未出现已关注选项: ${JSON.stringify(readyFollowed)}` });
+            return;
+          }
+
+          const followedOption = findBestTextCandidate(
+            ["只看已关注", "已关注"],
+            ["筛选", "filter", "popup", "dialog", "drawer", "sheet", "panel"],
+          );
+          if (!followedOption || !clickLikeUser(followedOption.node)) {
+            resolve({ __xhs_error: `未找到可点击的已关注选项: ${JSON.stringify(followedOption)}` });
+            return;
+          }
+          debug.steps.push({ action: "select-followed", matched: followedOption.matchedText, score: followedOption.score, via: "text-candidate" });
+        }
+        await sleep(700);
+
+        const confirmButton = findBestTextCandidate(
+          ["确定", "完成", "应用"],
+          ["筛选", "filter", "popup", "dialog", "drawer", "sheet", "panel"],
+        );
+        if (confirmButton) {
+          clickLikeUser(confirmButton.node);
+          debug.steps.push({ action: "confirm-filter", matched: confirmButton.matchedText, score: confirmButton.score });
+          await sleep(900);
+        }
+        resolve({ ok: true, debug });
+      });
     }
 
     case "input_text": {
@@ -1107,6 +1565,18 @@ function extractXhsRouteIdentity(urlValue) {
   return { kind, id, origin: parsed.origin };
 }
 
+function queryMatchesExpectation(currentParsed, expectedParsed) {
+  const expectedEntries = Array.from(expectedParsed.searchParams.entries());
+  if (!expectedEntries.length) return true;
+  for (const [key, value] of expectedEntries) {
+    const currentValues = currentParsed.searchParams.getAll(key);
+    if (!currentValues.length || !currentValues.includes(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function urlMatchesExpectation(current, expected) {
   if (!expected) return true;
 
@@ -1124,7 +1594,9 @@ function urlMatchesExpectation(current, expected) {
 
   const currentPath = trimTrailingSlash(currentParsed.pathname);
   const expectedPath = trimTrailingSlash(expectedParsed.pathname);
-  if (currentPath === expectedPath) return true;
+  if (currentPath === expectedPath) {
+    return queryMatchesExpectation(currentParsed, expectedParsed);
+  }
 
   const currentIdentity = extractXhsRouteIdentity(currentText);
   const expectedIdentity = extractXhsRouteIdentity(expectedText);

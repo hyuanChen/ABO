@@ -2,7 +2,8 @@ export interface SearchRequest {
   keyword: string;
   max_results?: number;
   min_likes?: number;
-  sort_by?: 'likes' | 'time';
+  sort_by?: 'comprehensive' | 'likes' | 'time';
+  recent_days?: number;
   cookie?: string;
   use_extension?: boolean;
   extension_port?: number;
@@ -49,6 +50,7 @@ export interface SearchResponse {
     title: string;
     content: string;
     author: string;
+    author_id?: string;
     likes: number;
     collects: number;
     comments_count: number;
@@ -233,6 +235,7 @@ export interface SavePreviewNote {
   title: string;
   content: string;
   author: string;
+  author_id?: string;
   likes: number;
   collects: number;
   comments_count: number;
@@ -246,13 +249,39 @@ export interface SavePreviewNote {
   xsec_source?: string;
 }
 
+export interface SavePreviewsRequest {
+  notes: SavePreviewNote[];
+  vault_path?: string;
+  subfolder?: string;
+  cookie?: string;
+  use_extension?: boolean;
+  extension_port?: number;
+  dedicated_window_mode?: boolean;
+  use_cdp?: boolean;
+  cdp_port?: number;
+  download_images_mode?: "smart" | "always" | "never";
+  save_strategy?: "card" | "detail";
+  short_content_threshold?: number;
+  include_comments?: boolean;
+  comments_limit?: number;
+  comments_sort_by?: "likes" | "time";
+}
+
 export interface SavePreviewsResponse {
   success: boolean;
   total: number;
   saved: number;
   failed: number;
   xhs_dir: string;
-  results: Array<{ success: boolean; note_id?: string; title?: string; markdown_path?: string; error?: string }>;
+  results: Array<{
+    success: boolean;
+    note_id?: string;
+    title?: string;
+    markdown_path?: string;
+    error?: string;
+    detail_strategy?: string;
+    warnings?: string[];
+  }>;
 }
 
 export interface XHSAuthorCandidate {
@@ -272,29 +301,84 @@ export interface XHSAuthorCandidate {
   score: number;
 }
 
-export interface XHSAuthorCandidatesResponse {
-  success: boolean;
-  xhs_dir: string;
-  total_notes: number;
-  candidates: XHSAuthorCandidate[];
-  message: string;
-}
-
 export interface XHSAuthorSyncResponse {
   success: boolean;
   added_count: number;
   added_user_ids: string[];
   total_user_ids: number;
   skipped: Array<{ author: string; reason: string }>;
+  group_options?: XHSSmartGroupOption[];
+}
+
+export interface XHSFollowingCreator {
+  author: string;
+  author_id: string;
+  profile_url: string;
+}
+
+export interface XHSFollowingCreatorsResponse {
+  total_found: number;
+  creators: XHSFollowingCreator[];
+}
+
+export interface XHSCreatorRecentResponse {
+  creator_query: string;
+  resolved_author: string;
+  resolved_user_id: string;
+  profile_url: string;
+  recent_days: number;
+  total_found: number;
+  notes: SearchResponse["notes"];
+}
+
+export interface XHSSmartGroupOption {
+  value: string;
+  label: string;
+  count?: number;
+  sample_authors?: string[];
+  sample_tags?: string[];
+}
+
+export interface XHSSmartGroupResult {
+  success: boolean;
+  workflow_mode?: "full" | "creator-only";
+  xhs_dir?: string;
+  xhs_candidates?: XHSAuthorCandidate[];
+  xhs_candidate_message?: string;
+  total_notes: number;
+  total_candidates: number;
+  matched_creator_count: number;
+  new_profile_count: number;
+  updated_profile_count: number;
+  total_creator_count: number;
+  shared_group_count: number;
+  added_user_ids: string[];
+  total_user_ids: number;
+  already_grouped: boolean;
+  group_options: XHSSmartGroupOption[];
+  profiles: Record<string, {
+    author?: string;
+    author_id?: string;
+    smart_groups?: string[];
+    smart_group_labels?: string[];
+    latest_title?: string;
+    sample_titles?: string[];
+    sample_albums?: string[];
+    sample_tags?: string[];
+    source_summary?: string;
+  }>;
+  skipped: Array<{ author: string; reason: string }>;
+  message: string;
 }
 
 export interface XHSTaskStatus<T = any> {
   task_id: string;
   kind: string;
-  status: "running" | "completed" | "failed" | "interrupted";
+  status: "running" | "completed" | "failed" | "interrupted" | "cancelled" | "cancelling";
   stage: string;
   result: T | null;
   error: string | null;
+  can_cancel?: boolean;
   input?: Record<string, unknown>;
   input_summary?: string;
   current?: number;
@@ -399,33 +483,15 @@ export async function xiaohongshuCrawlBatch(req: CrawlBatchRequest): Promise<Cra
   return res.json();
 }
 
-export async function xiaohongshuSavePreviews(notes: SavePreviewNote[], vault_path?: string): Promise<SavePreviewsResponse> {
+export async function xiaohongshuSavePreviews(payload: SavePreviewsRequest): Promise<SavePreviewsResponse> {
   const res = await fetch(`${API_BASE}/xiaohongshu/save-previews`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ notes, vault_path }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
     const detail = await res.json().catch(() => null);
     throw new Error(detail?.detail || 'Save previews failed');
-  }
-  return res.json();
-}
-
-export async function xiaohongshuGetAuthorCandidates(payload?: {
-  cookie?: string;
-  resolve_author_ids?: boolean;
-  resolve_limit?: number;
-  vault_path?: string;
-}): Promise<XHSAuthorCandidatesResponse> {
-  const res = await fetch(`${API_BASE}/xiaohongshu/authors/candidates`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload || {}),
-  });
-  if (!res.ok) {
-    const detail = await res.json().catch(() => null);
-    throw new Error(detail?.detail || 'Analyze authors failed');
   }
   return res.json();
 }
@@ -473,6 +539,18 @@ export async function xiaohongshuGetTaskStatus<T = any>(taskId: string): Promise
   return res.json();
 }
 
+export async function xiaohongshuCancelTask(taskId: string): Promise<{ success: boolean; status: string }> {
+  const res = await fetch(`${API_BASE}/xiaohongshu/tasks/${taskId}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.detail || "Cancel task failed");
+  }
+  return res.json();
+}
+
 export async function xiaohongshuListTasks(limit = 20): Promise<{ tasks: XHSTaskStatus[] }> {
   const res = await fetch(`${API_BASE}/xiaohongshu/tasks?limit=${limit}`);
   if (!res.ok) {
@@ -495,11 +573,26 @@ export const xiaohongshuStartFollowingFeedTask = (payload: {
   cookie?: string;
   keywords: string[];
   max_notes?: number;
+  recent_days?: number;
+  sort_by?: "likes" | "time";
   use_extension?: boolean;
   extension_port?: number;
   dedicated_window_mode?: boolean;
 }) =>
   startTask("/xiaohongshu/following-feed/start", payload);
+
+export const xiaohongshuStartCreatorRecentTask = (payload: {
+  creator_query: string;
+  cookie?: string;
+  recent_days?: number;
+  max_notes?: number;
+  use_extension?: boolean;
+  extension_port?: number;
+  dedicated_window_mode?: boolean;
+  manual_current_tab?: boolean;
+  require_extension_success?: boolean;
+}) =>
+  startTask("/xiaohongshu/creator-notes/start", payload);
 
 export const xiaohongshuStartCrawlNoteTask = (payload: CrawlNoteRequest) =>
   startTask("/xiaohongshu/crawl-note/start", payload);
@@ -507,9 +600,10 @@ export const xiaohongshuStartCrawlNoteTask = (payload: CrawlNoteRequest) =>
 export const xiaohongshuStartCrawlBatchTask = (payload: CrawlBatchRequest) =>
   startTask("/xiaohongshu/crawl-batch/start", payload);
 
-export const xiaohongshuStartAuthorCandidatesTask = (payload?: {
+export const xiaohongshuStartSmartGroupTask = (payload?: {
   cookie?: string;
   resolve_author_ids?: boolean;
   resolve_limit?: number;
   vault_path?: string;
-}) => startTask("/xiaohongshu/authors/candidates/start", payload || {});
+  mode?: "full" | "creator-only";
+}) => startTask("/xiaohongshu/authors/smart-groups/start", payload || {});

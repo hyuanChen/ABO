@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ABO · 每日情报总结与 Review 工作流</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f2ed;
+      --paper: rgba(255, 252, 248, 0.93);
+      --ink: #2a2621;
+      --muted: #6c665f;
+      --line: #ddd4ca;
+      --teal-bg: #ecf6f4;
+      --teal-line: #c7e3db;
+      --teal-ink: #2f665b;
+      --gold-bg: #fbf4e7;
+      --gold-line: #ead8b7;
+      --gold-ink: #876022;
+      --violet-bg: #f1eefb;
+      --violet-line: #d8cef4;
+      --violet-ink: #54418a;
+      --slate-bg: #f2f0ec;
+      --slate-line: #ded9d1;
+      --slate-ink: #484339;
+      --blue-bg: #edf4fb;
+      --blue-line: #caddf0;
+      --blue-ink: #355c84;
+      --rose-bg: #faeeec;
+      --rose-line: #edccc6;
+      --rose-ink: #8a4a49;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(to bottom, rgba(255,255,255,0.42), rgba(255,255,255,0.42)),
+        repeating-linear-gradient(to right, rgba(221, 212, 202, 0.16) 0, rgba(221, 212, 202, 0.16) 1px, transparent 1px, transparent 96px),
+        repeating-linear-gradient(to bottom, rgba(221, 212, 202, 0.12) 0, rgba(221, 212, 202, 0.12) 1px, transparent 1px, transparent 96px),
+        var(--bg);
+      color: var(--ink);
+      font-family: "Noto Sans SC", sans-serif;
+    }
+
+    .frame {
+      width: min(1280px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 32px 0 48px;
+    }
+
+    .hero,
+    .section {
+      border-radius: 28px;
+      border: 1px solid rgba(221, 212, 202, 0.92);
+      background: var(--paper);
+      box-shadow: 0 16px 38px rgba(40, 38, 33, 0.05);
+    }
+
+    .hero {
+      padding: 28px 30px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--teal-ink);
+      background: rgba(236, 246, 244, 0.95);
+      border: 1px solid rgba(199, 227, 219, 0.95);
+      font-family: "Plus Jakarta Sans", sans-serif;
+      text-transform: uppercase;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: 1.32fr 1fr;
+      gap: 22px;
+      align-items: end;
+      margin-top: 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(34px, 5vw, 60px);
+      line-height: 1.02;
+      font-weight: 800;
+      letter-spacing: 0;
+      font-family: "Plus Jakarta Sans", "Noto Sans SC", sans-serif;
+    }
+
+    .hero p {
+      margin: 14px 0 0;
+      max-width: 62ch;
+      font-size: 15px;
+      line-height: 1.8;
+      color: var(--muted);
+    }
+
+    .hero-stack {
+      display: grid;
+      gap: 12px;
+    }
+
+    .hero-callout {
+      padding: 16px 18px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: #fffdfa;
+    }
+
+    .hero-callout strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 13px;
+    }
+
+    .hero-callout span {
+      display: block;
+      font-size: 13px;
+      line-height: 1.7;
+      color: var(--muted);
+    }
+
+    .section {
+      margin-top: 18px;
+      padding: 24px;
+    }
+
+    .section-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 16px;
+    }
+
+    .section-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .section-label strong {
+      font-size: 16px;
+      color: var(--ink);
+    }
+
+    .section-note {
+      max-width: 320px;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--muted);
+      text-align: right;
+    }
+
+    .grid-2, .grid-3, .grid-4, .grid-prompt {
+      display: grid;
+      gap: 14px;
+    }
+
+    .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .grid-prompt { grid-template-columns: 1fr 1fr; }
+
+    .card {
+      border-radius: 20px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      background: #fffdfa;
+      min-height: 100%;
+    }
+
+    .theme-teal { background: var(--teal-bg); border-color: var(--teal-line); color: var(--teal-ink); }
+    .theme-gold { background: var(--gold-bg); border-color: var(--gold-line); color: var(--gold-ink); }
+    .theme-violet { background: var(--violet-bg); border-color: var(--violet-line); color: var(--violet-ink); }
+    .theme-slate { background: var(--slate-bg); border-color: var(--slate-line); color: var(--slate-ink); }
+    .theme-blue { background: var(--blue-bg); border-color: var(--blue-line); color: var(--blue-ink); }
+    .theme-rose { background: var(--rose-bg); border-color: var(--rose-line); color: var(--rose-ink); }
+
+    .card-title {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+      font-size: 18px;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    .card-sub {
+      font-size: 13px;
+      line-height: 1.7;
+      opacity: 0.92;
+    }
+
+    .list {
+      margin: 12px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 8px;
+    }
+
+    .list li {
+      position: relative;
+      padding-left: 16px;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .list li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 9px;
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: currentColor;
+      opacity: 0.42;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(255,255,255,0.74);
+      border: 1px solid rgba(255,255,255,0.85);
+    }
+
+    .arrow {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 30px;
+      color: #91897d;
+      font-size: 18px;
+    }
+
+    .loop {
+      margin-top: 14px;
+      border-radius: 18px;
+      border: 1px dashed rgba(47, 102, 91, 0.34);
+      background: rgba(236, 246, 244, 0.58);
+      padding: 12px 16px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .footer-note {
+      margin-top: 18px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.8;
+    }
+
+    @media (max-width: 980px) {
+      .hero-grid,
+      .grid-2,
+      .grid-3,
+      .grid-4,
+      .grid-prompt {
+        grid-template-columns: 1fr;
+      }
+
+      .section-top {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .section-note {
+        text-align: left;
+        max-width: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="frame">
+    <section class="hero">
+      <span class="eyebrow"><i class="fa-solid fa-calendar-check"></i> ABO Canvas / 03</span>
+      <div class="hero-grid">
+        <div>
+          <h1>个人情报 →<br>Daily Briefing →<br>晚间 Review</h1>
+          <p>
+            把人格、状态、行为轨迹和今天的输入，编成一份可执行、可复盘的 daily operating system。
+          </p>
+        </div>
+        <div class="hero-stack">
+          <div class="hero-callout">
+            <strong>核心一句话</strong>
+            <span>不是打卡面板，而是 daily operating system。</span>
+          </div>
+          <div class="hero-callout">
+            <strong>关键差异</strong>
+            <span>读懂你今天为什么这样过。</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>①</span>
+          <strong>每日输入层</strong>
+        </div>
+        <div class="section-note">多源输入。</div>
+      </div>
+      <div class="grid-4">
+        <article class="card theme-teal">
+          <div class="card-title"><i class="fa-solid fa-user-pen"></i> Persona / 自我描述</div>
+          <div class="card-sub">persona / goal / style。</div>
+        </article>
+        <article class="card theme-teal">
+          <div class="card-title"><i class="fa-solid fa-clock"></i> 昨日与今日轨迹</div>
+          <div class="card-sub">timeline / chat / 收藏。</div>
+        </article>
+        <article class="card theme-teal">
+          <div class="card-title"><i class="fa-solid fa-heart-pulse"></i> 当前状态</div>
+          <div class="card-sub">SAN / 幸福度 / 精力。</div>
+        </article>
+        <article class="card theme-teal">
+          <div class="card-title"><i class="fa-solid fa-bullseye"></i> 今天想做的事</div>
+          <div class="card-sub">todos / today intel。</div>
+        </article>
+      </div>
+    </section>
+
+    <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>②</span>
+          <strong>Daily Digest 与量化工作台</strong>
+        </div>
+        <div class="section-note">可解释量化。</div>
+      </div>
+      <div class="grid-2">
+        <article class="card theme-slate">
+          <div class="card-title"><i class="fa-solid fa-file-lines"></i> Reading / Activity Digest</div>
+          <ul class="list">
+            <li>浏览 / 保存 / 对话 / 模块</li>
+            <li>高频主题 / 标题样本</li>
+          </ul>
+        </article>
+        <article class="card theme-blue">
+          <div class="card-title"><i class="fa-solid fa-gauge-high"></i> Workbench Metrics</div>
+          <ul class="list">
+            <li>signal</li>
+            <li>reflection</li>
+            <li>execution / stability</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>③</span>
+          <strong>情境理解层</strong>
+        </div>
+        <div class="section-note">情境理解层。</div>
+      </div>
+      <div class="grid-3">
+        <article class="card theme-violet">
+          <div class="card-title"><i class="fa-solid fa-brain"></i> 个性上下文</div>
+          <ul class="list">
+            <li>你是谁</li>
+            <li>适合什么工作方式</li>
+          </ul>
+        </article>
+        <article class="card theme-violet">
+          <div class="card-title"><i class="fa-solid fa-cloud-sun"></i> 状态上下文</div>
+          <ul class="list">
+            <li>收敛 / 扩散 / 恢复 / 输出</li>
+            <li>是否该减负</li>
+          </ul>
+        </article>
+        <article class="card theme-violet">
+          <div class="card-title"><i class="fa-solid fa-flag-checkered"></i> 目标上下文</div>
+          <ul class="list">
+            <li>是否对齐长期目标</li>
+            <li>真推进 vs 假忙碌</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>④</span>
+          <strong>晨间 Briefing 输出</strong>
+        </div>
+        <div class="section-note">晨间输出。</div>
+      </div>
+      <div class="grid-3">
+        <article class="card theme-blue">
+          <div class="card-title"><i class="fa-solid fa-newspaper"></i> 今日 Focus</div>
+          <ul class="list">
+            <li>一句话重点</li>
+            <li>为什么是它</li>
+          </ul>
+        </article>
+        <article class="card theme-gold">
+          <div class="card-title"><i class="fa-solid fa-list-ul"></i> 1-3 条可执行动作</div>
+          <ul class="list">
+            <li>1-3 个动作</li>
+            <li>25-60 分钟完成</li>
+          </ul>
+        </article>
+        <article class="card theme-rose">
+          <div class="card-title"><i class="fa-solid fa-bell"></i> 状态提醒</div>
+          <ul class="list">
+            <li>保护精力 or 拉高输出</li>
+            <li>一句生活提醒</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>⑤</span>
+          <strong>白天反馈与夜间 Review</strong>
+        </div>
+        <div class="section-note">日内闭环。</div>
+      </div>
+      <div class="grid-2">
+        <article class="card theme-teal">
+          <div class="card-title"><i class="fa-solid fa-arrows-rotate"></i> 白天回流</div>
+          <ul class="list">
+            <li>继续记录行为</li>
+            <li>自动修正状态</li>
+          </ul>
+        </article>
+        <article class="card theme-gold">
+          <div class="card-title"><i class="fa-solid fa-moon"></i> 晚间 Review</div>
+          <ul class="list">
+            <li>今天发生了什么</li>
+            <li>carry-over / tomorrow seed</li>
+          </ul>
+        </article>
+      </div>
+      <div class="loop">
+        <i class="fa-solid fa-rotate-right"></i>
+        review 写回 briefing / timeline memory
+      </div>
+    </section>
+
+    <div class="arrow"><i class="fa-solid fa-arrow-down"></i></div>
+
+    <section class="section">
+      <div class="section-top">
+        <div class="section-label">
+          <span>⑥</span>
+          <strong>建议 Prompt 输出结构</strong>
+        </div>
+        <div class="section-note">输入 / 输出约定。</div>
+      </div>
+      <div class="grid-prompt">
+        <article class="card theme-violet">
+          <div class="card-title"><i class="fa-solid fa-arrow-right-to-bracket"></i> 输入</div>
+          <ul class="list">
+            <li>persona / goal / style</li>
+            <li>timeline / today intel / todos</li>
+            <li>state</li>
+          </ul>
+          <div class="pill-row">
+            <span class="pill">persona</span>
+            <span class="pill">timeline</span>
+            <span class="pill">state</span>
+            <span class="pill">today intel</span>
+          </div>
+        </article>
+        <article class="card theme-teal">
+          <div class="card-title"><i class="fa-solid fa-arrow-right-from-bracket"></i> 输出</div>
+          <ul class="list">
+            <li>morning_brief / workday_guidance</li>
+            <li>evening_review / carry_over</li>
+            <li>wiki_patch</li>
+          </ul>
+          <div class="pill-row">
+            <span class="pill">morning_brief</span>
+            <span class="pill">workday_guidance</span>
+            <span class="pill">evening_review</span>
+            <span class="pill">carry_over</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <div class="footer-note">
+      <strong>ABO 会把人格、状态、输入和行动编成 Daily Briefing 与个人 Review。</strong>
+    </div>
+  </main>
+</body>
+</html>

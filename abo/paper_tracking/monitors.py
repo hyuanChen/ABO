@@ -7,6 +7,7 @@ from typing import Any
 from abo.default_modules.arxiv.category import ALL_SUBCATEGORIES
 
 _PREFS_PATH = Path.home() / ".abo" / "preferences.json"
+_DEFAULT_ARXIV_MONITOR_CATEGORIES = ["cs.*"]
 
 
 def load_module_preferences(module_id: str) -> dict[str, Any]:
@@ -74,7 +75,7 @@ def normalize_keyword_monitors(config: dict[str, Any]) -> list[dict[str, Any]]:
             if not query:
                 continue
             label = str(entry.get("label") or entry.get("name") or query).strip() or query
-            categories = _normalize_string_list(entry.get("categories"))
+            categories = _normalize_string_list(entry.get("categories")) or list(_DEFAULT_ARXIV_MONITOR_CATEGORIES)
             enabled = bool(entry.get("enabled", True))
             monitor_id = str(entry.get("id") or _stable_monitor_id("keyword", label, query))
         else:
@@ -82,7 +83,7 @@ def normalize_keyword_monitors(config: dict[str, Any]) -> list[dict[str, Any]]:
             if not query:
                 continue
             label = query
-            categories = []
+            categories = list(_DEFAULT_ARXIV_MONITOR_CATEGORIES)
             enabled = True
             monitor_id = _stable_monitor_id("keyword", label, query)
 

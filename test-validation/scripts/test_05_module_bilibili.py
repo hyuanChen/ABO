@@ -19,7 +19,7 @@ class TestBilibiliTrackerCreation:
 
         assert tracker.id == "bilibili-tracker"
         assert tracker.name == "哔哩哔哩"
-        assert tracker.schedule == "0 11 * * *"
+        assert tracker.schedule == "30 8 * * *"
         assert tracker.icon == "play-circle"
 
     def test_tracker_has_subscription_types(self):

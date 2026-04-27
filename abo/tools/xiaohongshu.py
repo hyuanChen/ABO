@@ -11,7 +11,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import unescape
 from typing import Any, Optional
 from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
@@ -119,6 +119,15 @@ class XHSNote:
 
 
 @dataclass
+class XHSFollowingCreator:
+    """小红书已关注博主数据结构"""
+
+    author: str
+    author_id: str
+    profile_url: str
+
+
+@dataclass
 class XHSTrendsAnalysis:
     """Trends 分析结果"""
 
@@ -139,6 +148,520 @@ class XiaohongshuAPI:
         self.timeout = timeout
         self.client = httpx.AsyncClient(timeout=timeout, follow_redirects=True)
 
+    def _build_click_text_expression(
+        self,
+        labels: list[str],
+        preferred_ancestor_labels: list[str] | None = None,
+    ) -> str:
+        labels_js = json.dumps([str(label or "").strip() for label in labels if str(label or "").strip()], ensure_ascii=False)
+        preferred_ancestor_js = json.dumps(
+            [str(label or "").strip() for label in (preferred_ancestor_labels or []) if str(label or "").strip()],
+            ensure_ascii=False,
+        )
+        return f"""
+        (() => {{
+          const labels = {labels_js};
+          const preferredAncestors = {preferred_ancestor_js};
+          const normalize = (value) => String(value || '').replace(/\\s+/g, '').trim();
+          const isVisible = (el) => {{
+            if (!el || !(el instanceof HTMLElement)) return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 8 && rect.height > 8 && style.visibility !== 'hidden' && style.display !== 'none';
+          }};
+          const isInteractive = (el) => Boolean(
+            el?.closest?.('button, a[href], input, label, [role="button"], [role="option"], [role="radio"], [role="checkbox"], [tabindex]')
+          );
+          const findPreferredAncestor = (el) => {{
+            if (!preferredAncestors.length) return null;
+            let current = el;
+            while (current && current instanceof HTMLElement) {{
+              const haystack = normalize([
+                current.innerText || current.textContent || '',
+                current.className || '',
+                current.id || '',
+                current.getAttribute?.('role') || '',
+                current.getAttribute?.('data-testid') || '',
+              ].join(' '));
+              if (preferredAncestors.some((label) => haystack.includes(normalize(label)))) {{
+                return current;
+              }}
+              current = current.parentElement;
+            }}
+            return null;
+          }};
+          const clickNode = (node) => {{
+            const clickable = node.closest?.('button, a[href], input, label, [role="button"], [role="option"], [role="radio"], [role="checkbox"], [tabindex]') || node;
+            if (!(clickable instanceof HTMLElement)) return false;
+            clickable.scrollIntoView({{ block: 'center', inline: 'center' }});
+            const rect = clickable.getBoundingClientRect();
+            const clientX = rect.left + Math.max(4, Math.min(rect.width - 4, rect.width / 2));
+            const clientY = rect.top + Math.max(4, Math.min(rect.height - 4, rect.height / 2));
+            for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {{
+              clickable.dispatchEvent(new MouseEvent(type, {{
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                view: window,
+                clientX,
+                clientY,
+              }}));
+            }}
+            try {{
+              clickable.click?.();
+            }} catch (err) {{
+              return false;
+            }}
+            return true;
+          }};
+          const candidates = [];
+          const nodes = Array.from(document.querySelectorAll('button, a, span, div, li, label'));
+          for (const node of nodes) {{
+            if (!isVisible(node)) continue;
+            const textCandidates = [
+              node.innerText || '',
+              node.textContent || '',
+              node.getAttribute?.('aria-label') || '',
+              node.getAttribute?.('title') || '',
+              node.getAttribute?.('data-testid') || '',
+              node.getAttribute?.('placeholder') || '',
+              node.getAttribute?.('alt') || '',
+            ]
+              .map((value) => normalize(value))
+              .filter(Boolean);
+            const text = textCandidates.find(Boolean) || '';
+            if (!text || text.length > 64) continue;
+            let matchedLabel = '';
+            let matchScore = -1;
+            for (const label of labels) {{
+              const normalizedLabel = normalize(label);
+              if (!normalizedLabel) continue;
+              if (text === normalizedLabel) {{
+                matchedLabel = label;
+                matchScore = 300;
+                break;
+              }}
+              if (text.includes(normalizedLabel)) {{
+                matchedLabel = label;
+                matchScore = Math.max(matchScore, 220);
+              }}
+            }}
+            if (matchScore < 0) continue;
+            const preferredAncestor = findPreferredAncestor(node);
+            const score =
+              matchScore
+              + (preferredAncestor ? 180 : 0)
+              + (isInteractive(node) ? 60 : 0)
+              + (text.length <= 8 ? 20 : 0);
+            candidates.push({{
+              node,
+              text,
+              matchedLabel,
+              score,
+              inPreferredAncestor: Boolean(preferredAncestor),
+            }});
+          }}
+          candidates.sort((a, b) => b.score - a.score);
+          for (const candidate of candidates) {{
+            if (clickNode(candidate.node)) {{
+              return {{
+                clicked: true,
+                text: candidate.text,
+                matched_label: candidate.matchedLabel,
+                score: candidate.score,
+                in_preferred_ancestor: candidate.inPreferredAncestor,
+              }};
+            }}
+          }}
+          return {{
+            clicked: false,
+            labels,
+            preferred_ancestors: preferredAncestors,
+            candidates: candidates.slice(0, 6).map((item) => ({{
+              text: item.text,
+              matched_label: item.matchedLabel,
+              score: item.score,
+              in_preferred_ancestor: item.inPreferredAncestor,
+            }})),
+          }};
+        }})()
+        """
+
+    def _normalize_author_key(self, value: str) -> str:
+        return re.sub(r"\s+", "", self._safe_str(value)).casefold()
+
+    async def _wait_for_snapshot_text_with_extension(
+        self,
+        bridge: XHSExtensionBridge,
+        *,
+        labels: list[str],
+        timeout: float = 10.0,
+        interval: float = 0.5,
+    ) -> dict[str, Any]:
+        deadline = asyncio.get_running_loop().time() + timeout
+        normalized_labels = [self._safe_str(label).strip() for label in labels if self._safe_str(label).strip()]
+        last_snapshot: dict[str, Any] = {}
+        while asyncio.get_running_loop().time() < deadline:
+            snapshot = await bridge.call(
+                "get_xhs_page_snapshot",
+                {"kind": "any", "textLimit": 4000},
+                timeout=min(12.0, timeout + 2.0),
+            )
+            if isinstance(snapshot, dict):
+                last_snapshot = snapshot
+                body_text = self._safe_str(snapshot.get("bodyText"))
+                if any(label in body_text for label in normalized_labels):
+                    return snapshot
+            await asyncio.sleep(interval)
+        raise RuntimeError(f"等待页面出现文本失败 labels={normalized_labels} snapshot={last_snapshot}")
+
+    async def _wait_for_text_with_playwright(
+        self,
+        page,
+        *,
+        labels: list[str],
+        timeout: float = 10.0,
+        interval: float = 0.5,
+    ) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout
+        normalized_labels = [self._safe_str(label).strip() for label in labels if self._safe_str(label).strip()]
+        last_text = ""
+        while asyncio.get_running_loop().time() < deadline:
+            body_text = await page.evaluate(
+                "() => (document.body?.innerText || '').slice(0, 4000)"
+            )
+            last_text = self._safe_str(body_text)
+            if any(label in last_text for label in normalized_labels):
+                return
+            await asyncio.sleep(interval)
+        raise RuntimeError(f"等待页面出现文本失败 labels={normalized_labels} body_text={last_text[:600]}")
+
+    def _build_followed_filter_status_expression(self) -> str:
+        return """
+        (() => {
+          const normalize = (value) => String(value || '').replace(/\\s+/g, '').trim();
+          const isVisible = (el) => {
+            if (!el || !(el instanceof HTMLElement)) return false;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 8 && rect.height > 8 && style.visibility !== 'hidden' && style.display !== 'none';
+          };
+          const isActive = (el) => {
+            if (!el || !(el instanceof HTMLElement)) return false;
+            const classText = normalize(el.className || '');
+            const attrText = normalize([
+              el.getAttribute('aria-checked') || '',
+              el.getAttribute('aria-selected') || '',
+              el.getAttribute('data-state') || '',
+              el.getAttribute('data-status') || '',
+            ].join(' '));
+            const style = window.getComputedStyle(el);
+            return (
+              /(active|selected|checked|current|on|enable)/i.test(classText) ||
+              /(true|checked|selected|active)/i.test(attrText) ||
+              style.fontWeight === '700' ||
+              style.fontWeight === '800' ||
+              style.fontWeight === '900'
+            );
+          };
+          const findPreferredAncestor = (el) => {
+            let current = el;
+            while (current && current instanceof HTMLElement) {
+              const haystack = normalize([
+                current.innerText || current.textContent || '',
+                current.className || '',
+                current.id || '',
+                current.getAttribute?.('role') || '',
+              ].join(' '));
+              if (/筛选|filter|popup|dialog|drawer|sheet|panel/i.test(haystack)) return current;
+              current = current.parentElement;
+            }
+            return null;
+          };
+          const nodes = Array.from(document.querySelectorAll('button, a, span, div, li, label'));
+          const matches = [];
+          for (const node of nodes) {
+            if (!isVisible(node)) continue;
+            const text = normalize(node.innerText || node.textContent || '');
+            if (!text || text.length > 24 || !text.includes('已关注')) continue;
+            const ancestor = findPreferredAncestor(node);
+            matches.push({
+              text,
+              active: isActive(node) || isActive(node.closest?.('[role="radio"],[role="checkbox"],label,button,div') || null),
+              in_filter_panel: Boolean(ancestor),
+            });
+          }
+          const applied = matches.some((item) => item.active) || matches.some((item) => item.in_filter_panel);
+          return { applied, matches: matches.slice(0, 8) };
+        })()
+        """
+
+    def _build_card_scroll_status_expression(self) -> str:
+        return """
+        (() => {
+          const scroller = document.scrollingElement || document.documentElement;
+          const scrollTop = scroller ? scroller.scrollTop : 0;
+          const scrollHeight = scroller ? scroller.scrollHeight : 0;
+          const viewportHeight = window.innerHeight || 0;
+          const hrefs = Array.from(document.querySelectorAll('a[href*="/explore/"]'))
+            .map((node) => node.href || node.getAttribute('href') || '')
+            .filter(Boolean);
+          return {
+            scroll_top: scrollTop,
+            scroll_height: scrollHeight,
+            viewport_height: viewportHeight,
+            at_bottom: scrollHeight > 0 && viewportHeight > 0 && scrollTop + viewportHeight >= scrollHeight - 220,
+            dom_card_count: Array.from(new Set(hrefs)).length,
+          };
+        })()
+        """
+
+    async def _fetch_card_scroll_status_via_extension(self, bridge: XHSExtensionBridge) -> dict[str, Any]:
+        status = await bridge.call(
+            "evaluate",
+            {"expression": self._build_card_scroll_status_expression()},
+            timeout=20.0,
+        )
+        return status if isinstance(status, dict) else {}
+
+    async def _collect_cards_from_extension_page(
+        self,
+        bridge: XHSExtensionBridge,
+        *,
+        max_results: int,
+        page_kind: str,
+    ) -> list[XHSNote]:
+        normalized_kind = "feed" if page_kind == "feed" else ("profile" if page_kind == "profile" else "search")
+        js = self._build_card_extract_expression(normalized_kind)
+
+        cards: list[dict[str, Any]] = []
+        seen_hrefs: set[str] = set()
+        stale_rounds = 0
+        scroll_rounds = max(4, min(36, (max_results // 8) + 6))
+        for round_index in range(scroll_rounds):
+            if normalized_kind == "profile":
+                try:
+                    page_cards = await bridge.call(
+                        "get_xhs_profile_cards",
+                        {"limit": max_results * 2},
+                        timeout=20.0,
+                    )
+                except Exception as exc:
+                    if "未知 MAIN world 方法" not in self._safe_str(exc):
+                        raise
+                    page_cards = await bridge.call("evaluate", {"expression": js}, timeout=20.0)
+            else:
+                page_cards = await bridge.call("evaluate", {"expression": js}, timeout=20.0)
+            before = len(seen_hrefs)
+            if isinstance(page_cards, list):
+                for card in page_cards:
+                    href = self._safe_str(card.get("href") if isinstance(card, dict) else "")
+                    if not href or href in seen_hrefs:
+                        continue
+                    seen_hrefs.add(href)
+                    cards.append(card)
+            if len(seen_hrefs) >= max_results:
+                break
+            stale_rounds = stale_rounds + 1 if len(seen_hrefs) == before else 0
+            if stale_rounds >= 6:
+                break
+            if round_index % 3 == 0:
+                await bridge.call("scroll_by", {"x": 0, "y": 850}, timeout=10.0)
+                await bridge.call("dispatch_wheel_event", {"deltaY": 900}, timeout=10.0)
+            elif round_index % 3 == 1:
+                await bridge.call("scroll_by", {"x": 0, "y": 1200}, timeout=10.0)
+            else:
+                await bridge.call("scroll_to_bottom", {}, timeout=10.0)
+                await bridge.call("scroll_by", {"x": 0, "y": -420}, timeout=10.0)
+                await bridge.call("dispatch_wheel_event", {"deltaY": 1100}, timeout=10.0)
+                await asyncio.sleep(1.2)
+
+        return self._cards_to_notes(cards, max_results=max_results, page_kind=normalized_kind)
+
+    async def _apply_followed_search_filter_with_extension(
+        self,
+        bridge: XHSExtensionBridge,
+        *,
+        foreground: bool = False,
+    ) -> bool:
+        try:
+            await self._wait_for_snapshot_text_with_extension(
+                bridge,
+                labels=["筛选", "搜索", "综合"],
+                timeout=12.0,
+            )
+            await bridge.call(
+                "xhs_apply_followed_search_filter",
+                {
+                    "timeout": 12000,
+                    "foreground": foreground,
+                    "restore_focus": foreground,
+                },
+                timeout=20.0,
+            )
+            await asyncio.sleep(0.8)
+            return True
+        except Exception:
+            return False
+
+    async def _apply_followed_search_filter_with_playwright(self, page) -> bool:
+        try:
+            await self._wait_for_text_with_playwright(
+                page,
+                labels=["筛选", "搜索", "综合"],
+                timeout=12.0,
+            )
+            opened = await page.evaluate(self._build_click_text_expression(["筛选"]))
+            if not bool((opened or {}).get("clicked")):
+                return False
+            await asyncio.sleep(0.8)
+            await self._wait_for_text_with_playwright(
+                page,
+                labels=["已关注", "只看已关注", "筛选"],
+                timeout=8.0,
+            )
+            selected = await page.evaluate(
+                self._build_click_text_expression(
+                    ["已关注", "只看已关注"],
+                    preferred_ancestor_labels=["筛选", "filter", "popup", "dialog", "drawer", "sheet", "panel"],
+                )
+            )
+            if not bool((selected or {}).get("clicked")):
+                return False
+            await asyncio.sleep(0.8)
+            await page.evaluate(
+                self._build_click_text_expression(
+                    ["确定", "完成", "应用"],
+                    preferred_ancestor_labels=["筛选", "filter", "popup", "dialog", "drawer", "sheet", "panel"],
+                )
+            )
+            await asyncio.sleep(1.0)
+            return True
+        except Exception:
+            return False
+
+    async def _search_followed_notes_with_extension(
+        self,
+        *,
+        keyword: str,
+        cookie: str,
+        max_results: int,
+        extension_port: int,
+        dedicated_window_mode: bool,
+        allow_foreground_fallback: bool = False,
+    ) -> list[XHSNote]:
+        url = f"{self.BASE_URL}/search_result?keyword={quote(keyword)}"
+
+        async with XHSExtensionBridge(port=extension_port) as bridge:
+            await bridge.wait_until_ready(timeout=20.0)
+            background = bool(dedicated_window_mode)
+            if dedicated_window_mode:
+                await bridge.call("ensure_dedicated_xhs_tab", {"url": url}, timeout=60.0)
+            else:
+                await bridge.call("navigate", {"url": url, "background": background}, timeout=45.0)
+            await bridge.call("wait_for_load", {"timeout": 45000, "background": background}, timeout=45.0)
+            await bridge.call("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+            snapshot = await bridge.call(
+                "wait_for_xhs_state",
+                {"kind": "search", "timeout": 15000, "interval": 500},
+                timeout=20.0,
+            )
+            _raise_for_xhs_snapshot(snapshot)
+            filter_ready = await self._apply_followed_search_filter_with_extension(
+                bridge,
+                foreground=bool(dedicated_window_mode),
+            )
+            if not filter_ready and dedicated_window_mode and allow_foreground_fallback:
+                filter_ready = await self._apply_followed_search_filter_with_extension(
+                    bridge,
+                    foreground=True,
+                )
+            if not filter_ready:
+                return []
+            return await self._collect_cards_from_extension_page(
+                bridge,
+                max_results=max_results,
+                page_kind="search",
+            )
+
+    async def _search_followed_notes_with_playwright(
+        self,
+        *,
+        keyword: str,
+        cookie: str,
+        max_results: int,
+    ) -> list[XHSNote]:
+        from playwright.async_api import async_playwright
+
+        search_url = f"{self.BASE_URL}/search_result?keyword={quote(keyword)}"
+        js = self._build_card_extract_expression("search")
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 900},
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+            )
+            cookies = self._parse_cookie_string(cookie)
+            if cookies:
+                await context.add_cookies(cookies)
+            page = await context.new_page()
+            cards: list[dict[str, Any]] = []
+            seen_hrefs: set[str] = set()
+            try:
+                await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                filter_ready = await self._apply_followed_search_filter_with_playwright(page)
+                if not filter_ready:
+                    return []
+                stale_rounds = 0
+                bottom_stale_rounds = 0
+                status_js = self._build_card_scroll_status_expression()
+                for round_index in range(max(10, min(36, (max_results // 3) + 12))):
+                    page_cards = await page.evaluate(js)
+                    before = len(seen_hrefs)
+                    if isinstance(page_cards, list):
+                        for card in page_cards:
+                            href = self._safe_str(card.get("href") if isinstance(card, dict) else "")
+                            if not href or href in seen_hrefs:
+                                continue
+                            seen_hrefs.add(href)
+                            cards.append(card)
+                    if len(seen_hrefs) >= max_results:
+                        break
+                    status = await page.evaluate(status_js)
+                    status = status if isinstance(status, dict) else {}
+                    grew = len(seen_hrefs) > before
+                    if grew:
+                        stale_rounds = 0
+                        bottom_stale_rounds = 0
+                    else:
+                        stale_rounds += 1
+                        bottom_stale_rounds = bottom_stale_rounds + 1 if bool(status.get("at_bottom")) else 0
+                    if bottom_stale_rounds >= 3:
+                        break
+                    if stale_rounds >= 8:
+                        break
+                    aggressive_mode = stale_rounds >= 2
+                    if bool(status.get("at_bottom")):
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    elif round_index % 3 == 0:
+                        await page.evaluate(f"window.scrollBy(0, {1200 if aggressive_mode else 900})")
+                    elif round_index % 3 == 1:
+                        await page.evaluate(f"window.scrollBy(0, {1500 if aggressive_mode else 1100})")
+                    else:
+                        await page.evaluate(f"window.scrollBy(0, {1800 if aggressive_mode else 1300})")
+                    await asyncio.sleep(1.5 if aggressive_mode else 1.1)
+            finally:
+                await browser.close()
+        return self._cards_to_notes(cards, max_results=max_results, page_kind="search")
+
     async def get_following_feed_with_cookie(
         self,
         cookie: str,
@@ -147,35 +670,59 @@ class XiaohongshuAPI:
         use_extension: bool = True,
         extension_port: int = 9334,
         dedicated_window_mode: bool = False,
+        allow_foreground_fallback: bool = False,
     ) -> list[XHSNote]:
-        """从关注流直接抓取卡片内容。"""
+        """通过搜索页执行“筛选 -> 已关注”来抓取已关注博主的匹配内容。"""
         if not cookie:
             raise ValueError("未配置小红书 Cookie，请先配置 web_session")
-        feed_url = f"{self.BASE_URL}/explore?tab=following"
-        notes = await self._extract_cards_with_plugin_priority(
-            url=feed_url,
-            page_kind="feed",
-            max_results=max_notes * 2,
-            cookie=cookie,
-            use_extension=use_extension,
-            extension_port=extension_port,
-            dedicated_window_mode=dedicated_window_mode,
-        )
-        matched_notes: list[XHSNote] = []
-        for note in notes:
-            full_text = f"{note.title} {note.content}".lower()
-            matched_keywords = [kw for kw in keywords if kw.lower() in full_text]
-            if matched_keywords:
-                setattr(note, "matched_keywords", matched_keywords)
-                matched_notes.append(note)
-            if len(matched_notes) >= max_notes:
+
+        normalized_keywords = [str(keyword or "").strip() for keyword in keywords if str(keyword or "").strip()]
+        if not normalized_keywords:
+            return []
+
+        # 关注流检索优先走扩展链路；开启独立窗口时默认严格保持后台执行，
+        # 避免为了点击“已关注”把专用窗口切到前台。
+        effective_dedicated_window_mode = bool(dedicated_window_mode)
+        per_keyword_limit = max(6, min(40, (max_notes // max(len(normalized_keywords), 1)) + 4))
+        merged: dict[str, XHSNote] = {}
+        ordered_ids: list[str] = []
+        for keyword in normalized_keywords:
+            if use_extension:
+                notes = await self._search_followed_notes_with_extension(
+                    keyword=keyword,
+                    cookie=cookie,
+                    max_results=per_keyword_limit,
+                    extension_port=extension_port,
+                    dedicated_window_mode=effective_dedicated_window_mode,
+                    allow_foreground_fallback=allow_foreground_fallback,
+                )
+            else:
+                notes = await self._search_followed_notes_with_playwright(
+                    keyword=keyword,
+                    cookie=cookie,
+                    max_results=per_keyword_limit,
+                )
+
+            for note in notes:
+                if note.id not in merged:
+                    merged[note.id] = note
+                    setattr(merged[note.id], "matched_keywords", [keyword])
+                    ordered_ids.append(note.id)
+                else:
+                    matched_keywords = list(getattr(merged[note.id], "matched_keywords", []) or [])
+                    if keyword not in matched_keywords:
+                        matched_keywords.append(keyword)
+                    setattr(merged[note.id], "matched_keywords", matched_keywords)
+                if len(ordered_ids) >= max_notes:
+                    break
+            if len(ordered_ids) >= max_notes:
                 break
-        return matched_notes[:max_notes]
+        return [merged[note_id] for note_id in ordered_ids[:max_notes]]
 
     async def search_by_keyword(
         self,
         keyword: str,
-        sort_by: str = "likes",
+        sort_by: str = "comprehensive",
         max_results: int = 20,
         min_likes: int = 100,
         cookie: str | None = None,
@@ -207,6 +754,260 @@ class XiaohongshuAPI:
         elif sort_by == "time":
             notes.sort(key=lambda x: x.published_at or datetime.min, reverse=True)
         return notes[:max_results]
+
+    async def get_user_notes_with_cookie(
+        self,
+        user_id: str,
+        cookie: str,
+        max_notes: int = 20,
+        use_extension: bool = True,
+        extension_port: int = 9334,
+        dedicated_window_mode: bool = False,
+        manual_current_tab: bool = False,
+        require_extension_success: bool = False,
+    ) -> list[XHSNote]:
+        """抓取作者主页最近笔记。
+
+        这条链路和搜索、关注流保持一致：优先 bridge + 扩展，
+        再回退到 Playwright。
+        """
+        if not cookie:
+            raise ValueError("未配置小红书 Cookie，请先配置 web_session")
+
+        clean_user_id = self._extract_user_id(user_id)
+        profile_url = f"{self.BASE_URL}/user/profile/{clean_user_id}"
+        if manual_current_tab:
+            if not use_extension:
+                raise ValueError("当前页面读取模式需要启用浏览器插件 bridge")
+            notes = await self._extract_profile_cards_from_current_tab(
+                expected_user_id=clean_user_id,
+                max_results=max_notes,
+                extension_port=extension_port,
+            )
+        else:
+            notes = await self._extract_cards_with_plugin_priority(
+                url=profile_url,
+                page_kind="profile",
+                max_results=max_notes,
+                cookie=cookie,
+                use_extension=use_extension,
+                extension_port=extension_port,
+                dedicated_window_mode=dedicated_window_mode,
+                require_extension_success=require_extension_success,
+            )
+        for note in notes:
+            if not getattr(note, "author_id", ""):
+                note.author_id = clean_user_id
+            if not getattr(note, "author", ""):
+                note.author = clean_user_id
+        return notes[:max_notes]
+
+    def _build_following_creator_extract_expression(self) -> str:
+        return """
+        (() => {
+          const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+          const creators = [];
+          const seen = new Set();
+          const anchors = Array.from(document.querySelectorAll('a[href*="/user/profile/"]'));
+          for (const anchor of anchors) {
+            const href = anchor.href || anchor.getAttribute('href') || '';
+            if (!href) continue;
+            const absoluteHref = href.startsWith('http') ? href : new URL(href, location.origin).href;
+            const match = absoluteHref.match(/\\/user\\/profile\\/([^/?#]+)/);
+            const authorId = match ? String(match[1] || '').trim() : '';
+            if (!authorId || seen.has(authorId)) continue;
+            const card =
+              anchor.closest('li') ||
+              anchor.closest('section') ||
+              anchor.closest('div[class*="user"]') ||
+              anchor.closest('div[class*="author"]') ||
+              anchor.closest('div[class*="follow"]') ||
+              anchor.parentElement;
+            const namePool = [
+              anchor.innerText,
+              anchor.textContent,
+              card?.querySelector?.('[class*="name"]')?.innerText,
+              card?.querySelector?.('[class*="nick"]')?.innerText,
+              card?.querySelector?.('[class*="title"]')?.innerText,
+              card?.querySelector?.('span')?.innerText,
+            ].map(normalize).filter(Boolean);
+            const author = namePool.find((text) =>
+              text &&
+              text.length <= 30 &&
+              !/关注|粉丝|获赞|笔记|主页|编辑资料|小红书号/i.test(text)
+            ) || '';
+            if (!author) continue;
+            seen.add(authorId);
+            creators.push({
+              author,
+              author_id: authorId,
+              profile_url: absoluteHref,
+            });
+          }
+          return creators;
+        })()
+        """
+
+    async def _extract_following_creators_with_extension(
+        self,
+        *,
+        cookie: str,
+        max_creators: int,
+        extension_port: int,
+        dedicated_window_mode: bool,
+    ) -> list[XHSFollowingCreator]:
+        url = f"{self.BASE_URL}/user/profile/following"
+        js = self._build_following_creator_extract_expression()
+        async with XHSExtensionBridge(port=extension_port) as bridge:
+            await bridge.wait_until_ready(timeout=20.0)
+            background = bool(dedicated_window_mode)
+            if dedicated_window_mode:
+                await bridge.call("ensure_dedicated_xhs_tab", {"url": url}, timeout=60.0)
+            else:
+                await bridge.call("navigate", {"url": url, "background": background}, timeout=45.0)
+            await bridge.call("wait_for_load", {"timeout": 45000, "background": background}, timeout=45.0)
+            await bridge.call("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+            snapshot = await bridge.call(
+                "get_xhs_page_snapshot",
+                {"kind": "profile", "textLimit": 1200},
+                timeout=15.0,
+            )
+            _raise_for_xhs_snapshot(snapshot)
+
+            creators: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            stale_rounds = 0
+            for _ in range(max(4, min(24, (max_creators // 20) + 6))):
+                page_creators = await bridge.call("evaluate", {"expression": js}, timeout=20.0)
+                before = len(seen)
+                if isinstance(page_creators, list):
+                    for item in page_creators:
+                        if not isinstance(item, dict):
+                            continue
+                        author_id = self._safe_str(item.get("author_id"))
+                        author = self._safe_str(item.get("author"))
+                        if not author_id or not author or author_id in seen:
+                            continue
+                        seen.add(author_id)
+                        creators.append(item)
+                if len(seen) >= max_creators:
+                    break
+                stale_rounds = stale_rounds + 1 if len(seen) == before else 0
+                if stale_rounds >= 5:
+                    break
+                await bridge.call("scroll_to_bottom", {}, timeout=10.0)
+                await bridge.call("dispatch_wheel_event", {"deltaY": 1300}, timeout=10.0)
+                await asyncio.sleep(1.2)
+
+        return [
+            XHSFollowingCreator(
+                author=self._safe_str(item.get("author")),
+                author_id=self._safe_str(item.get("author_id")),
+                profile_url=self._safe_str(item.get("profile_url")) or f"{self.BASE_URL}/user/profile/{self._safe_str(item.get('author_id'))}",
+            )
+            for item in creators[:max_creators]
+            if self._safe_str(item.get("author")) and self._safe_str(item.get("author_id"))
+        ]
+
+    async def _extract_following_creators_with_playwright(
+        self,
+        *,
+        cookie: str,
+        max_creators: int,
+    ) -> list[XHSFollowingCreator]:
+        from playwright.async_api import async_playwright
+
+        url = f"{self.BASE_URL}/user/profile/following"
+        js = self._build_following_creator_extract_expression()
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 900},
+                locale="zh-CN",
+                timezone_id="Asia/Shanghai",
+            )
+            await context.add_init_script(
+                """
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+                window.chrome = { runtime: {} };
+                """
+            )
+            cookies = self._parse_cookie_string(cookie)
+            if cookies:
+                await context.add_cookies(cookies)
+            page = await context.new_page()
+            creators: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                for _ in range(max(4, min(18, (max_creators // 20) + 5))):
+                    page_creators = await page.evaluate(js)
+                    before = len(seen)
+                    if isinstance(page_creators, list):
+                        for item in page_creators:
+                            if not isinstance(item, dict):
+                                continue
+                            author_id = self._safe_str(item.get("author_id"))
+                            author = self._safe_str(item.get("author"))
+                            if not author_id or not author or author_id in seen:
+                                continue
+                            seen.add(author_id)
+                            creators.append(item)
+                    if len(seen) >= max_creators:
+                        break
+                    if len(seen) == before:
+                        await asyncio.sleep(0.6)
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await asyncio.sleep(1.2)
+            finally:
+                await browser.close()
+        return [
+            XHSFollowingCreator(
+                author=self._safe_str(item.get("author")),
+                author_id=self._safe_str(item.get("author_id")),
+                profile_url=self._safe_str(item.get("profile_url")) or f"{self.BASE_URL}/user/profile/{self._safe_str(item.get('author_id'))}",
+            )
+            for item in creators[:max_creators]
+            if self._safe_str(item.get("author")) and self._safe_str(item.get("author_id"))
+        ]
+
+    async def get_following_creators_with_cookie(
+        self,
+        cookie: str,
+        max_creators: int = 200,
+        use_extension: bool = True,
+        extension_port: int = 9334,
+        dedicated_window_mode: bool = False,
+    ) -> list[XHSFollowingCreator]:
+        if not cookie:
+            raise ValueError("未配置小红书 Cookie，请先配置 web_session")
+
+        if use_extension:
+            try:
+                creators = await self._extract_following_creators_with_extension(
+                    cookie=cookie,
+                    max_creators=max_creators,
+                    extension_port=extension_port,
+                    dedicated_window_mode=dedicated_window_mode,
+                )
+                if creators:
+                    return creators[:max_creators]
+            except Exception as exc:
+                if _should_stop_extension_error(exc):
+                    raise
+
+        return await self._extract_following_creators_with_playwright(
+            cookie=cookie,
+            max_creators=max_creators,
+        )
 
     async def fetch_comments(
         self,
@@ -246,6 +1047,7 @@ class XiaohongshuAPI:
         use_extension: bool = True,
         extension_port: int = 9334,
         dedicated_window_mode: bool = False,
+        require_extension_success: bool = False,
     ) -> list[XHSNote]:
         """统一列表页抓取入口。
 
@@ -264,8 +1066,14 @@ class XiaohongshuAPI:
                 if notes:
                     return notes
             except Exception as exc:
-                if _should_stop_extension_error(exc):
+                if require_extension_success or _should_stop_extension_error(exc):
                     raise
+
+            if require_extension_success:
+                raise RuntimeError("插件 bridge 路径未读取到笔记，已停止，未回退 Playwright。请确认扩展已连接并重新打开目标页面。")
+
+        if require_extension_success:
+            raise RuntimeError("当前任务要求使用插件 bridge 路径，但 use_extension 未启用。")
 
         return await self._extract_cards_via_playwright(
             url=url,
@@ -309,6 +1117,12 @@ class XiaohongshuAPI:
             return note_id_or_url
         clean = note_id_or_url.strip().split("?")[0].split("/")[-1]
         return f"{self.BASE_URL}/explore/{clean}"
+
+    def _extract_user_id(self, user_input: str) -> str:
+        match = re.search(r"/user/profile/([^/?#]+)", str(user_input or ""))
+        if match:
+            return match.group(1)
+        return str(user_input or "").strip().split("?")[0].rstrip("/").split("/")[-1]
 
     def _with_xsec_params(self, url: str, token: str = "", source: str = "") -> str:
         if not token and not source:
@@ -1026,10 +1840,14 @@ class XiaohongshuAPI:
         return await self._discover_search_note_urls_with_playwright(search_url, cookie, max_results)
 
     def _default_xsec_source(self, page_kind: str) -> str:
-        return "pc_feed" if page_kind == "feed" else "pc_search"
+        if page_kind == "feed":
+            return "pc_feed"
+        if page_kind == "profile":
+            return "pc_user"
+        return "pc_search"
 
     def _build_card_extract_expression(self, page_kind: str) -> str:
-        normalized_kind = "feed" if page_kind == "feed" else "search"
+        normalized_kind = "feed" if page_kind == "feed" else ("profile" if page_kind == "profile" else "search")
         default_xsec_source = self._default_xsec_source(normalized_kind)
         if normalized_kind == "feed":
             roots = [
@@ -1038,6 +1856,18 @@ class XiaohongshuAPI:
                 "unwrap(state.search?.feeds)",
                 "unwrap(state.search?.notes)",
                 "unwrap(state.search?.noteList)",
+                "unwrap(state.note?.noteDetailMap)",
+            ]
+        elif normalized_kind == "profile":
+            roots = [
+                "unwrap(state.user?.notes)",
+                "unwrap(state.user?.noteList)",
+                "unwrap(state.user?.feeds)",
+                "unwrap(state.profile?.notes)",
+                "unwrap(state.profile?.noteList)",
+                "unwrap(state.search?.feeds)",
+                "unwrap(state.search?.notes)",
+                "unwrap(state.feed?.feeds)",
                 "unwrap(state.note?.noteDetailMap)",
             ]
         else:
@@ -1065,12 +1895,62 @@ class XiaohongshuAPI:
             }}
             return current;
           }};
-          const byId = {{}};
+          const metaById = {{}};
+          const mergeMeta = (noteId, patch) => {{
+            if (!noteId) return;
+            const current = metaById[noteId] || {{}};
+            metaById[noteId] = {{
+              xsec_token: current.xsec_token || patch.xsec_token || '',
+              author: current.author || patch.author || '',
+              author_id: current.author_id || patch.author_id || '',
+            }};
+          }};
           const addToken = (value) => {{
             if (!value || typeof value !== 'object') return;
-            const noteId = value.noteId || value.note_id || value.id;
-            const token = value.xsecToken || value.xsec_token;
-            if (noteId && token && !byId[noteId]) byId[noteId] = String(token);
+            const noteId =
+              value.noteId ||
+              value.note_id ||
+              value.id ||
+              value.noteCard?.noteId ||
+              value.noteCard?.note_id ||
+              value.noteCard?.id;
+            const token =
+              value.xsecToken ||
+              value.xsec_token ||
+              value.noteCard?.xsecToken ||
+              value.noteCard?.xsec_token;
+            const user =
+              value.user ||
+              value.userInfo ||
+              value.authorInfo ||
+              value.noteCard?.user ||
+              value.noteCard?.userInfo ||
+              value.noteCard?.authorInfo ||
+              {{}};
+            const author =
+              user.nickname ||
+              user.name ||
+              user.userName ||
+              value.author ||
+              value.noteCard?.author ||
+              '';
+            const authorId =
+              user.userId ||
+              user.user_id ||
+              user.uid ||
+              user.id ||
+              value.authorId ||
+              value.author_id ||
+              value.userId ||
+              value.noteCard?.authorId ||
+              value.noteCard?.author_id ||
+              value.noteCard?.userId ||
+              '';
+            mergeMeta(noteId, {{
+              xsec_token: token ? String(token) : '',
+              author: author ? String(author) : '',
+              author_id: authorId ? String(authorId) : '',
+            }});
           }};
           const state = window.__INITIAL_STATE__ || {{}};
           const roots = [
@@ -1100,6 +1980,7 @@ class XiaohongshuAPI:
             const absoluteHref = rawHref.startsWith('http') ? rawHref : new URL(rawHref, location.origin).href;
             const url = new URL(absoluteHref);
             const noteId = (url.pathname.match(/\\/explore\\/([^/?#]+)/) || [])[1] || '';
+            const noteMeta = metaById[noteId] || {{}};
             const tokenNode = a.closest('[data-xsec-token],[xsec-token]');
             const card =
               a.closest('section') ||
@@ -1107,6 +1988,18 @@ class XiaohongshuAPI:
               a.closest('div[class*="note"]') ||
               a.closest('div[class*="feed"]') ||
               a.parentElement;
+            const authorLink = Array.from((card || a).querySelectorAll('a[href*="/user/profile/"]')).find((node) => {{
+              const text = String(node.innerText || node.textContent || '').trim();
+              return text && !/关注|粉丝|获赞|笔记|主页|小红书号/i.test(text);
+            }}) || null;
+            const authorHref = authorLink?.href || authorLink?.getAttribute?.('href') || '';
+            const absoluteAuthorHref = authorHref
+              ? (authorHref.startsWith('http') ? authorHref : new URL(authorHref, location.origin).href)
+              : '';
+            const authorId = (absoluteAuthorHref.match(/\\/user\\/profile\\/([^/?#]+)/) || [])[1] || noteMeta.author_id || '';
+            const authorName =
+              String(authorLink?.innerText || authorLink?.textContent || '').trim() ||
+              String(noteMeta.author || '').trim();
             const text = (card?.innerText || a.innerText || '').trim();
             const lines = text.split('\\n').map(s => s.trim()).filter(Boolean);
             const imgs = Array.from((card || a).querySelectorAll('img'))
@@ -1117,12 +2010,14 @@ class XiaohongshuAPI:
               href: rawHref,
               xsec_token:
                 url.searchParams.get('xsec_token') ||
-                byId[noteId] ||
+                noteMeta.xsec_token ||
                 a.dataset.xsecToken ||
                 tokenNode?.dataset?.xsecToken ||
                 tokenNode?.getAttribute?.('xsec-token') ||
                 '',
               xsec_source: url.searchParams.get('xsec_source') || {json.dumps(default_xsec_source)},
+              author: authorName,
+              author_id: authorId,
               title: lines[0] || '',
               text,
               lines,
@@ -1139,7 +2034,8 @@ class XiaohongshuAPI:
         max_results: int,
         page_kind: str,
     ) -> list[XHSNote]:
-        default_xsec_source = self._default_xsec_source(page_kind)
+        normalized_kind = "feed" if page_kind == "feed" else ("profile" if page_kind == "profile" else "search")
+        default_xsec_source = self._default_xsec_source(normalized_kind)
         notes: list[XHSNote] = []
         seen: set[str] = set()
         for card in cards:
@@ -1158,7 +2054,8 @@ class XiaohongshuAPI:
             lines = card.get("lines") or []
             body_lines = [line for line in lines[1:] if line and line != title]
             text = self._safe_str(card.get("text"))
-            author = body_lines[0] if body_lines else "未知"
+            author = self._safe_str(card.get("author")) or (body_lines[0] if body_lines else "未知")
+            author_id = self._safe_str(card.get("author_id"))
             likes = 0
             published_label = ""
             if body_lines:
@@ -1173,7 +2070,7 @@ class XiaohongshuAPI:
                     title=title or "无标题",
                     content=text[:800],
                     author=author,
-                    author_id="",
+                    author_id=author_id,
                     likes=likes,
                     collects=0,
                     comments_count=0,
@@ -1257,7 +2154,8 @@ class XiaohongshuAPI:
             finally:
                 await browser.close()
 
-        return self._cards_to_notes(cards, max_results=max_results, page_kind="feed" if page_kind == "feed" else "search")
+        normalized_kind = "feed" if page_kind == "feed" else ("profile" if page_kind == "profile" else "search")
+        return self._cards_to_notes(cards, max_results=max_results, page_kind=normalized_kind)
 
     async def _extract_cards_via_extension(
         self,
@@ -1273,8 +2171,7 @@ class XiaohongshuAPI:
         Python -> bridge server -> 扩展 -> 真实浏览器 tab -> MAIN world。
         优先读取 `window.__INITIAL_STATE__.search.feeds` / `feed.feeds`，再结合 DOM 卡片补齐标题、封面和 token。
         """
-        normalized_kind = "feed" if page_kind == "feed" else "search"
-        js = self._build_card_extract_expression(normalized_kind)
+        normalized_kind = "feed" if page_kind == "feed" else ("profile" if page_kind == "profile" else "search")
 
         async with XHSExtensionBridge(port=extension_port) as bridge:
             await bridge.wait_until_ready(timeout=20.0)
@@ -1293,12 +2190,53 @@ class XiaohongshuAPI:
             risk = snapshot.get("risk") if isinstance(snapshot, dict) else None
             if isinstance(risk, dict) and risk.get("code"):
                 raise RuntimeError(f"[{risk.get('code')}] {risk.get('message') or '页面状态异常'}")
+            return await self._collect_cards_from_extension_page(
+                bridge,
+                max_results=max_results,
+                page_kind=normalized_kind,
+            )
+
+    async def _extract_profile_cards_from_current_tab(
+        self,
+        *,
+        expected_user_id: str,
+        max_results: int,
+        extension_port: int = 9334,
+    ) -> list[XHSNote]:
+        """Read visible profile cards from the user's already-open XHS tab.
+
+        This mode intentionally does not navigate to `/user/profile/<id>` and does
+        not synthesize user activity. The user opens the creator page manually;
+        the extension only reads the current tab and performs ordinary scrolling.
+        """
+        clean_user_id = self._extract_user_id(expected_user_id)
+        js = self._build_card_extract_expression("profile")
+
+        async with XHSExtensionBridge(port=extension_port) as bridge:
+            await bridge.wait_until_ready(timeout=20.0)
+            current_url = self._safe_str(await bridge.call("get_url", {}, timeout=10.0))
+            current_user_id = self._extract_user_id(current_url) if "/user/profile/" in current_url else ""
+            if not current_user_id:
+                raise RuntimeError("请先在浏览器中手动打开目标小红书博主主页，再点击抓取。")
+            if clean_user_id and current_user_id != clean_user_id:
+                raise RuntimeError(
+                    f"当前打开的是 {current_user_id}，不是目标 {clean_user_id}。请手动切到目标博主主页后重试。"
+                )
+
+            await bridge.call("wait_for_load", {"timeout": 45000, "background": False}, timeout=45.0)
+            await bridge.call("wait_dom_stable", {"timeout": 12000, "interval": 500}, timeout=15.0)
+            snapshot = await bridge.call(
+                "get_xhs_page_snapshot",
+                {"kind": "profile", "textLimit": 1200},
+                timeout=15.0,
+            )
+            _raise_for_xhs_snapshot(snapshot)
 
             cards: list[dict[str, Any]] = []
             seen_hrefs: set[str] = set()
             stale_rounds = 0
-            scroll_rounds = max(4, min(36, (max_results // 8) + 6))
-            for round_index in range(scroll_rounds):
+            scroll_rounds = max(2, min(12, (max_results // 6) + 3))
+            for _ in range(scroll_rounds):
                 page_cards = await bridge.call("evaluate", {"expression": js}, timeout=20.0)
                 before = len(seen_hrefs)
                 if isinstance(page_cards, list):
@@ -1311,20 +2249,12 @@ class XiaohongshuAPI:
                 if len(seen_hrefs) >= max_results:
                     break
                 stale_rounds = stale_rounds + 1 if len(seen_hrefs) == before else 0
-                if stale_rounds >= 6:
+                if stale_rounds >= 3:
                     break
-                if round_index % 3 == 0:
-                    await bridge.call("scroll_by", {"x": 0, "y": 850}, timeout=10.0)
-                    await bridge.call("dispatch_wheel_event", {"deltaY": 900}, timeout=10.0)
-                elif round_index % 3 == 1:
-                    await bridge.call("scroll_by", {"x": 0, "y": 1200}, timeout=10.0)
-                else:
-                    await bridge.call("scroll_to_bottom", {}, timeout=10.0)
-                    await bridge.call("scroll_by", {"x": 0, "y": -420}, timeout=10.0)
-                    await bridge.call("dispatch_wheel_event", {"deltaY": 1100}, timeout=10.0)
-                await asyncio.sleep(1.2)
+                await bridge.call("scroll_by", {"x": 0, "y": 900}, timeout=10.0)
+                await asyncio.sleep(1.0)
 
-        return self._cards_to_notes(cards, max_results=max_results, page_kind=normalized_kind)
+        return self._cards_to_notes(cards, max_results=max_results, page_kind="profile")
 
     async def _discover_search_note_urls_with_playwright(
         self,
@@ -1528,7 +2458,8 @@ async def xiaohongshu_search(
     keyword: str,
     max_results: int = 20,
     min_likes: int = 100,
-    sort_by: str = "likes",
+    sort_by: str = "comprehensive",
+    recent_days: int | None = None,
     cookie: str | None = None,
     use_extension: bool = True,
     extension_port: int = 9334,
@@ -1537,16 +2468,26 @@ async def xiaohongshu_search(
     """搜索小红书高赞内容，并返回详情、媒体与评论预览。"""
     api = XiaohongshuAPI()
     try:
+        candidate_results = max_results if not recent_days else max(max_results * 3, 10)
         notes = await api.search_by_keyword(
             keyword=keyword,
             sort_by=sort_by,
-            max_results=max_results,
+            max_results=candidate_results,
             min_likes=min_likes,
             cookie=cookie,
             use_extension=use_extension,
             extension_port=extension_port,
             dedicated_window_mode=dedicated_window_mode,
         )
+        if recent_days:
+            cutoff = datetime.now() - timedelta(days=max(1, min(int(recent_days), 365)))
+            notes = [
+                note for note in notes
+                if note.published_at is None or (note.published_at.replace(tzinfo=None) if note.published_at.tzinfo else note.published_at) >= cutoff
+            ]
+            if sort_by == "time":
+                notes.sort(key=lambda note: note.published_at or datetime.max, reverse=True)
+        notes = notes[:max_results]
         return {
             "keyword": keyword,
             "total_found": len(notes),
@@ -1556,6 +2497,7 @@ async def xiaohongshu_search(
                     "title": n.title,
                     "content": n.content[:5000] if n.content else "",
                     "author": n.author,
+                    "author_id": n.author_id,
                     "likes": n.likes,
                     "collects": n.collects,
                     "comments_count": n.comments_count,

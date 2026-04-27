@@ -6,7 +6,7 @@
 2. 本机 CDP
 3. 后端 HTML 解析兜底
 
-默认保存到情报库的 `xhs/` 文件夹。
+默认情况下，单帖/批量链接保存到情报库的 `xhs/` 文件夹；收藏专辑抓取保存到情报库的 `专辑/` 文件夹。
 
 ## 启动带扩展的浏览器
 
@@ -95,6 +95,8 @@ python scripts/xhs/list_albums.py
 ```bash
 python scripts/xhs/fill_album_target.py --dedicated-window
 ```
+
+专辑里的 Markdown、图片/视频资源，以及 `.xhs-albums-progress.json` / `.xhs-albums-cache.json` 都会写到情报库的 `专辑/` 目录下。
 
 ## 导出 Cookie
 

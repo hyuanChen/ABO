@@ -8,6 +8,8 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 import threading
 
+from ..storage_paths import resolve_app_db_path
+
 
 @dataclass
 class Conversation:
@@ -19,6 +21,8 @@ class Conversation:
     status: str
     created_at: int
     updated_at: int
+    metadata: str = "{}"
+    origin: str = ""
 
 
 @dataclass
@@ -54,11 +58,12 @@ class ConversationStore:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, db_path: str = "~/.abo/data/conversations.db"):
+    def __init__(self, db_path: Optional[str] = None):
         if hasattr(self, '_initialized'):
             return
 
-        self.db_path = os.path.expanduser(db_path)
+        resolved_path = db_path or resolve_app_db_path("conversations.db")
+        self.db_path = os.path.expanduser(resolved_path)
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_db()
         self._initialized = True
@@ -80,6 +85,8 @@ class ConversationStore:
                     session_id TEXT NOT NULL UNIQUE,
                     title TEXT DEFAULT '',
                     workspace TEXT DEFAULT '',
+                    metadata TEXT DEFAULT '{}',
+                    origin TEXT DEFAULT '',
                     status TEXT DEFAULT 'active',
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
@@ -107,11 +114,40 @@ class ConversationStore:
                 CREATE INDEX IF NOT EXISTS idx_conversations_session
                     ON conversations(session_id);
             """)
+            self._ensure_column(conn, "conversations", "metadata", "TEXT DEFAULT '{}'")
+            self._ensure_column(conn, "conversations", "origin", "TEXT DEFAULT ''")
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     # === 对话操作 ===
 
-    def create_conversation(self, cli_type: str, session_id: str,
-                           title: str = "", workspace: str = "") -> str:
+    @staticmethod
+    def _serialize_metadata(metadata: Optional[dict]) -> str:
+        return json.dumps(metadata or {}, ensure_ascii=False)
+
+    @staticmethod
+    def parse_metadata(metadata: Optional[str]) -> dict:
+        if not metadata:
+            return {}
+        try:
+            parsed = json.loads(metadata)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def create_conversation(
+        self,
+        cli_type: str,
+        session_id: str,
+        title: str = "",
+        workspace: str = "",
+        origin: str = "",
+        metadata: Optional[dict] = None,
+    ) -> str:
         """创建新对话"""
         import uuid
 
@@ -121,9 +157,19 @@ class ConversationStore:
         with self._get_conn() as conn:
             conn.execute(
                 """INSERT INTO conversations
-                   (id, cli_type, session_id, title, workspace, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, 'active', ?, ?)""",
-                (conv_id, cli_type, session_id, title, workspace, now, now)
+                   (id, cli_type, session_id, title, workspace, metadata, origin, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)""",
+                (
+                    conv_id,
+                    cli_type,
+                    session_id,
+                    title,
+                    workspace,
+                    self._serialize_metadata(metadata),
+                    origin,
+                    now,
+                    now,
+                )
             )
 
         return conv_id
@@ -183,6 +229,46 @@ class ConversationStore:
                 (title, now, conv_id)
             )
 
+    def touch_conversation(self, conv_id: str):
+        """更新对话最近活动时间"""
+        now = int(datetime.now().timestamp() * 1000)
+
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, conv_id)
+            )
+
+    def update_conversation_metadata(self, conv_id: str, metadata: dict):
+        """覆盖写入对话元数据"""
+        now = int(datetime.now().timestamp() * 1000)
+
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE conversations SET metadata = ?, updated_at = ? WHERE id = ?",
+                (self._serialize_metadata(metadata), now, conv_id)
+            )
+
+    def merge_conversation_metadata(
+        self,
+        conv_id: str,
+        updates: Optional[dict] = None,
+        *,
+        remove_keys: Optional[List[str]] = None,
+    ) -> dict:
+        """合并更新对话元数据并返回最新结果"""
+        conv = self.get_conversation(conv_id)
+        current = self.parse_metadata(conv.metadata if conv else None)
+
+        if updates:
+            current.update(updates)
+        if remove_keys:
+            for key in remove_keys:
+                current.pop(key, None)
+
+        self.update_conversation_metadata(conv_id, current)
+        return current
+
     def close_conversation(self, conv_id: str):
         """关闭对话"""
         with self._get_conn() as conn:
@@ -195,6 +281,13 @@ class ConversationStore:
         """删除对话（级联删除消息）"""
         with self._get_conn() as conn:
             conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
+
+    def delete_conversation_by_session(self, session_id: str):
+        """通过 session_id 删除对话（级联删除消息）"""
+        if not session_id:
+            return
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
 
     # === 消息操作 ===
 
@@ -228,6 +321,82 @@ class ConversationStore:
 
         return message_id
 
+    def add_or_update_message(
+        self,
+        conv_id: str,
+        role: str,
+        content: str,
+        *,
+        msg_id: Optional[str],
+        content_type: str = "text",
+        metadata: Optional[dict] = None,
+        status: str = "streaming",
+        append: bool = True,
+    ) -> str:
+        """Add a message or merge it into the existing stream row.
+
+        Runtime events are keyed by conversation + role + msg_id + content_type.
+        Text/thinking chunks append, while tool/error updates normally replace
+        the current row. This keeps the DB close to the renderer stream without
+        inserting one row per chunk.
+        """
+        import uuid
+
+        now = int(datetime.now().timestamp() * 1000)
+        metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
+
+        with self._get_conn() as conn:
+            existing = None
+            if msg_id:
+                existing = conn.execute(
+                    """
+                    SELECT id, content, metadata FROM messages
+                    WHERE conversation_id = ? AND role = ? AND msg_id = ? AND content_type = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (conv_id, role, msg_id, content_type),
+                ).fetchone()
+
+            if existing:
+                message_id = str(existing["id"])
+                next_content = f"{existing['content']}{content}" if append else content
+                next_metadata = metadata_json if metadata is not None else existing["metadata"]
+                conn.execute(
+                    """
+                    UPDATE messages
+                    SET content = ?, metadata = ?, status = ?
+                    WHERE id = ?
+                    """,
+                    (next_content, next_metadata, status, message_id),
+                )
+            else:
+                message_id = str(uuid.uuid4())
+                conn.execute(
+                    """INSERT INTO messages
+                       (id, conversation_id, msg_id, role, content,
+                        content_type, metadata, status, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        message_id,
+                        conv_id,
+                        msg_id,
+                        role,
+                        content,
+                        content_type,
+                        metadata_json,
+                        status,
+                        now,
+                    ),
+                )
+
+            conn.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, conv_id),
+            )
+
+        return message_id
+
     def update_message_content(self, msg_id: str, content: str):
         """更新消息内容（流式更新）"""
         with self._get_conn() as conn:
@@ -238,10 +407,33 @@ class ConversationStore:
 
     def finalize_message(self, msg_id: str):
         """完成流式消息"""
+        now = int(datetime.now().timestamp() * 1000)
         with self._get_conn() as conn:
             conn.execute(
                 "UPDATE messages SET status = 'completed' WHERE msg_id = ?",
                 (msg_id,)
+            )
+            row = conn.execute(
+                "SELECT conversation_id FROM messages WHERE msg_id = ? LIMIT 1",
+                (msg_id,),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                    (now, row["conversation_id"]),
+                )
+
+    def finalize_streaming_messages(self, conv_id: str):
+        """将某个对话中仍处于流式状态的消息收尾。"""
+        now = int(datetime.now().timestamp() * 1000)
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE messages SET status = 'completed' WHERE conversation_id = ? AND status = 'streaming'",
+                (conv_id,),
+            )
+            conn.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, conv_id),
             )
 
     def get_messages(self, conv_id: str, limit: int = 100,

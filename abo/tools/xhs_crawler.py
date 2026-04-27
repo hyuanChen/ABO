@@ -16,6 +16,7 @@ import math
 import random
 import re
 import sys
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,7 +25,10 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from abo.creator_smart_groups import extract_signal_tokens
 from abo.tools.xhs_extension_bridge import XHSExtensionBridge
+from abo.vault.unified_entry import UnifiedVaultEntry, first_non_empty, normalize_string_list, safe_load_frontmatter
+from abo.vault.writer import write_unified_note
 
 
 BASE_URL = "https://www.xiaohongshu.com"
@@ -80,6 +84,7 @@ class XHSAuthorCandidate:
     sample_titles: list[str] = field(default_factory=list)
     sample_albums: list[str] = field(default_factory=list)
     sample_tags: list[str] = field(default_factory=list)
+    content_signals: list[str] = field(default_factory=list)
     source_summary: str = ""
     score: float = 0.0
 
@@ -1310,6 +1315,10 @@ def _merge_seed_metadata(note: XHSCrawledNote, seed_data: dict[str, Any] | None)
         seed_author = _safe_str(seed_data.get("author"))
         if seed_author:
             note.author = seed_author
+    if not note.author_id:
+        seed_author_id = _safe_str(seed_data.get("author_id"))
+        if seed_author_id:
+            note.author_id = seed_author_id
     if note.liked_count <= 0:
         note.liked_count = _parse_count(seed_data.get("likes"))
     if not note.published_at:
@@ -1317,9 +1326,117 @@ def _merge_seed_metadata(note: XHSCrawledNote, seed_data: dict[str, Any] | None)
     return note
 
 
+def _seed_images_to_media(seed_data: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(seed_data, dict):
+        return []
+    raw_urls: list[str] = []
+    cover = _safe_str(seed_data.get("cover_image"))
+    if cover:
+        raw_urls.append(cover)
+    for item in seed_data.get("images") or []:
+        url = _safe_str(item)
+        if url and url not in raw_urls:
+            raw_urls.append(url)
+    media: list[dict[str, Any]] = []
+    for index, url in enumerate(raw_urls):
+        media.append(
+            {
+                "index": index,
+                "urls": {"seed": url},
+                "remote_default": url,
+            }
+        )
+    return media
+
+
+def _note_from_seed_data(seed_data: dict[str, Any]) -> XHSCrawledNote:
+    normalized_url = normalize_note_url(_safe_str(seed_data.get("url")) or _safe_str(seed_data.get("id")))
+    content = _safe_str(seed_data.get("content")) or "搜索结果未提供更多正文，已先按当前卡片信息保存。"
+    return XHSCrawledNote(
+        id=_extract_note_id(normalized_url) or _safe_str(seed_data.get("id")) or uuid.uuid4().hex[:8],
+        title=_safe_str(seed_data.get("title")) or "小红书笔记",
+        desc=content,
+        author=_safe_str(seed_data.get("author")) or "未知",
+        author_id=_safe_str(seed_data.get("author_id")),
+        url=normalized_url,
+        note_type=_safe_str(seed_data.get("note_type")) or "normal",
+        published_at=_extract_datetime(
+            seed_data.get("published_at")
+            or seed_data.get("published")
+            or seed_data.get("time")
+        ),
+        liked_count=_parse_count(seed_data.get("likes")),
+        collected_count=_parse_count(seed_data.get("collects")),
+        comment_count=_parse_count(seed_data.get("comments_count")),
+        images=_seed_images_to_media(seed_data),
+        video_url=_safe_str(seed_data.get("video_url")),
+        warnings=["详情抓取未完成，当前文件按搜索/监控卡片摘要保存。"],
+    )
+
+
+def _vault_root_dir(vault_path: str | Path | None) -> Path:
+    return Path(vault_path).expanduser() if vault_path else DEFAULT_VAULT
+
+
 def _vault_xhs_dir(vault_path: str | Path | None) -> Path:
-    root = Path(vault_path).expanduser() if vault_path else DEFAULT_VAULT
-    return root / "xhs"
+    return _vault_root_dir(vault_path) / "xhs"
+
+
+def _vault_album_dir(vault_path: str | Path | None) -> Path:
+    return _vault_root_dir(vault_path) / "专辑"
+
+
+def _saved_xhs_source_dirs(vault_path: str | Path | None) -> list[Path]:
+    return [_vault_xhs_dir(vault_path), _vault_album_dir(vault_path)]
+
+
+def _build_xhs_unified_entry(
+    note: XHSCrawledNote,
+    *,
+    obsidian_path: str,
+    source_module: str = "xhs-crawler",
+) -> UnifiedVaultEntry:
+    published = note.published_at.isoformat() if note.published_at else ""
+    summary = (note.desc.strip().splitlines()[0][:160] if note.desc else "") or "已保存这条小红书笔记。"
+    return UnifiedVaultEntry(
+        entry_id=note.id,
+        entry_type="social-note",
+        title=note.title.strip() or "小红书笔记",
+        summary=summary,
+        source_url=note.url,
+        source_platform="xiaohongshu",
+        source_module=source_module,
+        author=note.author,
+        author_id=note.author_id,
+        published=published,
+        tags=note.tags,
+        obsidian_path=obsidian_path,
+        metadata={
+            "abo-type": "xiaohongshu-note",
+            "platform": "xiaohongshu",
+            "note-id": note.id,
+            "note-type": note.note_type,
+            "likes": note.liked_count,
+            "collects": note.collected_count,
+            "comments-count": note.comment_count,
+            "shares": note.share_count,
+            "ip-location": note.ip_location,
+            "images": note.images,
+            "video-url": note.video_url,
+            "live-urls": note.live_urls,
+            "local-resources": [
+                {
+                    "label": item.label,
+                    "type": item.type,
+                    "relative_path": item.relative_path,
+                    "remote_url": item.remote_url,
+                    "size": item.size,
+                }
+                for item in note.local_resources
+            ],
+            "warnings": note.warnings,
+        },
+    )
 
 
 def _extract_md_field(text: str, label: str) -> str:
@@ -1328,7 +1445,93 @@ def _extract_md_field(text: str, label: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _split_saved_xhs_tags(raw: str) -> list[str]:
+    value = str(raw or "").strip()
+    if not value or value == "无":
+        return []
+
+    parts = re.split(r"\s*[、，,|/／#]+(?:\s*|$)", value)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        tag = str(part or "").strip().strip("#").strip()
+        if not tag:
+            continue
+        lowered = tag.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        cleaned.append(tag)
+    return cleaned
+
+
+def _extract_saved_xhs_inline_tags(text: str) -> list[str]:
+    if not text:
+        return []
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"#([^#\n]{1,48}?)(?:\[(?:话题|超话)\])?#", text):
+        tag = str(match.group(1) or "").strip().strip("#").strip()
+        if not tag:
+            continue
+        lowered = tag.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        cleaned.append(tag)
+    return cleaned
+
+
+def _extract_saved_xhs_excerpt(text: str) -> str:
+    lines: list[str] = []
+    capture = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("> 原帖标题："):
+            capture = True
+            continue
+        if not capture:
+            continue
+        if line.startswith("> [!quote]") or line.startswith("> [!info]"):
+            break
+        if line.startswith("> ![") or line in {">", ""}:
+            continue
+        clean = line.lstrip("> ").strip()
+        if clean:
+            lines.append(clean)
+        if len(lines) >= 4:
+            break
+    return " ".join(lines)[:240]
+
+
 def _parse_saved_xhs_note(path: Path) -> dict[str, Any] | None:
+    meta, content = safe_load_frontmatter(path)
+    if first_non_empty(meta.get("source-platform"), meta.get("platform")).lower() == "xiaohongshu":
+        url = first_non_empty(meta.get("source-url"), meta.get("url"))
+        note_id = first_non_empty(meta.get("note-id"), _extract_note_id(url), meta.get("entry-id"))
+        title = first_non_empty(meta.get("title")) or path.stem
+        author = first_non_empty(meta.get("author"))
+        if not author:
+            title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+            title = title_match.group(1).strip() if title_match else title
+            return None
+        return {
+            "title": title,
+            "author": author,
+            "author_id": first_non_empty(meta.get("author-id"), meta.get("author_id")),
+            "url": url,
+            "note_id": note_id,
+            "date": first_non_empty(meta.get("published"), meta.get("date"))[:10],
+            "tags": normalize_string_list(meta.get("tags")),
+            "likes": _parse_count(meta.get("likes")),
+            "collects": _parse_count(meta.get("collects")),
+            "comments": _parse_count(meta.get("comments-count")),
+            "albums": normalize_string_list(meta.get("albums")),
+            "content_excerpt": "",
+            "path": str(path),
+        }
+
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
@@ -1353,15 +1556,18 @@ def _parse_saved_xhs_note(path: Path) -> dict[str, Any] | None:
         "url": _extract_md_field(text, "链接"),
         "note_id": _extract_note_id(_extract_md_field(text, "链接")),
         "date": _extract_md_field(text, "日期"),
-        "tags": [
-            item.strip()
-            for item in _extract_md_field(text, "标签").replace("无", "").split("、")
-            if item.strip()
-        ],
+        "tags": normalize_string_list(
+            [
+                *_split_saved_xhs_tags(_extract_md_field(text, "标签")),
+                *_extract_saved_xhs_inline_tags(text),
+            ]
+        ),
+        "albums": normalize_string_list(_extract_md_field(text, "收藏专辑")),
         "likes": likes,
         "collects": collects,
         "comments": comments,
         "path": str(path),
+        "content_excerpt": _extract_saved_xhs_excerpt(text),
     }
 
 
@@ -1372,11 +1578,12 @@ async def analyze_saved_xhs_authors(
     resolve_author_ids: bool = True,
     resolve_limit: int = 12,
 ) -> dict[str, Any]:
-    xhs_dir = _vault_xhs_dir(vault_path)
-    if not xhs_dir.exists():
+    xhs_dirs = [path for path in _saved_xhs_source_dirs(vault_path) if path.exists()]
+    if not xhs_dirs:
         return {
             "success": True,
-            "xhs_dir": str(xhs_dir),
+            "xhs_dir": str(_vault_xhs_dir(vault_path)),
+            "source_dirs": [str(path) for path in _saved_xhs_source_dirs(vault_path)],
             "total_notes": 0,
             "candidates": [],
             "message": "还没有本地 xhs 收藏结果，请先执行收藏抓取。",
@@ -1390,33 +1597,51 @@ async def analyze_saved_xhs_authors(
         if isinstance(state, dict):
             note_albums_by_id[str(note_id)] = [str(item) for item in state.get("albums", []) if item]
 
-    for path in sorted(xhs_dir.glob("*.md")):
-        note = _parse_saved_xhs_note(path)
-        if not note:
-            continue
-        total_notes += 1
-        author = note["author"]
-        candidate = aggregates.setdefault(author, XHSAuthorCandidate(author=author))
-        candidate.note_count += 1
-        candidate.total_likes += note["likes"]
-        candidate.total_collects += note["collects"]
-        candidate.total_comments += note["comments"]
-        if note["author_id"] and not candidate.author_id:
-            candidate.author_id = note["author_id"]
-        if note["url"] and note["url"] not in candidate.sample_note_urls and len(candidate.sample_note_urls) < 3:
-            candidate.sample_note_urls.append(note["url"])
-        if note["title"] and note["title"] not in candidate.sample_titles and len(candidate.sample_titles) < 3:
-            candidate.sample_titles.append(note["title"])
-        note_id = _extract_note_id(note["url"])
-        for album_name in note_albums_by_id.get(note_id, []):
-            if album_name and album_name not in candidate.sample_albums and len(candidate.sample_albums) < 4:
-                candidate.sample_albums.append(album_name)
-        for tag in note.get("tags", []):
-            if tag and tag not in candidate.sample_tags and len(candidate.sample_tags) < 6:
-                candidate.sample_tags.append(tag)
-        if note["date"] and note["date"] >= candidate.latest_date:
-            candidate.latest_date = note["date"]
-            candidate.latest_title = note["title"]
+    for source_dir in xhs_dirs:
+        for path in sorted(source_dir.rglob("*.md")):
+            if path.name.startswith("."):
+                continue
+            note = _parse_saved_xhs_note(path)
+            if not note:
+                continue
+            total_notes += 1
+            author = note["author"]
+            candidate = aggregates.setdefault(author, XHSAuthorCandidate(author=author))
+            candidate.note_count += 1
+            candidate.total_likes += note["likes"]
+            candidate.total_collects += note["collects"]
+            candidate.total_comments += note["comments"]
+            if note["author_id"] and not candidate.author_id:
+                candidate.author_id = note["author_id"]
+            if note["url"] and note["url"] not in candidate.sample_note_urls and len(candidate.sample_note_urls) < 3:
+                candidate.sample_note_urls.append(note["url"])
+            if note["title"] and note["title"] not in candidate.sample_titles and len(candidate.sample_titles) < 3:
+                candidate.sample_titles.append(note["title"])
+            note_id = _extract_note_id(note["url"])
+            for album_name in note.get("albums", []):
+                if album_name and album_name not in candidate.sample_albums and len(candidate.sample_albums) < 4:
+                    candidate.sample_albums.append(album_name)
+            try:
+                relative_parts = path.relative_to(source_dir).parts
+            except Exception:
+                relative_parts = path.parts
+            if len(relative_parts) >= 2:
+                folder_album = str(relative_parts[0] or "").strip()
+                if folder_album and folder_album not in {"", ".", "xhs", "专辑"}:
+                    if folder_album not in candidate.sample_albums and len(candidate.sample_albums) < 4:
+                        candidate.sample_albums.append(folder_album)
+            for album_name in note_albums_by_id.get(note_id, []):
+                if album_name and album_name not in candidate.sample_albums and len(candidate.sample_albums) < 4:
+                    candidate.sample_albums.append(album_name)
+            for tag in note.get("tags", []):
+                if tag and tag not in candidate.sample_tags and len(candidate.sample_tags) < 6:
+                    candidate.sample_tags.append(tag)
+            for signal in extract_signal_tokens(note.get("title"), note.get("content_excerpt")):
+                if signal and signal not in candidate.content_signals and len(candidate.content_signals) < 8:
+                    candidate.content_signals.append(signal)
+            if note["date"] and note["date"] >= candidate.latest_date:
+                candidate.latest_date = note["date"]
+                candidate.latest_title = note["title"]
 
     ordered = sorted(
         aggregates.values(),
@@ -1434,7 +1659,8 @@ async def analyze_saved_xhs_authors(
 
         api = XiaohongshuAPI()
         try:
-            for candidate in ordered[:resolve_limit]:
+            candidates_to_resolve = ordered if int(resolve_limit or 0) <= 0 else ordered[:resolve_limit]
+            for candidate in candidates_to_resolve:
                 if candidate.author_id or not candidate.sample_note_urls:
                     continue
                 for note_url in candidate.sample_note_urls:
@@ -1467,7 +1693,8 @@ async def analyze_saved_xhs_authors(
 
     return {
         "success": True,
-        "xhs_dir": str(xhs_dir),
+        "xhs_dir": str(_vault_xhs_dir(vault_path)),
+        "source_dirs": [str(path) for path in xhs_dirs],
         "total_notes": total_notes,
         "candidates": [
             {
@@ -1483,6 +1710,7 @@ async def analyze_saved_xhs_authors(
                 "sample_titles": candidate.sample_titles,
                 "sample_albums": candidate.sample_albums,
                 "sample_tags": candidate.sample_tags,
+                "content_signals": candidate.content_signals,
                 "source_summary": candidate.source_summary,
                 "score": candidate.score,
             }
@@ -1503,6 +1731,26 @@ def _safe_folder_name(text: str, fallback: str) -> str:
     name = _slug(text, fallback)
     name = name.strip(". ")
     return name or fallback
+
+
+def _resolve_xhs_target_dir(
+    root_xhs_dir: Path,
+    subfolder: str | None,
+    *,
+    fallback: str,
+) -> Path:
+    if not subfolder:
+        return root_xhs_dir
+
+    raw_parts = [str(part).strip() for part in re.split(r"[\\/]+", str(subfolder)) if str(part).strip()]
+    if not raw_parts:
+        return root_xhs_dir / _safe_folder_name(fallback, fallback)
+
+    target = root_xhs_dir
+    for index, part in enumerate(raw_parts):
+        part_fallback = fallback if index == len(raw_parts) - 1 else "未命名分组"
+        target = target / _safe_folder_name(part, part_fallback)
+    return target
 
 
 def _media_ext(url: str, content_type: str, default: str) -> str:
@@ -1679,7 +1927,7 @@ def _render_markdown(
         "",
         desc.splitlines()[0][:160] if desc else "已保存这条小红书笔记。",
         "",
-        "**与我的关联：** 作为小红书情报样本保存，后续可在 xhs 文件夹里继续整理。",
+        "**与我的关联：** 作为小红书情报样本保存，后续可在情报库里继续整理。",
         "",
         "**值得深挖吗：** 视后续关联主题决定。",
         "",
@@ -1704,12 +1952,14 @@ async def crawl_xhs_note_to_vault(
     *,
     cookie: str | None = None,
     vault_path: str | Path | None = None,
+    target_root_dir: str | Path | None = None,
     include_images: bool = False,
     include_video: bool = False,
     include_live_photo: bool = False,
     include_comments: bool = False,
     include_sub_comments: bool = False,
     comments_limit: int = 20,
+    comments_sort_by: str = "likes",
     use_extension: bool = True,
     extension_port: int = 9334,
     dedicated_window_mode: bool = False,
@@ -1718,7 +1968,7 @@ async def crawl_xhs_note_to_vault(
     subfolder: str | None = None,
     seed_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """抓取单条小红书笔记并保存到 vault/xhs。"""
+    """抓取单条小红书笔记并保存到情报库目录。"""
     normalized_url = normalize_note_url(url)
     note_id = _extract_note_id(normalized_url)
     warnings: list[str] = []
@@ -1850,7 +2100,7 @@ async def crawl_xhs_note_to_vault(
                 note_id=note.id,
                 note_url=normalized_url,
                 max_comments=max(1, comments_limit),
-                sort_by="likes",
+                sort_by=comments_sort_by,
                 cookie=cookie,
                 use_extension=use_extension,
                 extension_port=extension_port,
@@ -1874,8 +2124,8 @@ async def crawl_xhs_note_to_vault(
             if _should_stop_xhs_task(exc):
                 raise RuntimeError(str(exc)) from exc
 
-    root_xhs_dir = _vault_xhs_dir(vault_path)
-    xhs_dir = root_xhs_dir / _safe_folder_name(subfolder, "未命名专辑") if subfolder else root_xhs_dir
+    root_xhs_dir = Path(target_root_dir).expanduser() if target_root_dir else _vault_xhs_dir(vault_path)
+    xhs_dir = _resolve_xhs_target_dir(root_xhs_dir, subfolder, fallback="未命名专辑")
     xhs_dir.mkdir(parents=True, exist_ok=True)
     (xhs_dir / "img").mkdir(exist_ok=True)
     (xhs_dir / "video").mkdir(exist_ok=True)
@@ -1891,14 +2141,16 @@ async def crawl_xhs_note_to_vault(
     date = note.published_at.strftime("%Y-%m-%d") if note.published_at else datetime.now().strftime("%Y-%m-%d")
     md_name = f"{date} {_slug(note.title, note.id[:8])}.md"
     md_path = xhs_dir / md_name
-    md_path.write_text(
+    obsidian_path = md_path.relative_to(root_xhs_dir.parent).as_posix()
+    write_unified_note(
+        md_path,
+        _build_xhs_unified_entry(note, obsidian_path=obsidian_path),
         _render_markdown(
             note,
             include_comments=include_comments,
             include_sub_comments=include_sub_comments,
             comments_limit=comments_limit,
         ),
-        encoding="utf-8",
     )
 
     return {
@@ -1910,6 +2162,7 @@ async def crawl_xhs_note_to_vault(
         "markdown_path": str(md_path),
         "xhs_dir": str(xhs_dir),
         "xhs_root_dir": str(root_xhs_dir),
+        "target_root_dir": str(root_xhs_dir),
         "used_extension": used_extension,
         "used_cdp": note.used_cdp,
         "detail_strategy": detail_strategy or ("cdp_initial_state" if note.used_cdp else "html_initial_state"),
@@ -1935,12 +2188,101 @@ async def crawl_xhs_note_to_vault(
     }
 
 
+async def save_xhs_seed_note_to_vault(
+    *,
+    seed_data: dict[str, Any],
+    vault_path: str | Path | None = None,
+    include_images: bool = False,
+    include_video: bool = False,
+    subfolder: str | None = None,
+) -> dict[str, Any]:
+    """使用已有搜索/关注卡片数据，按统一 Markdown 格式直接落盘。"""
+    note = _note_from_seed_data(seed_data)
+
+    root_xhs_dir = _vault_xhs_dir(vault_path)
+    xhs_dir = _resolve_xhs_target_dir(root_xhs_dir, subfolder, fallback="未命名专题")
+    xhs_dir.mkdir(parents=True, exist_ok=True)
+    (xhs_dir / "img").mkdir(exist_ok=True)
+    (xhs_dir / "video").mkdir(exist_ok=True)
+
+    await _download_media(
+        note,
+        xhs_dir,
+        include_images=include_images,
+        include_video=include_video,
+        include_live_photo=False,
+    )
+
+    date = note.published_at.strftime("%Y-%m-%d") if note.published_at else datetime.now().strftime("%Y-%m-%d")
+    md_name = f"{date} {_slug(note.title, note.id[:8])}.md"
+    md_path = xhs_dir / md_name
+    obsidian_path = md_path.relative_to(root_xhs_dir.parent).as_posix()
+    write_unified_note(
+        md_path,
+        _build_xhs_unified_entry(note, obsidian_path=obsidian_path),
+        _render_markdown(
+            note,
+            include_comments=False,
+            include_sub_comments=False,
+            comments_limit=0,
+        ),
+    )
+
+    return {
+        "success": True,
+        "note_id": note.id,
+        "title": note.title,
+        "author": note.author,
+        "url": note.url,
+        "markdown_path": str(md_path),
+        "xhs_dir": str(xhs_dir),
+        "xhs_root_dir": str(root_xhs_dir),
+        "used_extension": False,
+        "used_cdp": False,
+        "detail_strategy": "seed_preview",
+        "media_strategy": "seed_urls",
+        "comment_strategy": None,
+        "warnings": note.warnings,
+        "remote_resources": {
+            "images": [image.get("remote_default") for image in note.images if image.get("remote_default")],
+            "video": note.video_url or None,
+            "live": [],
+        },
+        "local_resources": [
+            {
+                "label": item.label,
+                "type": item.type,
+                "path": str(item.path),
+                "relative_path": item.relative_path,
+                "remote_url": item.remote_url,
+                "size": item.size,
+            }
+            for item in note.local_resources
+        ],
+    }
+
+
+def build_xhs_seed_obsidian_path(
+    seed_data: dict[str, Any],
+    *,
+    subfolder: str | None = None,
+    vault_path: str | Path | None = None,
+) -> str:
+    """Return the same relative markdown path used by preview/manual XHS saves."""
+    note = _note_from_seed_data(seed_data)
+    root_xhs_dir = _vault_xhs_dir(vault_path)
+    xhs_dir = _resolve_xhs_target_dir(root_xhs_dir, subfolder, fallback="未命名专题")
+    date = note.published_at.strftime("%Y-%m-%d") if note.published_at else datetime.now().strftime("%Y-%m-%d")
+    md_name = f"{date} {_slug(note.title, note.id[:8])}.md"
+    return (xhs_dir / md_name).relative_to(root_xhs_dir.parent).as_posix()
+
+
 def _albums_progress_path(vault_path: str | Path | None) -> Path:
-    return _vault_xhs_dir(vault_path) / ".xhs-albums-progress.json"
+    return _vault_album_dir(vault_path) / ".xhs-albums-progress.json"
 
 
 def _albums_cache_path(vault_path: str | Path | None) -> Path:
-    return _vault_xhs_dir(vault_path) / ".xhs-albums-cache.json"
+    return _vault_album_dir(vault_path) / ".xhs-albums-cache.json"
 
 
 def _load_album_cache(vault_path: str | Path | None) -> list[dict[str, Any]]:
@@ -3699,6 +4041,7 @@ async def crawl_xhs_albums_incremental(
                         detail_url,
                         cookie=cookie,
                         vault_path=vault_path,
+                        target_root_dir=_vault_album_dir(vault_path),
                         include_images=include_images,
                         include_video=include_video,
                         include_live_photo=include_live_photo,

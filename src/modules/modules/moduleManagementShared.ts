@@ -67,14 +67,15 @@ export function formatDateTime(value: number | string | null | undefined): strin
 
 export function formatScheduleLabel(schedule: string | null | undefined): string {
   if (!schedule) return "未设置";
-  if (schedule === "0 8 * * *") return "每天 08:00";
-  if (schedule === "0 9 * * *") return "每天 09:00";
-  if (schedule === "0 10 * * *") return "每天 10:00";
-  if (schedule === "0 11 * * *") return "每天 11:00";
-  if (schedule === "0 12 * * *") return "每天 12:00";
-  if (schedule === "0 13 * * *") return "每天 13:00";
-  if (schedule === "0 20 * * *") return "每天 20:00";
   if (schedule.startsWith("*/5")) return "每 5 分钟";
+  const cronMatch = /^(\d{1,2}) (\d{1,2}) \* \* \*$/.exec(schedule.trim());
+  if (cronMatch) {
+    const minute = Number(cronMatch[1]);
+    const hour = Number(cronMatch[2]);
+    if (minute >= 0 && minute <= 59 && hour >= 0 && hour <= 23) {
+      return `每天 ${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`;
+    }
+  }
   return schedule;
 }
 

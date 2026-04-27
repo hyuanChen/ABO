@@ -13,7 +13,7 @@ import {
   Save,
   X,
 } from "lucide-react";
-import { PageContainer, PageHeader, PageContent, Card, Grid } from "../../components/Layout";
+import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
 
 // Date utilities
 function getTodayKey(): string {
@@ -289,17 +289,7 @@ export default function Journal() {
           <SummaryView
             title="周记总结"
             period={getPeriodLabel()}
-            description="本周的收获与反思"
-            stats={[
-              { label: "记录天数", value: "5天" },
-              { label: "总字数", value: "2,340字" },
-              { label: "主要心情", value: "充实" },
-            ]}
-            highlights={[
-              "完成了3篇文献的深度阅读",
-              "和导师确定了研究方向",
-              "保持了每天早起的习惯",
-            ]}
+            description="当前还没有周记数据"
           />
         )}
 
@@ -307,18 +297,7 @@ export default function Journal() {
           <SummaryView
             title="月度回顾"
             period={getPeriodLabel()}
-            description="这个月的成长轨迹"
-            stats={[
-              { label: "记录天数", value: "22天" },
-              { label: "总字数", value: "12,580字" },
-              { label: "完成目标", value: "85%" },
-            ]}
-            highlights={[
-              "发表了第一篇论文",
-              "建立了稳定的研究节奏",
-              "参加了2次学术会议",
-              "阅读了15篇核心文献",
-            ]}
+            description="当前还没有月记数据"
           />
         )}
 
@@ -326,18 +305,7 @@ export default function Journal() {
           <SummaryView
             title="年度总结"
             period={getPeriodLabel()}
-            description="这一年的旅程与蜕变"
-            stats={[
-              { label: "记录天数", value: "280天" },
-              { label: "总字数", value: "156,000字" },
-              { label: "研究产出", value: "3篇论文" },
-            ]}
-            highlights={[
-              "完成了博士开题",
-              "发表了2篇SCI论文",
-              "建立了完整的研究体系",
-              "收获了宝贵的学术友谊",
-            ]}
+            description="当前还没有年记数据"
           />
         )}
       </PageContent>
@@ -638,138 +606,39 @@ function SummaryView({
   title,
   period,
   description,
-  stats,
-  highlights,
 }: {
   title: string;
   period: string;
   description: string;
-  stats: { label: string; value: string }[];
-  highlights: string[];
 }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-      {/* Period Header */}
-      <div style={{ textAlign: "center", marginBottom: "8px" }}>
+    <Card
+      title={title}
+      icon={<FileText style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
+    >
+      <div
+        style={{
+          textAlign: "center",
+          padding: "56px 24px",
+          color: "var(--text-muted)",
+        }}
+      >
         <div style={{ fontSize: "0.875rem", color: "var(--text-muted)", marginBottom: "4px" }}>{period}</div>
-        <div style={{ fontSize: "0.9375rem", color: "var(--text-secondary)" }}>{description}</div>
+        <p
+          style={{
+            fontSize: "1rem",
+            marginBottom: "8px",
+          }}
+        >
+          {description}
+        </p>
+        <p style={{ fontSize: "0.875rem" }}>
+          接入真实手记数据后，这里才会显示对应时段的总结和条目。
+        </p>
+        <p style={{ fontSize: "0.8125rem", marginTop: "8px" }}>
+          当前不再展示任何默认示例数据。
+        </p>
       </div>
-
-      {/* Stats Grid */}
-      <Grid columns={3} gap="md">
-        {stats.map(({ label, value }) => (
-          <Card key={label} style={{ textAlign: "center", padding: "24px" }}>
-            <div
-              style={{
-                fontSize: "1.75rem",
-                fontWeight: 700,
-                color: "var(--color-primary-dark)",
-                marginBottom: "4px",
-              }}
-            >
-              {value}
-            </div>
-            <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-              {label}
-            </div>
-          </Card>
-        ))}
-      </Grid>
-
-      {/* AI Summary Card */}
-      <Card
-        title={`${title}`}
-        icon={<Sparkles style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
-      >
-        <div style={{ marginBottom: "20px" }}>
-          <p
-            style={{
-              fontSize: "0.9375rem",
-              color: "var(--text-secondary)",
-              lineHeight: 1.7,
-              fontStyle: "italic",
-            }}
-          >
-            AI 正在分析你的{title.replace("总结", "").replace("回顾", "").replace("总结", "")}记录，
-            生成专属总结... ✨
-          </p>
-        </div>
-
-        <div
-          style={{
-            padding: "20px",
-            background: "var(--bg-hover)",
-            borderRadius: "var(--radius-md)",
-            border: "1px solid var(--border-light)",
-          }}
-        >
-          <h4
-            style={{
-              fontSize: "0.875rem",
-              fontWeight: 600,
-              color: "var(--text-secondary)",
-              marginBottom: "12px",
-              display: "flex",
-              alignItems: "center",
-              gap: "6px",
-            }}
-          >
-            <TrendingUp style={{ width: "16px", height: "16px" }} />
-            高光时刻
-          </h4>
-          <ul
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "10px",
-            }}
-          >
-            {highlights.map((highlight, i) => (
-              <li
-                key={i}
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: "10px",
-                  fontSize: "0.9375rem",
-                  color: "var(--text-main)",
-                }}
-              >
-                <span
-                  style={{
-                    width: "6px",
-                    height: "6px",
-                    borderRadius: "50%",
-                    background: "var(--color-primary)",
-                    marginTop: "8px",
-                    flexShrink: 0,
-                  }}
-                />
-                {highlight}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </Card>
-
-      {/* Journal Entries List Placeholder */}
-      <Card
-        title="详细记录"
-        icon={<FileText style={{ width: "18px", height: "18px", color: "var(--color-primary)" }} />}
-      >
-        <div
-          style={{
-            textAlign: "center",
-            padding: "40px 20px",
-            color: "var(--text-muted)",
-          }}
-        >
-          <p>该时段的详细日记条目将在这里展示</p>
-          <p style={{ fontSize: "0.8125rem", marginTop: "8px" }}>
-            支持按心情、标签筛选
-          </p>
-        </div>
-      </Card>
-    </div>
+    </Card>
   );
 }

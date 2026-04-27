@@ -7,6 +7,7 @@ import { Sparkles, Send, Bot, Loader2, Zap, BookOpen, Lightbulb, Target, Clock, 
 import { PageContainer, PageContent, Card, LoadingState, EmptyState } from '../../components/Layout';
 import { detectClis } from '../../api/chat';
 import type { CliConfig } from '../../types/chat';
+import { isActionEnterKey, isComposingKeyboardEvent } from '../../core/keyboard';
 import { useStore } from '../../core/store';
 
 // 快捷指令配置
@@ -75,7 +76,9 @@ export function ChatHome({ onStartChat, isLoading: externalLoading = false }: Ch
   }, [input, isLoading, currentCli, onStartChat]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (isComposingKeyboardEvent(e)) return;
+
+    if (isActionEnterKey(e) && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
     }

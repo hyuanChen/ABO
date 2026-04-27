@@ -1,6 +1,7 @@
 import json
 from fastapi import WebSocket
 from ..sdk.types import Card
+from ..paper_cards import sanitize_feed_card_payload
 
 
 class Broadcaster:
@@ -16,7 +17,10 @@ class Broadcaster:
         print(f"[broadcaster] Client unregistered, total: {len(self._clients)}")
 
     async def send_card(self, card: Card):
-        await self._broadcast(json.dumps({"type": "new_card", "card": card.to_dict()}))
+        await self._broadcast(json.dumps({
+            "type": "new_card",
+            "card": sanitize_feed_card_payload(card.to_dict()),
+        }))
 
     async def send_event(self, event: dict):
         await self._broadcast(json.dumps(event))

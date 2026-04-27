@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { ExternalLink, Link2, Tag, Clock, Loader2, BookOpen } from "lucide-react";
 import { api } from "../../core/api";
+import { useToast } from "../../components/Toast";
 import type { WikiType } from "./Wiki";
 
 interface WikiPageData {
@@ -11,7 +12,7 @@ interface WikiPageData {
   content: string;
   tags: string[];
   sources: string[];
-  backlinks: string[];
+  backlinks: Array<string | { slug: string; title: string; category?: string }>;
   created: string;
   updated: string;
 }
@@ -82,9 +83,24 @@ function escapeHtml(text: string): string {
     .replace(/"/g, "&quot;");
 }
 
+function parseWikiLink(rawLink: string): { slug: string; label: string } | null {
+  const [targetPart, aliasPart] = rawLink.split("|");
+  const target = (targetPart ?? "").split("#")[0].trim();
+  const label = (aliasPart ?? targetPart ?? "").trim();
+  if (!target) return null;
+  const lastSegment = target.split("/").pop()?.trim() ?? "";
+  const slug = lastSegment
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9\u4e00-\u9fff-]/g, "");
+  if (!slug) return null;
+  return { slug, label: label || lastSegment };
+}
+
 // ── Component ──────────────────────────────────────────────────────────────
 
 export default function WikiPageView({ wikiType, slug, onNavigateToPage }: Props) {
+  const toast = useToast();
   const [page, setPage] = useState<WikiPageData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -119,9 +135,10 @@ export default function WikiPageView({ wikiType, slug, onNavigateToPage }: Props
     // Using a data attribute so we can handle clicks via delegation
     html = html.replace(
       /\[\[([^\]]+)\]\]/g,
-      (_match, linkText) => {
-        const linkSlug = linkText.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9\u4e00-\u9fff-]/g, "");
-        return `<span class="wiki-link" data-slug="${linkSlug}" style="color:var(--color-primary);cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px;font-weight:600">${linkText}</span>`;
+      (_match, rawLink) => {
+        const parsed = parseWikiLink(rawLink);
+        if (!parsed) return rawLink;
+        return `<span class="wiki-link" data-slug="${escapeHtml(parsed.slug)}" style="color:var(--color-primary);cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px;font-weight:600">${escapeHtml(parsed.label)}</span>`;
       }
     );
 
@@ -187,6 +204,12 @@ export default function WikiPageView({ wikiType, slug, onNavigateToPage }: Props
       </div>
     );
   }
+
+  const backlinks = page.backlinks.map((item) => (
+    typeof item === "string"
+      ? { slug: item, title: item }
+      : { slug: item.slug, title: item.title || item.slug }
+  ));
 
   return (
     <div
@@ -271,11 +294,12 @@ export default function WikiPageView({ wikiType, slug, onNavigateToPage }: Props
               更新于 {page.updated}
             </span>
             <button
-              onClick={() => {
-                const vaultName = "obsidian";
-                const wikiDir = wikiType === "intel" ? "Wiki-Intel" : "Wiki-Lit";
-                const filePath = `${wikiDir}/${slug}.md`;
-                window.location.href = `obsidian://open?vault=${vaultName}&file=${encodeURIComponent(filePath)}`;
+              onClick={async () => {
+                try {
+                  await api.post(`/api/wiki/${wikiType}/open`, { slug });
+                } catch (err) {
+                  toast.error("打开失败", err instanceof Error ? err.message : "请检查 Obsidian 路径");
+                }
               }}
               style={{
                 display: "inline-flex",
@@ -360,7 +384,7 @@ export default function WikiPageView({ wikiType, slug, onNavigateToPage }: Props
         )}
 
         {/* Backlinks section */}
-        {page.backlinks.length > 0 && (
+        {backlinks.length > 0 && (
           <div style={{ marginTop: "32px" }}>
             <div
               style={{
@@ -397,10 +421,10 @@ export default function WikiPageView({ wikiType, slug, onNavigateToPage }: Props
                 gap: "8px",
               }}
             >
-              {page.backlinks.map((bl) => (
+              {backlinks.map((bl) => (
                 <button
-                  key={bl}
-                  onClick={() => onNavigateToPage(bl)}
+                  key={bl.slug}
+                  onClick={() => onNavigateToPage(bl.slug)}
                   style={{
                     padding: "6px 14px",
                     borderRadius: "var(--radius-full)",
@@ -421,7 +445,7 @@ export default function WikiPageView({ wikiType, slug, onNavigateToPage }: Props
                     e.currentTarget.style.transform = "translateY(0)";
                   }}
                 >
-                  {bl}
+                  {bl.title}
                 </button>
               ))}
             </div>
@@ -550,6 +574,40 @@ function SourceItem({ source }: { source: string }) {
     );
   }
 
+  if (source.startsWith("folder:")) {
+    const folderPath = source.slice(7);
+    return (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "8px",
+          padding: "8px 12px",
+          borderRadius: "var(--radius-md)",
+          background: "var(--bg-hover)",
+          fontSize: "0.8125rem",
+          color: "var(--text-secondary)",
+        }}
+      >
+        <span
+          style={{
+            padding: "2px 8px",
+            borderRadius: "var(--radius-full)",
+            background: "rgba(143, 193, 255, 0.18)",
+            color: "#4D7DA8",
+            fontSize: "0.6875rem",
+            fontWeight: 600,
+          }}
+        >
+          文件夹
+        </span>
+        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {folderPath}
+        </span>
+      </div>
+    );
+  }
+
   // Fallback: raw text
   return (
     <div
@@ -570,6 +628,7 @@ function SourceItem({ source }: { source: string }) {
 
 function getCategoryColor(category: string, opacity: number): string {
   const colors: Record<string, string> = {
+    collection: `rgba(143, 193, 255, ${opacity})`,
     entity: `rgba(188, 164, 227, ${opacity})`,
     concept: `rgba(168, 230, 207, ${opacity})`,
     paper: `rgba(196, 181, 253, ${opacity})`,
@@ -581,6 +640,7 @@ function getCategoryColor(category: string, opacity: number): string {
 
 function getCategoryTextColor(category: string): string {
   const colors: Record<string, string> = {
+    collection: "#4D7DA8",
     entity: "#8B6DC0",
     concept: "#5BA88C",
     paper: "#7C6BB0",
@@ -592,6 +652,7 @@ function getCategoryTextColor(category: string): string {
 
 function getCategoryLabel(category: string): string {
   const labels: Record<string, string> = {
+    collection: "文件夹",
     entity: "实体",
     concept: "概念",
     paper: "论文",

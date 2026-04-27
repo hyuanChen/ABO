@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Folder, FileText, ArrowLeft, Clock, ExternalLink, FolderOpen } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
 import { api } from "../../core/api";
+import { readJsonStorage } from "../../core/storage";
 import { open } from "@tauri-apps/plugin-dialog";
 
 // Obsidian Icon SVG Component
@@ -26,7 +27,7 @@ interface VaultItem {
   modified: number;
 }
 
-interface FolderStats {
+interface ItemStats {
   itemCount: number;
   accessCount: number;
   lastAccessed: number;
@@ -57,23 +58,35 @@ function formatSize(bytes: number): string {
 }
 
 // Load folder stats from localStorage
-function getFolderStats(path: string): FolderStats {
+function getItemStats(path: string): ItemStats {
   const key = `vault-stats-${path}`;
-  const saved = localStorage.getItem(key);
-  if (saved) {
-    return JSON.parse(saved);
-  }
-  return { itemCount: 0, accessCount: 0, lastAccessed: 0 };
+  return readJsonStorage(key, { itemCount: 0, accessCount: 0, lastAccessed: 0 });
 }
 
-// Save folder access
-function recordFolderAccess(path: string, itemCount: number) {
+// Save file/folder access
+function recordItemAccess(path: string, itemCount: number) {
   const key = `vault-stats-${path}`;
-  const stats = getFolderStats(path);
+  const stats = getItemStats(path);
   stats.accessCount++;
   stats.lastAccessed = Date.now();
   stats.itemCount = itemCount;
   localStorage.setItem(key, JSON.stringify(stats));
+}
+
+function isUiFolderPath(path: string): boolean {
+  if (!path) return false;
+  const segments = path.split("/").filter(Boolean);
+  return segments[segments.length - 1]?.toLowerCase() === "ui";
+}
+
+function sortItemsForDisplay<T extends VaultItem>(items: T[], filesFirst: boolean): T[] {
+  return [...items].sort((a, b) => {
+    if (a.type !== b.type) {
+      if (filesFirst) return a.type === "file" ? -1 : 1;
+      return a.type === "folder" ? -1 : 1;
+    }
+    return a.name.localeCompare(b.name, "zh-CN", { numeric: true, sensitivity: "base" });
+  });
 }
 
 export default function BubbleVault() {
@@ -108,7 +121,7 @@ export default function BubbleVault() {
 
   function openFolder(item: VaultItem) {
     if (item.type === "folder") {
-      recordFolderAccess(item.path, items.filter(i => i.type === "file").length);
+      recordItemAccess(item.path, items.filter(i => i.type === "file").length);
       loadFolder(item.path);
     }
   }
@@ -116,6 +129,7 @@ export default function BubbleVault() {
   async function openWithSystem(item: VaultItem) {
     // Open file or folder with system default application (Finder)
     try {
+      recordItemAccess(item.path, item.size ?? 0);
       await api.post("/api/vault/open", { path: item.path });
     } catch (err) {
       console.error("Failed to open:", err);
@@ -170,12 +184,19 @@ export default function BubbleVault() {
   }
 
   const folders = items.filter((i) => i.type === "folder");
-  const files = items.filter((i) => i.type === "file");
+  const filesFirstInCurrentFolder = isUiFolderPath(currentPath);
+  const orderedItems = sortItemsForDisplay(items, filesFirstInCurrentFolder);
+  const orderedFiles = orderedItems.filter((item) => item.type === "file");
+  const orderedFolders = orderedItems.filter((item) => item.type === "folder");
 
   // Get stats for all folders
   const foldersWithStats = folders.map(folder => ({
     ...folder,
-    stats: getFolderStats(folder.path),
+    stats: getItemStats(folder.path),
+  }));
+  const orderedFoldersWithStats = orderedFolders.map((folder) => ({
+    ...folder,
+    stats: getItemStats(folder.path),
   }));
 
   // Sort by access count (popularity)
@@ -183,8 +204,19 @@ export default function BubbleVault() {
     (a, b) => b.stats.accessCount - a.stats.accessCount
   );
 
-  // Get hot folders (top 3 by access count)
-  const hotFolders = sortedFolders.slice(0, 3);
+  const hotItems = [...items]
+    .map((item) => ({
+      ...item,
+      stats: getItemStats(item.path),
+    }))
+    .filter((item) => item.stats.accessCount > 0)
+    .sort((a, b) => {
+      if (b.stats.accessCount !== a.stats.accessCount) {
+        return b.stats.accessCount - a.stats.accessCount;
+      }
+      return b.stats.lastAccessed - a.stats.lastAccessed;
+    })
+    .slice(0, 3);
 
   return (
     <PageContainer>
@@ -405,7 +437,7 @@ export default function BubbleVault() {
         )}
 
         {/* Hot Folders - Only show in root bubble view */}
-        {!currentPath && viewMode === "bubbles" && hotFolders.length > 0 && (
+        {!currentPath && viewMode === "bubbles" && hotItems.length > 0 && (
           <div style={{ marginBottom: "32px" }}>
             <h3
               style={{
@@ -422,23 +454,23 @@ export default function BubbleVault() {
               热门访问
             </h3>
             <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
-              {hotFolders.map((folder, index) => (
+              {hotItems.map((item, index) => (
                 <div
-                  key={folder.path}
+                  key={item.path}
                   style={{
                     display: "flex",
                     alignItems: "center",
                     gap: "12px",
                     padding: "16px 24px",
                     borderRadius: "var(--radius-lg)",
-                    background: getBubbleColor(folder.stats.itemCount || 5),
+                    background: getBubbleColor(item.stats.itemCount || 5),
                     color: "white",
                     boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
                     cursor: "pointer",
                     transition: "all 0.3s ease",
                     animation: `fadeInUp 0.5s ease ${index * 0.1}s both`,
                   }}
-                  onClick={() => openFolder(folder)}
+                  onClick={() => item.type === "folder" ? openFolder(item) : openWithSystem(item)}
                   onMouseEnter={(e) => {
                     e.currentTarget.style.transform = "translateY(-4px) scale(1.05)";
                     e.currentTarget.style.boxShadow = "0 8px 24px rgba(0,0,0,0.2)";
@@ -448,11 +480,15 @@ export default function BubbleVault() {
                     e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.15)";
                   }}
                 >
-                  <Folder style={{ width: "24px", height: "24px" }} />
+                  {item.type === "folder" ? (
+                    <Folder style={{ width: "24px", height: "24px" }} />
+                  ) : (
+                    <FileText style={{ width: "24px", height: "24px" }} />
+                  )}
                   <div>
-                    <div style={{ fontWeight: 700, fontSize: "1rem" }}>{folder.name}</div>
+                    <div style={{ fontWeight: 700, fontSize: "1rem" }}>{item.name}</div>
                     <div style={{ fontSize: "0.75rem", opacity: 0.9 }}>
-                      访问 {folder.stats.accessCount} 次
+                      {item.type === "folder" ? "文件夹" : "文件"} · 访问 {item.stats.accessCount} 次
                     </div>
                   </div>
                 </div>
@@ -465,7 +501,78 @@ export default function BubbleVault() {
         {viewMode === "bubbles" ? (
           <>
             {/* Folders - Bubble Grid */}
-            {folders.length > 0 && (
+            {filesFirstInCurrentFolder && orderedFiles.length > 0 && (
+              <div>
+                <h3
+                  style={{
+                    fontSize: "1rem",
+                    fontWeight: 700,
+                    color: "var(--text-main)",
+                    marginBottom: "16px",
+                  }}
+                >
+                  文件 ({orderedFiles.length}) - 点击用系统应用打开
+                </h3>
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: "16px",
+                    justifyContent: "flex-start",
+                    marginBottom: "32px",
+                  }}
+                >
+                  {orderedFiles.map((file, index) => (
+                    <button
+                      key={file.path}
+                      onClick={() => openWithSystem(file)}
+                      style={{
+                        width: "100px",
+                        height: "100px",
+                        borderRadius: "50%",
+                        background: "var(--bg-hover)",
+                        border: "2px dashed var(--border-light)",
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: "4px",
+                        cursor: "pointer",
+                        animation: `fadeInScale 0.5s ease ${index * 0.03}s both`,
+                        transition: "all 0.3s ease",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = "var(--bg-card)";
+                        e.currentTarget.style.borderColor = "var(--color-primary)";
+                        e.currentTarget.style.transform = "scale(1.05)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = "var(--bg-hover)";
+                        e.currentTarget.style.borderColor = "var(--border-light)";
+                        e.currentTarget.style.transform = "scale(1)";
+                      }}
+                    >
+                      <FileText style={{ width: "24px", height: "24px", color: "var(--color-primary)" }} />
+                      <span
+                        style={{
+                          fontSize: "0.7rem",
+                          color: "var(--text-main)",
+                          maxWidth: "80%",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          textAlign: "center",
+                        }}
+                      >
+                        {file.name}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {orderedFolders.length > 0 && (
               <div style={{ marginBottom: "32px" }}>
                 <h3
                   style={{
@@ -475,7 +582,7 @@ export default function BubbleVault() {
                     marginBottom: "16px",
                   }}
                 >
-                  文件夹 ({folders.length})
+                  文件夹 ({orderedFolders.length})
                 </h3>
                 <div
                   style={{
@@ -486,7 +593,7 @@ export default function BubbleVault() {
                     padding: "20px 0",
                   }}
                 >
-                  {sortedFolders.map((folder, index) => {
+                  {(filesFirstInCurrentFolder ? orderedFoldersWithStats : sortedFolders).map((folder, index) => {
                     const size = getBubbleSize(folder.stats.itemCount || 3);
 
                     return (
@@ -568,7 +675,7 @@ export default function BubbleVault() {
             )}
 
             {/* Files - Smaller bubbles with click to open */}
-            {files.length > 0 && (
+            {!filesFirstInCurrentFolder && orderedFiles.length > 0 && (
               <div>
                 <h3
                   style={{
@@ -578,7 +685,7 @@ export default function BubbleVault() {
                     marginBottom: "16px",
                   }}
                 >
-                  文件 ({files.length}) - 点击用系统应用打开
+                  文件 ({orderedFiles.length}) - 点击用系统应用打开
                 </h3>
                 <div
                   style={{
@@ -588,7 +695,7 @@ export default function BubbleVault() {
                     justifyContent: "flex-start",
                   }}
                 >
-                  {files.map((file, index) => (
+                  {orderedFiles.map((file, index) => (
                     <button
                       key={file.path}
                       onClick={() => openWithSystem(file)}
@@ -642,7 +749,7 @@ export default function BubbleVault() {
           /* List View */
           <Card>
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              {[...folders, ...files].map((item) => (
+              {orderedItems.map((item) => (
                 <button
                   key={item.path}
                   onClick={() => item.type === "folder" ? openFolder(item) : openWithSystem(item)}

@@ -13,6 +13,7 @@ import { Card } from "../../components/Layout";
 import ToggleSwitch from "../../components/ToggleSwitch";
 import { useToast } from "../../components/Toast";
 import { api } from "../../core/api";
+import { ArxivCategorySelector, type ArxivCategory } from "./ArxivCategorySelector";
 
 type KeywordMonitor = {
   id: string;
@@ -55,15 +56,69 @@ type FollowUpMonitorConfig = {
   sort_by: "recency" | "citation_count";
 };
 
+type CategoriesResponse = {
+  categories: ArxivCategory[];
+};
+
+const DEFAULT_ARXIV_MAIN = "cs";
+const DEFAULT_MONITOR_MAX_RESULTS = 20;
+const DEFAULT_ARXIV_DAYS_BACK = 30;
+const DEFAULT_FOLLOWUP_DAYS_BACK = 365;
+
 function makeLocalId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function normalizeCategories(input: string): string[] {
-  return input
-    .split(/[,，\n]+/)
-    .map((part) => part.trim())
-    .filter(Boolean);
+function dedupeStrings(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
+function getDefaultArxivSelectorCategories(availableCategories: ArxivCategory[]): string[] {
+  return availableCategories
+    .filter((category) => category.main === DEFAULT_ARXIV_MAIN)
+    .map((category) => category.code);
+}
+
+function compactSelectedArxivCategories(
+  selectedCategories: string[],
+  availableCategories: ArxivCategory[],
+): string[] {
+  if (!availableCategories.length) return [`${DEFAULT_ARXIV_MAIN}.*`];
+
+  const selectedSet = new Set(selectedCategories);
+  if (selectedSet.size === 0) return [`${DEFAULT_ARXIV_MAIN}.*`];
+
+  const grouped = availableCategories.reduce<Record<string, string[]>>((acc, category) => {
+    if (!acc[category.main]) acc[category.main] = [];
+    acc[category.main].push(category.code);
+    return acc;
+  }, {});
+
+  const compacted: string[] = [];
+  Object.keys(grouped)
+    .sort((a, b) => a.localeCompare(b))
+    .forEach((main) => {
+      const codes = grouped[main];
+      const selectedCodes = codes.filter((code) => selectedSet.has(code));
+      if (selectedCodes.length === 0) return;
+      if (selectedCodes.length === codes.length) {
+        compacted.push(`${main}.*`);
+        return;
+      }
+      compacted.push(...selectedCodes);
+    });
+
+  return compacted.length > 0 ? compacted : [`${DEFAULT_ARXIV_MAIN}.*`];
+}
+
+function formatCategoryTag(category: string): string {
+  return category.endsWith(".*") ? `${category.slice(0, -2).toUpperCase()} 全部领域` : category;
+}
+
+function clampInteger(value: string, min: number, max: number, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
 }
 
 function sectionHeaderStyle(): CSSProperties {
@@ -94,6 +149,8 @@ export default function PaperMonitorPanel() {
   const [loading, setLoading] = useState(true);
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [runningKey, setRunningKey] = useState<"arxiv" | "followup" | null>(null);
+  const [availableCategories, setAvailableCategories] = useState<ArxivCategory[]>([]);
+  const [expandedMainCategories, setExpandedMainCategories] = useState<Set<string>>(new Set());
 
   const [arxivConfig, setArxivConfig] = useState<ArxivMonitorConfig>({
     keyword_monitors: [],
@@ -102,36 +159,47 @@ export default function PaperMonitorPanel() {
   });
   const [followupConfig, setFollowupConfig] = useState<FollowUpMonitorConfig>({
     followup_monitors: [],
-    max_results: 20,
-    days_back: 365,
+    max_results: DEFAULT_MONITOR_MAX_RESULTS,
+    days_back: DEFAULT_FOLLOWUP_DAYS_BACK,
     sort_by: "recency",
   });
 
   const [keywordLabelDraft, setKeywordLabelDraft] = useState("");
   const [keywordQueryDraft, setKeywordQueryDraft] = useState("");
-  const [keywordCategoriesDraft, setKeywordCategoriesDraft] = useState("cs.AI, cs.LG");
+  const [keywordSelectedCategories, setKeywordSelectedCategories] = useState<string[]>([]);
   const [followupLabelDraft, setFollowupLabelDraft] = useState("");
   const [followupQueryDraft, setFollowupQueryDraft] = useState("");
+  const [arxivMaxResultsInput, setArxivMaxResultsInput] = useState(String(DEFAULT_MONITOR_MAX_RESULTS));
+  const [arxivDaysBackInput, setArxivDaysBackInput] = useState(String(DEFAULT_ARXIV_DAYS_BACK));
+  const [followupMaxResultsInput, setFollowupMaxResultsInput] = useState(String(DEFAULT_MONITOR_MAX_RESULTS));
+  const [followupDaysBackInput, setFollowupDaysBackInput] = useState(String(DEFAULT_FOLLOWUP_DAYS_BACK));
 
   async function loadConfigs() {
     setLoading(true);
     try {
-      const [arxivRes, followupRes] = await Promise.all([
+      const [arxivRes, followupRes, categoriesRes] = await Promise.all([
         api.get<ArxivConfigResponse>("/api/modules/arxiv-tracker/config"),
         api.get<FollowUpConfigResponse>("/api/modules/semantic-scholar-tracker/config"),
+        api.get<CategoriesResponse>("/api/modules/arxiv-tracker/categories"),
       ]);
+
+      const categories = categoriesRes.categories || [];
+      setAvailableCategories(categories);
 
       setArxivConfig({
         keyword_monitors: arxivRes.keyword_monitors || [],
-        max_results: Number(arxivRes.max_results || 20),
-        days_back: Number(arxivRes.days_back || 30),
+        max_results: Number(arxivRes.max_results || DEFAULT_MONITOR_MAX_RESULTS),
+        days_back: Number(arxivRes.days_back || DEFAULT_ARXIV_DAYS_BACK),
       });
       setFollowupConfig({
         followup_monitors: followupRes.followup_monitors || [],
-        max_results: Number(followupRes.max_results || 20),
-        days_back: Number(followupRes.days_back || 365),
+        max_results: Number(followupRes.max_results || DEFAULT_MONITOR_MAX_RESULTS),
+        days_back: Number(followupRes.days_back || DEFAULT_FOLLOWUP_DAYS_BACK),
         sort_by: followupRes.sort_by === "citation_count" ? "citation_count" : "recency",
       });
+      setKeywordSelectedCategories((current) =>
+        current.length > 0 ? current : getDefaultArxivSelectorCategories(categories),
+      );
     } catch (error) {
       toast.error("加载监控配置失败", error instanceof Error ? error.message : "请稍后重试");
     } finally {
@@ -142,6 +210,23 @@ export default function PaperMonitorPanel() {
   useEffect(() => {
     loadConfigs();
   }, []);
+
+  useEffect(() => {
+    if (!availableCategories.length) return;
+    setKeywordSelectedCategories((current) =>
+      current.length > 0 ? current : getDefaultArxivSelectorCategories(availableCategories),
+    );
+  }, [availableCategories]);
+
+  useEffect(() => {
+    setArxivMaxResultsInput(String(arxivConfig.max_results));
+    setArxivDaysBackInput(String(arxivConfig.days_back));
+  }, [arxivConfig.max_results, arxivConfig.days_back]);
+
+  useEffect(() => {
+    setFollowupMaxResultsInput(String(followupConfig.max_results));
+    setFollowupDaysBackInput(String(followupConfig.days_back));
+  }, [followupConfig.max_results, followupConfig.days_back]);
 
   async function persistArxivConfig(nextConfig: ArxivMonitorConfig, successMessage?: string) {
     setSavingKey("arxiv");
@@ -189,6 +274,60 @@ export default function PaperMonitorPanel() {
     }
   }
 
+  async function commitArxivNumericField(field: "max_results" | "days_back") {
+    const isMaxResults = field === "max_results";
+    const rawValue = isMaxResults ? arxivMaxResultsInput : arxivDaysBackInput;
+    const previousValue = isMaxResults ? arxivConfig.max_results : arxivConfig.days_back;
+
+    if (!rawValue.trim()) {
+      toast.error(isMaxResults ? "每项最多不能为空" : "最近天数不能为空");
+      if (isMaxResults) setArxivMaxResultsInput(String(previousValue));
+      else setArxivDaysBackInput(String(previousValue));
+      return;
+    }
+
+    const nextValue = isMaxResults
+      ? clampInteger(rawValue, 1, 100, DEFAULT_MONITOR_MAX_RESULTS)
+      : clampInteger(rawValue, 1, 3650, DEFAULT_ARXIV_DAYS_BACK);
+
+    if (isMaxResults) setArxivMaxResultsInput(String(nextValue));
+    else setArxivDaysBackInput(String(nextValue));
+
+    if (nextValue === previousValue) return;
+
+    await persistArxivConfig({
+      ...arxivConfig,
+      [field]: nextValue,
+    });
+  }
+
+  async function commitFollowupNumericField(field: "max_results" | "days_back") {
+    const isMaxResults = field === "max_results";
+    const rawValue = isMaxResults ? followupMaxResultsInput : followupDaysBackInput;
+    const previousValue = isMaxResults ? followupConfig.max_results : followupConfig.days_back;
+
+    if (!rawValue.trim()) {
+      toast.error(isMaxResults ? "每项最多不能为空" : "最近天数不能为空");
+      if (isMaxResults) setFollowupMaxResultsInput(String(previousValue));
+      else setFollowupDaysBackInput(String(previousValue));
+      return;
+    }
+
+    const nextValue = isMaxResults
+      ? clampInteger(rawValue, 1, 500, DEFAULT_MONITOR_MAX_RESULTS)
+      : clampInteger(rawValue, 1, 3650, DEFAULT_FOLLOWUP_DAYS_BACK);
+
+    if (isMaxResults) setFollowupMaxResultsInput(String(nextValue));
+    else setFollowupDaysBackInput(String(nextValue));
+
+    if (nextValue === previousValue) return;
+
+    await persistFollowupConfig({
+      ...followupConfig,
+      [field]: nextValue,
+    });
+  }
+
   async function addKeywordMonitor() {
     const query = keywordQueryDraft.trim();
     if (!query) {
@@ -196,11 +335,15 @@ export default function PaperMonitorPanel() {
       return;
     }
 
+    const selectedCategories = keywordSelectedCategories.length > 0
+      ? keywordSelectedCategories
+      : getDefaultArxivSelectorCategories(availableCategories);
+
     const nextMonitor: KeywordMonitor = {
       id: makeLocalId("keyword"),
       label: keywordLabelDraft.trim() || query,
       query,
-      categories: normalizeCategories(keywordCategoriesDraft),
+      categories: compactSelectedArxivCategories(selectedCategories, availableCategories),
       enabled: true,
     };
 
@@ -220,6 +363,7 @@ export default function PaperMonitorPanel() {
     await persistArxivConfig(nextConfig, `新增 ${nextMonitor.label}`);
     setKeywordLabelDraft("");
     setKeywordQueryDraft("");
+    setKeywordSelectedCategories(getDefaultArxivSelectorCategories(availableCategories));
   }
 
   async function addFollowupMonitor() {
@@ -367,14 +511,9 @@ export default function PaperMonitorPanel() {
                   type="number"
                   min={1}
                   max={100}
-                  value={arxivConfig.max_results}
-                  onChange={(event) =>
-                    setArxivConfig((current) => ({
-                      ...current,
-                      max_results: Math.min(100, Math.max(1, Number(event.target.value) || 20)),
-                    }))
-                  }
-                  onBlur={() => persistArxivConfig(arxivConfig)}
+                  value={arxivMaxResultsInput}
+                  onChange={(event) => setArxivMaxResultsInput(event.target.value)}
+                  onBlur={() => void commitArxivNumericField("max_results")}
                   style={{
                     height: "38px",
                     padding: "8px 12px",
@@ -394,14 +533,9 @@ export default function PaperMonitorPanel() {
                   type="number"
                   min={1}
                   max={3650}
-                  value={arxivConfig.days_back}
-                  onChange={(event) =>
-                    setArxivConfig((current) => ({
-                      ...current,
-                      days_back: Math.min(3650, Math.max(1, Number(event.target.value) || 30)),
-                    }))
-                  }
-                  onBlur={() => persistArxivConfig(arxivConfig)}
+                  value={arxivDaysBackInput}
+                  onChange={(event) => setArxivDaysBackInput(event.target.value)}
+                  onBlur={() => void commitArxivNumericField("days_back")}
                   style={{
                     height: "38px",
                     padding: "8px 12px",
@@ -478,7 +612,7 @@ export default function PaperMonitorPanel() {
                               fontWeight: 600,
                             }}
                           >
-                            {category}
+                            {formatCategoryTag(category)}
                           </span>
                         ))}
                       </div>
@@ -543,21 +677,53 @@ export default function PaperMonitorPanel() {
                   fontSize: "0.875rem",
                 }}
               />
-              <input
-                type="text"
-                value={keywordCategoriesDraft}
-                onChange={(event) => setKeywordCategoriesDraft(event.target.value)}
-                placeholder="领域代码，例如：cs.AI, cs.LG"
+              <div
                 style={{
-                  height: "40px",
-                  padding: "0 12px",
+                  padding: "12px",
                   borderRadius: "8px",
                   border: "1px solid var(--border-light)",
                   background: "var(--bg-app)",
-                  color: "var(--text-main)",
-                  fontSize: "0.875rem",
                 }}
-              />
+              >
+                <ArxivCategorySelector
+                  availableCategories={availableCategories}
+                  selectedCategories={keywordSelectedCategories}
+                  expandedMainCategories={expandedMainCategories}
+                  onToggleCategory={(category) =>
+                    setKeywordSelectedCategories((current) => {
+                      const next = current.includes(category)
+                        ? current.filter((item) => item !== category)
+                        : [...current, category];
+                      return dedupeStrings(next);
+                    })
+                  }
+                  onToggleMainCategory={(main) => {
+                    const codes = availableCategories
+                      .filter((category) => category.main === main)
+                      .map((category) => category.code);
+                    setKeywordSelectedCategories((current) => {
+                      const currentSet = new Set(current);
+                      const allSelected = codes.length > 0 && codes.every((code) => currentSet.has(code));
+                      if (allSelected) {
+                        return current.filter((code) => !codes.includes(code));
+                      }
+                      return dedupeStrings([...current, ...codes]);
+                    });
+                  }}
+                  onToggleMainCategoryExpanded={(main) =>
+                    setExpandedMainCategories((current) => {
+                      const next = new Set(current);
+                      if (next.has(main)) next.delete(main);
+                      else next.add(main);
+                      return next;
+                    })
+                  }
+                  label="关注领域"
+                  helperText="默认已选 Computer Science 全部领域。你也可以切到其他学科，按标签精细控制爬取范围。"
+                  maxHeight={240}
+                  disabled={savingKey === "arxiv"}
+                />
+              </div>
             </div>
 
             <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
@@ -638,14 +804,9 @@ export default function PaperMonitorPanel() {
                   type="number"
                   min={1}
                   max={500}
-                  value={followupConfig.max_results}
-                  onChange={(event) =>
-                    setFollowupConfig((current) => ({
-                      ...current,
-                      max_results: Math.min(500, Math.max(1, Number(event.target.value) || 20)),
-                    }))
-                  }
-                  onBlur={() => persistFollowupConfig(followupConfig)}
+                  value={followupMaxResultsInput}
+                  onChange={(event) => setFollowupMaxResultsInput(event.target.value)}
+                  onBlur={() => void commitFollowupNumericField("max_results")}
                   style={{
                     height: "38px",
                     padding: "8px 12px",
@@ -665,14 +826,9 @@ export default function PaperMonitorPanel() {
                   type="number"
                   min={1}
                   max={3650}
-                  value={followupConfig.days_back}
-                  onChange={(event) =>
-                    setFollowupConfig((current) => ({
-                      ...current,
-                      days_back: Math.min(3650, Math.max(1, Number(event.target.value) || 365)),
-                    }))
-                  }
-                  onBlur={() => persistFollowupConfig(followupConfig)}
+                  value={followupDaysBackInput}
+                  onChange={(event) => setFollowupDaysBackInput(event.target.value)}
+                  onBlur={() => void commitFollowupNumericField("days_back")}
                   style={{
                     height: "38px",
                     padding: "8px 12px",

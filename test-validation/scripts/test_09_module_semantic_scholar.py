@@ -19,7 +19,7 @@ class TestSemanticScholarTrackerCreation:
 
         assert tracker.id == "semantic-scholar-tracker"
         assert tracker.name == "Semantic Scholar 后续论文"
-        assert tracker.schedule == "0 10 * * *"
+        assert tracker.schedule == "0 9 * * *"
         assert tracker.icon == "git-branch"
 
     def test_tracker_has_default_api_key(self):
@@ -71,7 +71,7 @@ class TestSemanticScholarPaperToItem:
             "externalIds": {"ArXiv": "2401.12345"}
         }
 
-        item = tracker._paper_to_item(paper, source_paper_title="Original Paper")
+        item = tracker._paper_to_item(paper, source_paper={"title": "Original Paper"})
 
         assert item.id == "2401.12345"  # Uses arXiv ID
         assert item.raw["title"] == "Test Paper Title"
