@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState } from "../../components/Layout";
 import { api } from "../../core/api";
+import { FEED_WS_MESSAGE_EVENT, type FeedRealtimePayload } from "../../core/feedRealtime";
 import { isActionEnterKey } from "../../core/keyboard";
 import { withLocationSuffix } from "../../core/pathDisplay";
 import { useToast } from "../../components/Toast";
@@ -201,8 +202,6 @@ export default function ArxivTracker() {
   const [expandedMainCategories, setExpandedMainCategories] = useState<Set<string>>(() => new Set(["cs"]));
 
   const toast = useToast();
-  const wsRef = useRef<WebSocket | null>(null);
-  const wsConnectedRef = useRef<boolean>(false);
   const saveSinglePaperRef = useRef<((paper: ArxivPaper) => Promise<void>) | null>(null);
   const saveSingleS2PaperRef = useRef<((paper: SemanticScholarPaper) => Promise<void>) | null>(null);
   const savedPapersRef = useRef<Set<string>>(new Set());
@@ -267,216 +266,168 @@ export default function ArxivTracker() {
     crawlSessionIdRef.current = crawlSessionId;
   }, [crawlSessionId]);
 
-  // WebSocket connection with reconnect logic
   useEffect(() => {
-    let ws: WebSocket | null = null;
-    let reconnectTimeout: ReturnType<typeof setTimeout>;
-    let isActive = true;
+    const handleRealtimeEvent = (event: Event) => {
+      const customEvent = event as CustomEvent<FeedRealtimePayload>;
+      const data = customEvent.detail;
+      try {
+        const store = useStore.getState();
+        const shouldAutoSave = autoSaveRef.current;
+        const hasLiteraturePath = !!(store.config?.literature_path || store.config?.vault_path);
+        const isSemanticScholarEvent = data.module === "semantic-scholar-tracker";
 
-    const connect = () => {
-      if (!isActive) return;
-
-      console.log("[arXiv] Connecting to WebSocket...");
-      ws = new WebSocket("ws://127.0.0.1:8765/ws/feed");
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        console.log("[arXiv] WebSocket connected");
-        wsConnectedRef.current = true;
-      };
-
-      ws.onerror = (error) => {
-        // Only log errors if not intentionally closing
-        if (isActive) {
-          console.error("[arXiv] WebSocket error:", error);
-        }
-        wsConnectedRef.current = false;
-      };
-
-      ws.onclose = (event) => {
-        // 1000 = normal closure, 1001 = going away (page refresh), 1005 = no status, 1006 = abnormal
-        const isNormalClose = [1000, 1001].includes(event.code);
-        if (!isNormalClose && isActive) {
-          console.log(`[arXiv] WebSocket closed (code: ${event.code}), reconnecting...`);
-        }
-        wsConnectedRef.current = false;
-        // Reconnect after 3 seconds if still active
-        if (isActive) {
-          reconnectTimeout = setTimeout(connect, 3000);
-        }
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          const store = useStore.getState();
-          const shouldAutoSave = autoSaveRef.current;
-          const hasLiteraturePath = !!(store.config?.literature_path || store.config?.vault_path);
-          const isSemanticScholarEvent = data.module === "semantic-scholar-tracker";
-
-          console.log("[arXiv] WS message:", data.type, data);
-
-          if (data.type === "crawl_started" && !isSemanticScholarEvent) {
-            // Store session ID for cancellation
-            if (data.session_id) {
-              setCrawlSessionId(data.session_id);
-              crawlSessionIdRef.current = data.session_id;
+        if (data.type === "crawl_started" && !isSemanticScholarEvent) {
+          if (data.session_id) {
+            setCrawlSessionId(String(data.session_id));
+            crawlSessionIdRef.current = String(data.session_id);
+          }
+        } else if (data.type === "crawl_cancelling" && !isSemanticScholarEvent) {
+          const currentProgress = store.arxivAndProgress;
+          setArxivAndProgress({
+            current: currentProgress?.current ?? 0,
+            total: currentProgress?.total ?? 0,
+            phase: currentProgress?.phase ?? "fetching",
+            message: String(data.message || "正在取消爬取任务..."),
+            currentPaperTitle: currentProgress?.currentPaperTitle,
+          });
+        } else if (data.type === "crawl_cancelled" && !isSemanticScholarEvent) {
+          toast.info("已取消", String(data.message || "爬取任务已取消"));
+          setArxivAndCrawling(false);
+          setArxivAndProgress(null);
+          crawlingIdRef.current = null;
+          setCrawlingMode(null);
+          setCrawlSessionId(null);
+          crawlSessionIdRef.current = null;
+        } else if (data.type === "crawl_progress" && !isSemanticScholarEvent) {
+          const progress: CrawlProgress = {
+            current: Number(data.current || 0),
+            total: Number(data.total ?? 0),
+            phase: (data.phase as CrawlProgress["phase"]) || "fetching",
+            message: typeof data.message === "string" ? data.message : undefined,
+            currentPaperTitle: typeof data.currentPaperTitle === "string" ? data.currentPaperTitle : undefined,
+          };
+          setArxivAndProgress(progress);
+        } else if (data.type === "crawl_paper" && !isSemanticScholarEvent) {
+          const paper = data.paper as ArxivPaper | undefined;
+          if (!paper) return;
+          const exists = store.arxivAndPapers.find((entry) => entry.id === paper.id);
+          if (!exists) {
+            store.appendArxivAndPaper(paper);
+            if (paper.metadata?.saved_to_literature) {
+              setSavedPapers((prev) => new Set(prev).add(paper.id));
             }
-          } else if (data.type === "crawl_cancelling" && !isSemanticScholarEvent) {
-            const store = useStore.getState();
-            const currentProgress = store.arxivAndProgress;
-            setArxivAndProgress({
-              current: currentProgress?.current ?? 0,
-              total: currentProgress?.total ?? 0,
-              phase: currentProgress?.phase ?? "fetching",
-              message: data.message || "正在取消爬取任务...",
-              currentPaperTitle: currentProgress?.currentPaperTitle,
-            });
-          } else if (data.type === "crawl_cancelled" && !isSemanticScholarEvent) {
-            toast.info("已取消", data.message || "爬取任务已取消");
-            setArxivAndCrawling(false);
-            setArxivAndProgress(null);
-            crawlingIdRef.current = null;
-            setCrawlingMode(null);
-            setCrawlSessionId(null);
-            crawlSessionIdRef.current = null;
-          } else if (data.type === "crawl_progress" && !isSemanticScholarEvent) {
-            const progress: CrawlProgress = {
-              current: data.current || 0,
-              total: data.total ?? 0,
-              phase: data.phase,
-              message: data.message,
-              currentPaperTitle: data.currentPaperTitle,
-            };
-            setArxivAndProgress(progress);
-          } else if (data.type === "crawl_paper" && !isSemanticScholarEvent) {
-            console.log("[arXiv] Received paper:", data.paper?.id, "mode:", crawlingModeRef.current || crawlingIdRef.current);
-            const exists = store.arxivAndPapers.find(p => p.id === data.paper.id);
-            if (!exists) {
-              console.log("[arXiv] Adding to search list");
-              store.appendArxivAndPaper(data.paper);
-              if (data.paper?.metadata?.saved_to_literature) {
-                setSavedPapers((prev) => new Set(prev).add(data.paper.id));
+            if (
+              shouldAutoSave &&
+              hasLiteraturePath &&
+              saveSinglePaperRef.current &&
+              !savedPapersRef.current.has(paper.id)
+            ) {
+              void saveSinglePaperRef.current(paper);
+            }
+          }
+        } else if (data.type === "crawl_complete" && !isSemanticScholarEvent) {
+          toast.success("爬取完成", `共找到 ${Number(data.count || 0)} 篇论文`);
+          setArxivAndCrawling(false);
+          setArxivAndProgress(null);
+          crawlingIdRef.current = null;
+          setCrawlingMode(null);
+        } else if (data.type === "crawl_error" && !isSemanticScholarEvent) {
+          toast.error("爬取失败", String(data.error || "未知错误"));
+          setArxivAndCrawling(false);
+          setArxivAndProgress(null);
+          crawlingIdRef.current = null;
+          setCrawlingMode(null);
+        } else if (data.type === "s2_progress") {
+          setSemanticScholarProgress({
+            current: Number(data.current || 0),
+            total: Number(data.total || 20),
+            phase: (data.phase as CrawlProgress["phase"]) || "fetching",
+            message: typeof data.message === "string" ? data.message : undefined,
+            currentPaperTitle: typeof data.currentPaperTitle === "string" ? data.currentPaperTitle : undefined,
+          });
+        } else if (data.type === "s2_paper") {
+          const paper = data.paper as SemanticScholarPaper | undefined;
+          if (!paper) return;
+          if (!store.semanticScholarPapers.find((entry) => entry.id === paper.id)) {
+            store.appendSemanticScholarPaper(paper);
+            if (paper.metadata?.saved_to_literature) {
+              _setSavedS2Papers((prev) => new Set(prev).add(paper.id));
+            }
+          }
+        } else if (data.type === "s2_complete") {
+          setSemanticScholarCrawling(false);
+          setSemanticScholarProgress(null);
+          toast.success("Semantic Scholar 爬取完成", `共获取 ${Number(data.count || 0)} 篇相关论文`);
+        } else if (data.type === "s2_error") {
+          setSemanticScholarCrawling(false);
+          setSemanticScholarProgress(null);
+          toast.error("Semantic Scholar 爬取失败", String(data.error || "未知错误"));
+        }
+
+        if (isSemanticScholarEvent) {
+          if (data.type === "crawl_started") {
+            setSemanticScholarCrawling(true);
+            if (data.session_id) {
+              s2SessionIdRef.current = String(data.session_id);
+            }
+          } else if (data.type === "crawl_paper") {
+            const paper = data.paper as SemanticScholarPaper | undefined;
+            if (!paper) return;
+            if (!store.semanticScholarPapers.find((entry) => entry.id === paper.id)) {
+              store.appendSemanticScholarPaper(paper);
+              if (paper.metadata?.saved_to_literature) {
+                _setSavedS2Papers((prev) => new Set(prev).add(paper.id));
               }
               if (
                 shouldAutoSave &&
                 hasLiteraturePath &&
-                saveSinglePaperRef.current &&
-                !savedPapersRef.current.has(data.paper.id)
+                saveSingleS2PaperRef.current &&
+                !paper.metadata?.saved_to_literature &&
+                !savedS2PapersRef.current.has(paper.id)
               ) {
-                saveSinglePaperRef.current(data.paper);
+                void saveSingleS2PaperRef.current(paper);
               }
             }
-          } else if (data.type === "crawl_complete" && !isSemanticScholarEvent) {
-            console.log("[arXiv] Crawl complete:", data.count);
-            toast.success("爬取完成", `共找到 ${data.count} 篇论文`);
-            setArxivAndCrawling(false);
-            setArxivAndProgress(null);
-            crawlingIdRef.current = null;
-            setCrawlingMode(null);
-          } else if (data.type === "crawl_error" && !isSemanticScholarEvent) {
-            console.error("[arXiv] Crawl error:", data.error);
-            toast.error("爬取失败", data.error);
-            setArxivAndCrawling(false);
-            setArxivAndProgress(null);
-            crawlingIdRef.current = null;
-            setCrawlingMode(null);
-          } else if (data.type === "s2_progress") {
+          } else if (data.type === "crawl_complete") {
+            setSemanticScholarCrawling(false);
+            setSemanticScholarProgress(null);
+            s2SessionIdRef.current = null;
+            toast.success("后续论文爬取完成", `共获取 ${Number(data.count || 0)} 篇论文`);
+          } else if (data.type === "crawl_error") {
+            setSemanticScholarCrawling(false);
+            setSemanticScholarProgress(null);
+            s2SessionIdRef.current = null;
+            toast.error("后续论文爬取失败", String(data.error || "未知错误"));
+          } else if (data.type === "crawl_cancelled") {
+            setSemanticScholarCrawling(false);
+            setSemanticScholarProgress(null);
+            s2SessionIdRef.current = null;
+            toast.info("已取消爬取");
+          } else if (data.type === "crawl_cancelling") {
+            const currentProgress = store.semanticScholarProgress;
             setSemanticScholarProgress({
-              current: data.current || 0,
-              total: data.total || 20,
-              phase: data.phase,
-              message: data.message,
-              currentPaperTitle: data.currentPaperTitle,
+              current: currentProgress?.current || 0,
+              total: currentProgress?.total || 0,
+              phase: currentProgress?.phase || "fetching",
+              message: String(data.message || "正在取消爬取任务..."),
             });
-          } else if (data.type === "s2_paper") {
-            const store = useStore.getState();
-            if (!store.semanticScholarPapers.find((p) => p.id === data.paper.id)) {
-              store.appendSemanticScholarPaper(data.paper);
-              if (data.paper?.metadata?.saved_to_literature) {
-                _setSavedS2Papers((prev) => new Set(prev).add(data.paper.id));
-              }
-            }
-          } else if (data.type === "s2_complete") {
-            setSemanticScholarCrawling(false);
-            setSemanticScholarProgress(null);
-            toast.success("Semantic Scholar 爬取完成", `共获取 ${data.count} 篇相关论文`);
-          } else if (data.type === "s2_error") {
-            setSemanticScholarCrawling(false);
-            setSemanticScholarProgress(null);
-            toast.error("Semantic Scholar 爬取失败", data.error);
+          } else if (data.type === "crawl_progress") {
+            setSemanticScholarProgress({
+              current: Number(data.current || 0),
+              total: Number(data.total || 0),
+              phase: (data.phase as CrawlProgress["phase"]) || "fetching",
+              message: typeof data.message === "string" ? data.message : undefined,
+            });
           }
-
-          // Handle new semantic-scholar-tracker module messages
-          if (isSemanticScholarEvent) {
-            if (data.type === "crawl_started") {
-              setSemanticScholarCrawling(true);
-              if (data.session_id) {
-                s2SessionIdRef.current = data.session_id;
-              }
-            } else if (data.type === "crawl_paper") {
-              if (!store.semanticScholarPapers.find((p) => p.id === data.paper.id)) {
-                store.appendSemanticScholarPaper(data.paper);
-                if (data.paper?.metadata?.saved_to_literature) {
-                  _setSavedS2Papers((prev) => new Set(prev).add(data.paper.id));
-                }
-                if (
-                  shouldAutoSave &&
-                  hasLiteraturePath &&
-                  saveSingleS2PaperRef.current &&
-                  !data.paper?.metadata?.saved_to_literature &&
-                  !savedS2PapersRef.current.has(data.paper.id)
-                ) {
-                  saveSingleS2PaperRef.current(data.paper);
-                }
-              }
-            } else if (data.type === "crawl_complete") {
-              setSemanticScholarCrawling(false);
-              setSemanticScholarProgress(null);
-              s2SessionIdRef.current = null;
-              toast.success("后续论文爬取完成", `共获取 ${data.count} 篇论文`);
-            } else if (data.type === "crawl_error") {
-              setSemanticScholarCrawling(false);
-              setSemanticScholarProgress(null);
-              s2SessionIdRef.current = null;
-              toast.error("后续论文爬取失败", data.error);
-            } else if (data.type === "crawl_cancelled") {
-              setSemanticScholarCrawling(false);
-              setSemanticScholarProgress(null);
-              s2SessionIdRef.current = null;
-              toast.info("已取消爬取");
-            } else if (data.type === "crawl_cancelling") {
-              const store = useStore.getState();
-              const currentProgress = store.semanticScholarProgress;
-              setSemanticScholarProgress({
-                current: currentProgress?.current || 0,
-                total: currentProgress?.total || 0,
-                phase: currentProgress?.phase || "fetching",
-                message: data.message || "正在取消爬取任务...",
-              });
-            } else if (data.type === "crawl_progress") {
-              setSemanticScholarProgress({
-                current: data.current || 0,
-                total: data.total || 0,
-                phase: data.phase,
-                message: data.message,
-              });
-            }
-          }
-        } catch (err) {
-          console.error("[arXiv] Error handling message:", err);
         }
-      };
+      } catch (err) {
+        console.error("[arXiv] Error handling realtime event:", err);
+      }
     };
 
-    connect();
-
+    window.addEventListener(FEED_WS_MESSAGE_EVENT, handleRealtimeEvent as EventListener);
     return () => {
-      isActive = false;
-      clearTimeout(reconnectTimeout);
-      if (ws) {
-        ws.close();
-      }
+      window.removeEventListener(FEED_WS_MESSAGE_EVENT, handleRealtimeEvent as EventListener);
     };
   }, [])
 

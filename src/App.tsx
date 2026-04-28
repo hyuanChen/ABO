@@ -9,10 +9,16 @@ import { CommandPalette } from "./components/CommandPalette";
 import { GlobalSearch } from "./components/Search";
 import WindowDragHandle from "./components/WindowDragHandle";
 import HealthReminderDaemon from "./components/HealthReminderDaemon";
-import { useStore, FeedModule } from "./core/store";
+import { useStore, FeedCard, FeedModule } from "./core/store";
 import { api } from "./core/api";
 import { bilibiliCancelAllKnownTasks, bilibiliCancelAllKnownTasksSilently } from "./api/bilibili";
 import AppErrorBoundary from "./components/AppErrorBoundary";
+import { FEED_WS_MESSAGE_EVENT } from "./core/feedRealtime";
+
+const FEED_SYNC_LIMIT = 500;
+const FEED_IDLE_SYNC_INTERVAL_MS = 12000;
+const FEED_ACTIVE_SYNC_INTERVAL_MS = 3500;
+const FEED_ACTIVE_SYNC_BOOST_MS = 30000;
 
 interface AppConfig {
   vault_path: string;
@@ -33,6 +39,10 @@ interface AppConfig {
 export default function App() {
   const setConfig = useStore((s) => s.setConfig);
   const setFeedModules = useStore((s) => s.setFeedModules);
+  const setFeedCards = useStore((s) => s.setFeedCards);
+  const prependCard = useStore((s) => s.prependCard);
+  const setUnreadCounts = useStore((s) => s.setUnreadCounts);
+  const setFeedRealtimeStatus = useStore((s) => s.setFeedRealtimeStatus);
   const showcaseMode = useStore((s) => s.showcaseMode);
   const activeTab = useStore((s) => s.activeTab);
   const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
@@ -78,6 +88,216 @@ export default function App() {
         .catch(() => {});
     }
   }, [setFeedModules, onboardingCompleted]);
+
+  useEffect(() => {
+    if (!onboardingCompleted) return;
+
+    let disposed = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    let heartbeatTimer: number | null = null;
+    let syncTimer: number | null = null;
+    let activeSyncBoostUntil = 0;
+    const burstSyncTimers = new Set<number>();
+
+    const clearHeartbeat = () => {
+      if (heartbeatTimer !== null) {
+        window.clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+    };
+
+    const clearSyncTimer = () => {
+      if (syncTimer !== null) {
+        window.clearTimeout(syncTimer);
+        syncTimer = null;
+      }
+    };
+
+    const clearBurstSyncTimers = () => {
+      burstSyncTimers.forEach((timerId) => window.clearTimeout(timerId));
+      burstSyncTimers.clear();
+    };
+
+    const syncFeedState = async () => {
+      const [cardsResult, unreadCountsResult] = await Promise.allSettled([
+        api.get<{ cards: FeedCard[] }>(`/api/cards?unread_only=true&limit=${FEED_SYNC_LIMIT}`),
+        api.get<Record<string, number>>("/api/cards/unread-counts"),
+      ]);
+
+      if (cardsResult.status === "fulfilled") {
+        setFeedCards(cardsResult.value.cards || []);
+      }
+      if (unreadCountsResult.status === "fulfilled") {
+        setUnreadCounts(unreadCountsResult.value || {});
+      }
+    };
+
+    const scheduleNextPeriodicSync = () => {
+      if (disposed) return;
+      clearSyncTimer();
+      const nextDelay = Date.now() < activeSyncBoostUntil
+        ? FEED_ACTIVE_SYNC_INTERVAL_MS
+        : FEED_IDLE_SYNC_INTERVAL_MS;
+      syncTimer = window.setTimeout(() => {
+        syncTimer = null;
+        void syncFeedState().finally(() => {
+          scheduleNextPeriodicSync();
+        });
+      }, nextDelay);
+    };
+
+    const startActiveSyncBoost = (durationMs = FEED_ACTIVE_SYNC_BOOST_MS) => {
+      activeSyncBoostUntil = Math.max(activeSyncBoostUntil, Date.now() + durationMs);
+      scheduleNextPeriodicSync();
+    };
+
+    const scheduleSyncBurst = (delays: number[]) => {
+      delays.forEach((delayMs) => {
+        const timerId = window.setTimeout(() => {
+          burstSyncTimers.delete(timerId);
+          if (disposed) return;
+          void syncFeedState();
+        }, delayMs);
+        burstSyncTimers.add(timerId);
+      });
+    };
+
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer !== null) return;
+      setFeedRealtimeStatus("reconnecting");
+      startActiveSyncBoost(15000);
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connectRealtimeFeed();
+      }, 1500);
+    };
+
+    const connectRealtimeFeed = () => {
+      if (disposed) return;
+      clearHeartbeat();
+      setFeedRealtimeStatus(reconnectTimer === null ? "connecting" : "reconnecting");
+      ws = new WebSocket("ws://127.0.0.1:8765/ws/feed");
+
+      ws.onopen = () => {
+        setFeedRealtimeStatus("connected");
+        clearHeartbeat();
+        startActiveSyncBoost(10000);
+        scheduleSyncBurst([400, 1400]);
+        heartbeatTimer = window.setInterval(() => {
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: "ping",
+              timestamp: new Date().toISOString(),
+            }));
+          }
+        }, 15000);
+        void syncFeedState();
+      };
+
+      ws.onclose = () => {
+        clearHeartbeat();
+        if (disposed) return;
+        scheduleReconnect();
+      };
+
+      ws.onerror = () => {
+        if (disposed) return;
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+          ws.close();
+        }
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "pong") {
+            return;
+          }
+          window.dispatchEvent(new CustomEvent(FEED_WS_MESSAGE_EVENT, { detail: data }));
+          if (data.type === "new_card" && data.card) {
+            startActiveSyncBoost();
+            scheduleSyncBurst([250, 1000, 2500]);
+            const nextCard = data.card;
+            const store = useStore.getState();
+            const alreadyExists = store.feedCards.some((card) => card.id === nextCard.id);
+            prependCard(nextCard);
+            if (!alreadyExists) {
+              setUnreadCounts({
+                ...store.unreadCounts,
+                [nextCard.module_id]: (store.unreadCounts[nextCard.module_id] || 0) + 1,
+              });
+            }
+          }
+          if (
+            data.type === "crawl_started"
+            || data.type === "crawl_progress"
+            || data.type === "s2_progress"
+          ) {
+            startActiveSyncBoost();
+          }
+          if (
+            data.type === "crawl_complete"
+            || data.type === "crawl_error"
+            || data.type === "crawl_cancelled"
+            || data.type === "s2_complete"
+            || data.type === "s2_error"
+          ) {
+            startActiveSyncBoost(12000);
+            scheduleSyncBurst([300, 1200, 3500]);
+          }
+          if (data.type === "reward_earned") {
+            useStore.getState().addReward({
+              action: data.action,
+              xp: data.rewards?.xp || 0,
+              happiness_delta: data.rewards?.happiness_delta || 0,
+              san_delta: data.rewards?.san_delta || 0,
+              message: data.metadata?.card_title || "",
+            });
+          }
+        } catch {
+          // Ignore malformed realtime payloads; the next full sync will correct state.
+        }
+      };
+    };
+
+    connectRealtimeFeed();
+    startActiveSyncBoost(10000);
+    scheduleNextPeriodicSync();
+
+    const handleWindowFocus = () => {
+      startActiveSyncBoost(10000);
+      void syncFeedState();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        startActiveSyncBoost(10000);
+        void syncFeedState();
+      }
+    };
+    window.addEventListener("focus", handleWindowFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      disposed = true;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      clearHeartbeat();
+      clearSyncTimer();
+      clearBurstSyncTimers();
+      window.removeEventListener("focus", handleWindowFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      setFeedRealtimeStatus("disconnected");
+      ws?.close();
+    };
+  }, [
+    onboardingCompleted,
+    prependCard,
+    setFeedCards,
+    setFeedRealtimeStatus,
+    setUnreadCounts,
+  ]);
 
   const handleOnboardingComplete = () => {
     setOnboardingCompleted(true);

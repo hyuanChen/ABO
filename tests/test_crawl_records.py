@@ -148,6 +148,74 @@ def test_card_store_detects_prior_crawl_record_by_content_id_and_source_url(tmp_
     assert not store.has_crawl_record(module_ids="xiaohongshu-tracker", content_id="note-2")
 
 
+def test_card_store_existing_content_ids_can_be_filtered_by_module(tmp_path):
+    db_path = tmp_path / "cards.db"
+    store = CardStore(db_path)
+
+    store.save(
+        Card(
+            id="followup-monitor:2604.00001",
+            module_id="semantic-scholar-tracker",
+            title="Follow Up 1",
+            summary="第一次抓取",
+            score=0.81,
+            tags=["follow-up"],
+            source_url="https://arxiv.org/abs/2604.00001",
+            obsidian_path="Literature/FollowUps/Source/Follow Up 1/Follow Up 1.md",
+            metadata={"arxiv_id": "2604.00001", "paper_tracking_type": "followup"},
+            created_at=1714000000.0,
+        )
+    )
+    store.save(
+        Card(
+            id="xhs-keyword:note-2",
+            module_id="xiaohongshu-tracker",
+            title="科研工作流",
+            summary="第一次抓取",
+            score=0.73,
+            tags=["科研"],
+            source_url="https://www.xiaohongshu.com/explore/note-2",
+            obsidian_path="xhs/note-2.md",
+            metadata={"note_id": "note-2"},
+            created_at=1714000100.0,
+        )
+    )
+
+    assert store.existing_content_ids(module_ids="semantic-scholar-tracker") == {"2604.00001"}
+    assert store.existing_content_ids(module_ids="xiaohongshu-tracker") == {"note-2"}
+    assert store.existing_content_ids(module_ids=["semantic-scholar-tracker", "xiaohongshu-tracker"]) == {"2604.00001", "note-2"}
+
+
+def test_processed_history_only_includes_explicitly_handled_content(tmp_path):
+    db_path = tmp_path / "cards.db"
+    store = CardStore(db_path)
+
+    store.save(
+        Card(
+            id="xhs-keyword:note-1",
+            module_id="xiaohongshu-tracker",
+            title="未处理笔记",
+            summary="只是爬到了，但没处理",
+            score=0.7,
+            tags=["科研"],
+            source_url="https://www.xiaohongshu.com/explore/note-1",
+            obsidian_path="xhs/note-1.md",
+            metadata={"note_id": "note-1"},
+            created_at=1714000000.0,
+        )
+    )
+
+    assert store.has_crawl_record(module_ids="xiaohongshu-tracker", content_id="note-1") is True
+    assert store.has_processed_crawl_record(module_ids="xiaohongshu-tracker", content_id="note-1") is False
+    assert store.existing_processed_content_ids(module_ids="xiaohongshu-tracker") == set()
+
+    affected_ids = store.record_feedback("xhs-keyword:note-1", "skip")
+
+    assert affected_ids == ["xhs-keyword:note-1"]
+    assert store.has_processed_crawl_record(module_ids="xiaohongshu-tracker", content_id="note-1") is True
+    assert store.existing_processed_content_ids(module_ids="xiaohongshu-tracker") == {"note-1"}
+
+
 def test_card_store_feedback_marks_duplicate_identity_cards_read(tmp_path):
     db_path = tmp_path / "cards.db"
     store = CardStore(db_path)

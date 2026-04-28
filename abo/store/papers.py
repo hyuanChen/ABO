@@ -502,10 +502,10 @@ class PaperStore:
             rows = conn.execute(sql, params).fetchall()
         return [self._row_to_record(row) for row in rows]
 
-    def existing_identifiers(self, source_module: str | None = None) -> set[str]:
+    def existing_identifiers(self, source_module: str | None = None, saved_only: bool = False) -> set[str]:
         sql = """
             SELECT
-                paper_key, canonical_id, arxiv_id, s2_paper_id,
+                paper_key, canonical_id, arxiv_id, s2_paper_id, saved_to_literature,
                 source_module, source_modules, literature_path, metadata
             FROM papers
             WHERE 1=1
@@ -514,6 +514,8 @@ class PaperStore:
         if source_module:
             sql += " AND source_modules LIKE ?"
             params.append(f'%"{source_module}"%')
+        if saved_only:
+            sql += " AND saved_to_literature=1"
 
         identifiers: set[str] = set()
         with self._conn() as conn:

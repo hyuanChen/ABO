@@ -3,6 +3,8 @@ import re
 from typing import Any
 
 BILIBILI_TRACKER_DEFAULT_DAYS_BACK = 7
+BILIBILI_TRACKER_FIXED_UP_DEFAULT_DAYS_BACK = 3
+BILIBILI_TRACKER_FOLLOWED_GROUP_DEFAULT_DAYS_BACK = 3
 BILIBILI_TRACKER_DEFAULT_LIMIT = 50
 BILIBILI_TRACKER_DEFAULT_PAGE_LIMIT = 1000
 BILIBILI_TRACKER_LEGACY_PAGE_LIMIT = 5
@@ -67,11 +69,7 @@ def normalize_bilibili_dynamic_monitors(config: dict[str, Any]) -> list[dict[str
         BILIBILI_TRACKER_DEFAULT_DAYS_BACK,
         maximum=365,
     )
-    default_limit = normalize_positive_int(
-        config.get("fetch_follow_limit"),
-        BILIBILI_TRACKER_DEFAULT_LIMIT,
-        maximum=1000,
-    )
+    default_limit = BILIBILI_TRACKER_DEFAULT_LIMIT
     default_page_limit = normalize_bilibili_page_limit(
         config.get("page_limit"),
         BILIBILI_TRACKER_DEFAULT_PAGE_LIMIT,
@@ -167,8 +165,8 @@ def normalize_bilibili_followed_group_monitors(
     raw_monitors = config.get("followed_up_group_monitors")
     fallback_groups = normalize_string_list(config.get("followed_up_groups"))
     default_days_back = normalize_positive_int(
-        config.get("days_back"),
-        BILIBILI_TRACKER_DEFAULT_DAYS_BACK,
+        config.get("followed_up_group_days_back"),
+        BILIBILI_TRACKER_FOLLOWED_GROUP_DEFAULT_DAYS_BACK,
         maximum=365,
     )
     default_limit = normalize_positive_int(

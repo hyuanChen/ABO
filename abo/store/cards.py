@@ -392,6 +392,96 @@ class CardStore:
             row = conn.execute(sql, params).fetchone()
         return bool(row)
 
+    def has_processed_crawl_record(
+        self,
+        *,
+        module_ids: str | list[str] | tuple[str, ...] | set[str] | None = None,
+        content_id: str | None = None,
+        source_url: str | None = None,
+    ) -> bool:
+        normalized_module_ids = _normalize_string_list(module_ids)
+        normalized_content_id = _clean_str(content_id)
+        normalized_source_url = _clean_str(source_url)
+
+        if not normalized_content_id and not normalized_source_url:
+            return False
+
+        sql = "SELECT 1 FROM crawl_records WHERE processed=1"
+        params: list[str] = []
+        if normalized_module_ids:
+            placeholders = ",".join("?" for _ in normalized_module_ids)
+            sql += f" AND module_id IN ({placeholders})"
+            params.extend(normalized_module_ids)
+
+        if normalized_content_id and normalized_source_url:
+            sql += (
+                " AND ("
+                "lower(content_id)=lower(?)"
+                " OR source_url=?"
+                ")"
+            )
+            params.extend([normalized_content_id, normalized_source_url])
+        elif normalized_content_id:
+            sql += " AND lower(content_id)=lower(?)"
+            params.append(normalized_content_id)
+        else:
+            sql += " AND source_url=?"
+            params.append(normalized_source_url)
+
+        sql += " LIMIT 1"
+        with self._conn() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return bool(row)
+
+    def existing_content_ids(
+        self,
+        *,
+        module_ids: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> set[str]:
+        normalized_module_ids = _normalize_string_list(module_ids)
+
+        sql = "SELECT DISTINCT content_id FROM crawl_records WHERE content_id IS NOT NULL AND content_id != ''"
+        params: list[str] = []
+        if normalized_module_ids:
+            placeholders = ",".join("?" for _ in normalized_module_ids)
+            sql += f" AND module_id IN ({placeholders})"
+            params.extend(normalized_module_ids)
+
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        return {
+            content_id
+            for row in rows
+            if (content_id := _clean_str(row[0]))
+        }
+
+    def existing_processed_content_ids(
+        self,
+        *,
+        module_ids: str | list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> set[str]:
+        normalized_module_ids = _normalize_string_list(module_ids)
+
+        sql = (
+            "SELECT DISTINCT content_id FROM crawl_records "
+            "WHERE processed=1 AND content_id IS NOT NULL AND content_id != ''"
+        )
+        params: list[str] = []
+        if normalized_module_ids:
+            placeholders = ",".join("?" for _ in normalized_module_ids)
+            sql += f" AND module_id IN ({placeholders})"
+            params.extend(normalized_module_ids)
+
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+
+        return {
+            content_id
+            for row in rows
+            if (content_id := _clean_str(row[0]))
+        }
+
     def _row_to_card(self, row) -> Card:
         return Card(
             id=row[0], module_id=row[1], title=row[2],

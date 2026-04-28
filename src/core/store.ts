@@ -115,6 +115,8 @@ export interface RewardNotification {
   message: string;
 }
 
+export type FeedRealtimeStatus = "connecting" | "connected" | "reconnecting" | "disconnected";
+
 // ArXiv Tracker Crawl State
 export interface ArxivCrawlProgress {
   current: number;
@@ -157,11 +159,13 @@ interface AboStore {
   feedModules: FeedModule[];
   activeModuleFilter: string | null;
   unreadCounts: Record<string, number>;
+  feedRealtimeStatus: FeedRealtimeStatus;
   setFeedCards: (cards: FeedCard[]) => void;
   prependCard: (card: FeedCard) => void;
   setFeedModules: (modules: FeedModule[]) => void;
   setActiveModuleFilter: (id: string | null) => void;
   setUnreadCounts: (counts: Record<string, number>) => void;
+  setFeedRealtimeStatus: (status: FeedRealtimeStatus) => void;
 
   // Profile
   profileEnergy: number;
@@ -274,11 +278,15 @@ export const useStore = create<AboStore>((set) => ({
   feedModules: [],
   activeModuleFilter: null,
   unreadCounts: {},
+  feedRealtimeStatus: "disconnected",
   setFeedCards: (feedCards) => set({ feedCards }),
-  prependCard: (card) => set((s) => ({ feedCards: [card, ...s.feedCards] })),
+  prependCard: (card) => set((s) => ({
+    feedCards: [card, ...s.feedCards.filter((entry) => entry.id !== card.id)],
+  })),
   setFeedModules: (feedModules) => set({ feedModules }),
   setActiveModuleFilter: (activeModuleFilter) => set({ activeModuleFilter }),
   setUnreadCounts: (unreadCounts) => set({ unreadCounts }),
+  setFeedRealtimeStatus: (feedRealtimeStatus) => set({ feedRealtimeStatus }),
 
   profileEnergy: 70,
   profileSan: 0,

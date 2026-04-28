@@ -34,7 +34,7 @@ import {
   MODULES_HIDDEN_FROM_MANAGEMENT,
   filterHiddenManagementModules,
 } from "../../core/moduleVisibility";
-import { useStore, FeedModule } from "../../core/store";
+import { useStore, FeedCard, FeedModule } from "../../core/store";
 import {
   normalizeFeedPreferences,
   type FeedPreferences,
@@ -65,6 +65,8 @@ interface DebugFeedFlowResponse {
   scope: string;
   completed: number;
   total: number;
+  feed_cards?: FeedCard[];
+  unread_counts?: Record<string, number>;
   results: Array<{
     module_id: string;
     name: string;
@@ -94,6 +96,12 @@ interface CrawlRecord {
   last_seen_at: number;
   seen_count: number;
 }
+
+type FeedFlowScopeKey = "papers" | "bilibili" | "bilibili-fixed-up" | "xiaohongshu" | "social" | "all";
+
+type FeedFlowSummaryMap = Record<FeedFlowScopeKey, string[]>;
+
+const FEED_SYNC_LIMIT = 200;
 
 interface PaperKeywordMonitor {
   id: string;
@@ -2548,15 +2556,44 @@ function ActionButton({
   );
 }
 
+const EMPTY_FEED_FLOW_SUMMARY: FeedFlowSummaryMap = {
+  papers: [],
+  bilibili: [],
+  "bilibili-fixed-up": [],
+  xiaohongshu: [],
+  social: [],
+  all: [],
+};
+
+function summarizeLabels(values: string[], emptyLabel: string): string {
+  const normalized = values.map((value) => String(value || "").trim()).filter(Boolean);
+  return normalized.length > 0 ? normalized.join("；") : emptyLabel;
+}
+
+function FeedFlowSummaryLines({ lines }: { lines: string[] }) {
+  if (lines.length === 0) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "4px", padding: "0 2px" }}>
+      {lines.map((line) => (
+        <div key={line} style={{ fontSize: "0.72rem", lineHeight: 1.55, color: "var(--text-muted)" }}>
+          {line}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function DeveloperSection() {
-  const [runningFeedFlow, setRunningFeedFlow] = useState<"papers" | "bilibili" | "xiaohongshu" | "social" | "all" | null>(null);
+  const [runningFeedFlow, setRunningFeedFlow] = useState<"papers" | "bilibili" | "bilibili-fixed-up" | "xiaohongshu" | "social" | "all" | null>(null);
   const [crawlRecords, setCrawlRecords] = useState<CrawlRecord[]>([]);
   const [crawlRecordTotal, setCrawlRecordTotal] = useState(0);
   const [loadingCrawlRecords, setLoadingCrawlRecords] = useState(false);
-  const { addToast } = useStore();
+  const [feedFlowSummary, setFeedFlowSummary] = useState<FeedFlowSummaryMap>(EMPTY_FEED_FLOW_SUMMARY);
+  const { addToast, setFeedCards, setUnreadCounts } = useStore();
 
   useEffect(() => {
     void loadCrawlRecords();
+    void loadFeedFlowSummary();
   }, []);
 
   async function loadCrawlRecords() {
@@ -2572,10 +2609,173 @@ function DeveloperSection() {
     }
   }
 
-  async function handleRunFeedFlow(scope: "papers" | "bilibili" | "xiaohongshu" | "social" | "all") {
+  async function syncFeedFrontendState() {
+    const [cardsResult, unreadCountsResult] = await Promise.allSettled([
+      api.get<{ cards: FeedCard[] }>(`/api/cards?unread_only=true&limit=${FEED_SYNC_LIMIT}`),
+      api.get<Record<string, number>>("/api/cards/unread-counts"),
+    ]);
+
+    if (cardsResult.status === "fulfilled") {
+      setFeedCards(cardsResult.value.cards || []);
+    }
+    if (unreadCountsResult.status === "fulfilled") {
+      setUnreadCounts(unreadCountsResult.value || {});
+    }
+  }
+
+  function scheduleFeedFrontendSync(delays: number[]) {
+    delays.forEach((delayMs) => {
+      window.setTimeout(() => {
+        void loadCrawlRecords();
+        void syncFeedFrontendState();
+      }, delayMs);
+    });
+  }
+
+  async function loadFeedFlowSummary() {
+    try {
+      const [arxivConfig, followupConfig, xhsConfig, bilibiliConfig] = await Promise.all([
+        api.get<Record<string, unknown>>("/api/modules/arxiv-tracker/config"),
+        api.get<Record<string, unknown>>("/api/modules/semantic-scholar-tracker/config"),
+        api.get<Record<string, unknown>>("/api/modules/xiaohongshu-tracker/config"),
+        api.get<Record<string, unknown>>("/api/modules/bilibili-tracker/config"),
+      ]);
+
+      const arxivMonitors = Array.isArray(arxivConfig.keyword_monitors)
+        ? arxivConfig.keyword_monitors.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+        : [];
+      const followupMonitors = Array.isArray(followupConfig.followup_monitors)
+        ? followupConfig.followup_monitors.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+        : [];
+      const xhsKeywordMonitors = Array.isArray(xhsConfig.keyword_monitors)
+        ? xhsConfig.keyword_monitors.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && item.enabled !== false)
+        : [];
+      const xhsFollowingMonitors = Array.isArray(xhsConfig.following_scan_monitors)
+        ? xhsConfig.following_scan_monitors.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && item.enabled !== false)
+        : [];
+      const xhsCreatorEnabled = Boolean(xhsConfig.creator_push_enabled);
+      const xhsCreatorMonitors = Array.isArray(xhsConfig.creator_monitors)
+        ? xhsConfig.creator_monitors.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && item.enabled !== false)
+        : [];
+
+      const biliDailyMonitors = Array.isArray(bilibiliConfig.daily_dynamic_monitors)
+        ? bilibiliConfig.daily_dynamic_monitors.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && item.enabled !== false)
+        : [];
+      const biliGroupMonitors = Array.isArray(bilibiliConfig.followed_up_group_monitors)
+        ? bilibiliConfig.followed_up_group_monitors.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && item.enabled !== false)
+        : [];
+      const biliFixedUps = Array.isArray(bilibiliConfig.up_uids)
+        ? bilibiliConfig.up_uids.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+      const biliCreatorProfiles = (
+        bilibiliConfig.creator_profiles && typeof bilibiliConfig.creator_profiles === "object"
+          ? bilibiliConfig.creator_profiles
+          : {}
+      ) as Record<string, Record<string, unknown>>;
+      const biliFixedUpPreview = biliFixedUps
+        .map((uid) => {
+          const profile = biliCreatorProfiles[uid] || {};
+          return String(profile.author || profile.author_id || uid || "").trim();
+        })
+        .filter(Boolean)
+        .slice(0, 6);
+      const biliFixedUpPreviewLabel = biliFixedUps.length > 0
+        ? `${summarizeLabels(biliFixedUpPreview, "未命名固定 UP")}${biliFixedUps.length > biliFixedUpPreview.length ? " ..." : ""}`
+        : "";
+
+      const papersLines = [
+        `arXiv 关键词监控 ${arxivMonitors.length} 条：${summarizeLabels(
+          arxivMonitors.map((item) => String(item.label || item.query || "").trim()).filter(Boolean),
+          "未配置",
+        )}`,
+        `Follow Up 监控 ${followupMonitors.length} 条：${summarizeLabels(
+          followupMonitors.map((item) => String(item.label || item.query || "").trim()).filter(Boolean),
+          "未配置",
+        )}`,
+      ];
+
+      const xhsLines = [
+        `关键词监控 ${xhsKeywordMonitors.length} 条：${summarizeLabels(
+          xhsKeywordMonitors.map((item) => {
+            const label = String(item.label || "").trim();
+            const recentDays = Number(item.recent_days || 0);
+            const limit = Number(item.per_keyword_limit || 0);
+            return label ? `${label}（${recentDays || "?"}天 / ${limit || "?"}条）` : "";
+          }).filter(Boolean),
+          "未配置",
+        )}`,
+        `关注流监控 ${xhsFollowingMonitors.length} 条：${summarizeLabels(
+          xhsFollowingMonitors.map((item) => {
+            const label = String(item.label || "").trim();
+            const recentDays = Number(item.recent_days || 0);
+            const limit = Number(item.fetch_limit || 0);
+            return label ? `${label}（${recentDays || "?"}天 / ${limit || "?"}条）` : "";
+          }).filter(Boolean),
+          "未配置",
+        )}`,
+        `固定博主 ${xhsCreatorEnabled ? xhsCreatorMonitors.length : 0} 条：${xhsCreatorEnabled
+          ? summarizeLabels(
+              xhsCreatorMonitors.map((item) => String(item.label || item.author || item.user_id || "").trim()).filter(Boolean).slice(0, 6),
+              "已开启但当前没有有效定义",
+            )
+          : "当前总开关关闭，不会触发"}`,
+      ];
+
+      const biliFixedUpLines = [
+        `固定 UP 监督 ${biliFixedUps.length} 个：${biliFixedUps.length > 0
+          ? `${biliFixedUpPreviewLabel}（最近 ${Number(bilibiliConfig.fixed_up_days_back || 0) || 1} 天）`
+          : "当前为空，不会触发"}`,
+      ];
+
+      const biliLines = [
+        `常驻关键词监控 ${biliDailyMonitors.length} 条：${summarizeLabels(
+          biliDailyMonitors.map((item) => {
+            const label = String(item.label || "").trim();
+            const daysBack = Number(item.days_back || 0);
+            const limit = Number(item.limit || 0);
+            return label ? `${label}（${daysBack || "?"}天 / ${limit || "?"}条）` : "";
+          }).filter(Boolean),
+          "未配置",
+        )}`,
+        `智能分组监控 ${biliGroupMonitors.length} 条：${summarizeLabels(
+          biliGroupMonitors.map((item) => String(item.label || item.group_label || item.group_value || "").trim()).filter(Boolean),
+          "当前为空，不会触发",
+        )}`,
+        ...biliFixedUpLines,
+      ];
+
+      setFeedFlowSummary({
+        papers: papersLines,
+        bilibili: biliLines,
+        "bilibili-fixed-up": biliFixedUpLines,
+        xiaohongshu: xhsLines,
+        social: [
+          "并行触发：小红书链路 + B站链路",
+          ...xhsLines,
+          ...biliLines,
+        ],
+        all: [
+          "依次触发：论文链路 + 社媒并行链路",
+          ...papersLines,
+          ...xhsLines,
+          ...biliLines,
+        ],
+      });
+    } catch {
+      setFeedFlowSummary(EMPTY_FEED_FLOW_SUMMARY);
+    }
+  }
+
+  async function handleRunFeedFlow(scope: "papers" | "bilibili" | "bilibili-fixed-up" | "xiaohongshu" | "social" | "all") {
     setRunningFeedFlow(scope);
     try {
       const r = await api.post<DebugFeedFlowResponse>("/api/debug/feed-flow", { scope });
+      if (Array.isArray(r.feed_cards)) {
+        setFeedCards(r.feed_cards);
+      }
+      if (r.unread_counts && typeof r.unread_counts === "object") {
+        setUnreadCounts(r.unread_counts);
+      }
       const failed = r.results.filter((item) => item.status === "error" || item.status === "missing");
       const skipped = r.results.filter((item) => item.status === "skipped");
       const zeroOutput = r.results.filter((item) => item.status === "completed" && item.card_count === 0);
@@ -2613,8 +2813,25 @@ function DeveloperSection() {
         });
       }
       await loadCrawlRecords();
-    } catch {
-      addToast({ kind: "error", title: "触发 Feed 流测试失败" });
+      if (!Array.isArray(r.feed_cards) || !r.unread_counts || typeof r.unread_counts !== "object") {
+        await syncFeedFrontendState();
+      }
+    } catch (err) {
+      const mayStillBeRunningInBackground = scope === "bilibili" || scope === "bilibili-fixed-up" || scope === "social" || scope === "all";
+      if (mayStillBeRunningInBackground) {
+        addToast({
+          kind: "info",
+          title: "Feed 流已提交",
+          message: "B站链路耗时较长时，前端请求可能先断开；后台通常还会继续爬取。先不要重复触发，稍后看抓取记录或情报列表。",
+        });
+        scheduleFeedFrontendSync([8000, 18000, 30000]);
+      } else {
+        addToast({
+          kind: "error",
+          title: "触发 Feed 流测试失败",
+          message: err instanceof Error ? err.message : "未知错误",
+        });
+      }
     } finally {
       setRunningFeedFlow(null);
     }
@@ -2632,9 +2849,10 @@ function DeveloperSection() {
               style={{
                 display: "flex",
                 flexDirection: "column",
-                gap: "12px",
-                width: "min(100%, 320px)",
-                marginLeft: "auto",
+                gap: "10px",
+                width: "min(100%, 280px)",
+                marginLeft: 0,
+                alignSelf: "flex-start",
               }}
             >
               <ActionButton
@@ -2645,13 +2863,14 @@ function DeveloperSection() {
                 icon={<Layers style={{ width: "14px", height: "14px" }} />}
                 fullWidth
               />
+              <FeedFlowSummaryLines lines={feedFlowSummary.papers} />
 
               <div
                 style={{
                   display: "flex",
                   flexDirection: "column",
-                  gap: "10px",
-                  padding: "12px",
+                  gap: "8px",
+                  padding: "10px",
                   borderRadius: "10px",
                   border: "1px solid var(--border-light)",
                   background: "var(--bg-hover)",
@@ -2659,9 +2878,6 @@ function DeveloperSection() {
               >
                 <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-main)" }}>
                   社媒链路
-                </div>
-                <div style={{ fontSize: "0.75rem", lineHeight: 1.6, color: "var(--text-muted)" }}>
-                  包含 3 个子选项：哔哩哔哩、小红书、社媒并行。这里分开展示，避免一行越界。
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                   <ActionButton
@@ -2672,6 +2888,16 @@ function DeveloperSection() {
                     icon={<Tv style={{ width: "14px", height: "14px" }} />}
                     fullWidth
                   />
+                  <FeedFlowSummaryLines lines={feedFlowSummary.bilibili} />
+                  <ActionButton
+                    onClick={() => void handleRunFeedFlow("bilibili-fixed-up")}
+                    loading={runningFeedFlow === "bilibili-fixed-up"}
+                    loadingText="固定 UP 执行中..."
+                    label="B站固定 UP"
+                    icon={<User style={{ width: "14px", height: "14px" }} />}
+                    fullWidth
+                  />
+                  <FeedFlowSummaryLines lines={feedFlowSummary["bilibili-fixed-up"]} />
                   <ActionButton
                     onClick={() => void handleRunFeedFlow("xiaohongshu")}
                     loading={runningFeedFlow === "xiaohongshu"}
@@ -2680,6 +2906,7 @@ function DeveloperSection() {
                     icon={<ShoppingBag style={{ width: "14px", height: "14px" }} />}
                     fullWidth
                   />
+                  <FeedFlowSummaryLines lines={feedFlowSummary.xiaohongshu} />
                   <ActionButton
                     onClick={() => void handleRunFeedFlow("social")}
                     loading={runningFeedFlow === "social"}
@@ -2688,6 +2915,7 @@ function DeveloperSection() {
                     icon={<Sparkles style={{ width: "14px", height: "14px" }} />}
                     fullWidth
                   />
+                  <FeedFlowSummaryLines lines={feedFlowSummary.social} />
                 </div>
               </div>
 
@@ -2699,6 +2927,7 @@ function DeveloperSection() {
                 icon={<Zap style={{ width: "14px", height: "14px" }} />}
                 fullWidth
               />
+              <FeedFlowSummaryLines lines={feedFlowSummary.all} />
             </div>
           </SettingItem>
         </div>

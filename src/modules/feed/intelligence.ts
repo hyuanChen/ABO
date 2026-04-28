@@ -249,6 +249,10 @@ function normalizeAliasKey(value: string): string {
   return value.trim().toLowerCase().replace(/[\s_/]+/g, "-");
 }
 
+function isOpaqueSmartGroupToken(value: string): boolean {
+  return value.trim().toLowerCase().startsWith("smart-");
+}
+
 function getCanonicalAliasValue(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "";
@@ -291,6 +295,10 @@ function resolveSmartGroupIdentity(
       value: canonicalValue,
       label: SOCIAL_SMART_GROUP_LABEL_MAP.get(canonicalValue) || trimmed,
     };
+  }
+
+  if (isOpaqueSmartGroupToken(trimmed)) {
+    return null;
   }
 
   const canonicalValue = getCanonicalAliasValue(trimmed) || trimmed;

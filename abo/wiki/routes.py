@@ -10,10 +10,12 @@ from pydantic import BaseModel
 
 from ..config import is_demo_mode
 from ..demo.data import get_demo_wiki_pages, get_demo_wiki_graph, get_demo_wiki_stats
+from ..store.papers import PaperStore
 from .builder import WikiBuilder
 from .store import WikiStore
 
 router = APIRouter(prefix="/api/wiki")
+_paper_store = PaperStore()
 
 _VALID_WIKI_TYPES = {"intel", "lit"}
 
@@ -296,6 +298,24 @@ async def ingest(wiki_type: str, body: IngestRequest):
             except Exception:
                 paper_data["summary"] = body.source_content
         saved = await WikiBuilder.ingest_paper(vault_path, paper_data, wiki_type)
+        _paper_store.upsert_from_payload(
+            {
+                **paper_data,
+                "metadata": {
+                    **(paper_data.get("metadata") or {}),
+                    "wiki_ingested": True,
+                    "wiki_type": wiki_type,
+                    "wiki_pages": saved,
+                    "saved_to_wiki": True,
+                },
+            },
+            source_module=str(
+                paper_data.get("module_id")
+                or (paper_data.get("metadata") or {}).get("source_module")
+                or (paper_data.get("metadata") or {}).get("source-module")
+                or ""
+            ) or None,
+        )
 
     elif body.source_type == "text":
         text = body.source_content or ""

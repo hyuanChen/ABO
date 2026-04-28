@@ -7,6 +7,7 @@ import { PageContainer, PageHeader, PageContent, Card } from "../../components/L
 import { useToast } from "../../components/Toast";
 import { CookieGuide } from "../../components/ConfigHelp";
 import type { BilibiliDailyDynamicMonitor, BilibiliFollowedGroupMonitor } from "../../api/bilibili";
+import { xiaohongshuGetCookieFromBrowser } from "../../api/xiaohongshu";
 import {
   createCreatorMonitor,
   createFollowingScan,
@@ -134,6 +135,10 @@ interface ModuleConfig {
   cookie?: string;
   web_session?: string;
   id_token?: string;
+  auth_ready?: boolean;
+  auth_source?: "module" | "global" | null;
+  extension_port?: number;
+  dedicated_window_mode?: boolean;
   enable_keyword_search?: boolean;
   keyword_min_likes?: number;
   keyword_search_limit?: number;
@@ -141,6 +146,7 @@ interface ModuleConfig {
   follow_feed_types?: number[];
   fetch_follow_limit?: number;
   fixed_up_monitor_limit?: number;
+  fixed_up_days_back?: number;
   days_back?: number;
   creator_push_enabled?: boolean;
   keyword_filter?: boolean;
@@ -224,10 +230,13 @@ function normalizeBilibiliPositiveInt(value: unknown, fallback: number, max?: nu
   return max ? Math.min(normalized, max) : normalized;
 }
 
+const BILIBILI_FIXED_UP_MONITOR_DEFAULT_DAYS_BACK = 3;
+const BILIBILI_FOLLOWED_GROUP_MONITOR_DEFAULT_DAYS_BACK = 3;
+
 function getBilibiliMonitorDefaults(config: Partial<ModuleConfig> = {}) {
   return {
     daysBack: normalizeBilibiliPositiveInt(config.days_back, 7, 365),
-    limit: normalizeBilibiliPositiveInt(config.fetch_follow_limit, 50, 1000),
+    limit: 50,
     pageLimit: 5,
   };
 }
@@ -276,7 +285,7 @@ function normalizeBilibiliFollowedGroupMonitor(
     group_value: groupValue,
     label,
     enabled: seed.enabled ?? true,
-    days_back: normalizeBilibiliPositiveInt(seed.days_back, defaults.daysBack ?? 7, 365),
+    days_back: normalizeBilibiliPositiveInt(seed.days_back, BILIBILI_FOLLOWED_GROUP_MONITOR_DEFAULT_DAYS_BACK, 365),
     limit: normalizeBilibiliPositiveInt(
       seed.limit ?? (seed as { fetch_limit?: number }).fetch_limit,
       defaults.limit ?? 50,
@@ -315,6 +324,11 @@ function normalizeBilibiliTrackerModuleConfig(config: ModuleConfig): ModuleConfi
   return {
     ...config,
     up_uids: Array.isArray(config.up_uids) ? config.up_uids.map((item) => String(item || "").trim()).filter(Boolean) : [],
+    fixed_up_days_back: normalizeBilibiliPositiveInt(
+      config.fixed_up_days_back,
+      BILIBILI_FIXED_UP_MONITOR_DEFAULT_DAYS_BACK,
+      365,
+    ),
     daily_dynamic_monitors: dailyDynamicMonitors,
     followed_up_group_monitors: followedUpGroupMonitors,
   };
@@ -385,6 +399,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
   const [bilibiliOriginalGroups, setBilibiliOriginalGroups] = useState<BilibiliOriginalGroupOption[]>([]);
   const [loadingBilibiliGroups, setLoadingBilibiliGroups] = useState(false);
   const [bilibiliUpInput, setBilibiliUpInput] = useState("");
+  const [gettingXhsCookie, setGettingXhsCookie] = useState(false);
 
   const subConfig = MODULE_SUB_CONFIG[module.id] || { types: [], desc: "" };
   const scheduleOptions = useMemo(() => {
@@ -639,6 +654,29 @@ export default function ModuleDetail({ module, onBack }: Props) {
       toast.success(successTitle);
     } catch {
       toast.error("保存失败");
+    }
+  }
+
+  async function handleFetchXhsCookieFromBrowser() {
+    setGettingXhsCookie(true);
+    try {
+      const result = await xiaohongshuGetCookieFromBrowser();
+      if (!result.success) {
+        toast.error(result.error || "获取小红书 Cookie 失败");
+        return;
+      }
+      setModuleConfig((prev) => ({
+        ...prev,
+        web_session: result.web_session || prev.web_session || "",
+        id_token: result.id_token || prev.id_token || "",
+        auth_ready: true,
+        auth_source: "global",
+      }));
+      toast.success(result.message || "已复用主动工具的小红书 Cookie");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "获取小红书 Cookie 失败");
+    } finally {
+      setGettingXhsCookie(false);
     }
   }
 
@@ -1458,7 +1496,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
                       </div>
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-                      <label style={{ fontSize: "0.8125rem", color: "var(--text-secondary)" }}>抓取上限</label>
+                      <label style={{ fontSize: "0.8125rem", color: "var(--text-secondary)" }}>候选池上限</label>
                       <input
                         type="number"
                         min={1}
@@ -1479,6 +1517,9 @@ export default function ModuleDetail({ module, onBack }: Props) {
                           outline: "none",
                         }}
                       />
+                      <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                        这里只影响共享候选池和无监控时的全关注流兜底抓取
+                      </span>
                     </div>
                   </div>
 
@@ -1593,7 +1634,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
                     <div>
                       <div style={{ fontSize: "0.875rem", color: "var(--text-main)", fontWeight: 600 }}>常驻关键词监控</div>
                       <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.6, marginTop: "4px" }}>
-                        每一条都会复用主动工具同一套 `daily_dynamic_monitors` 定义；这里直接配置关键词、标签词、最近几天、保留条数和扫描页数上限。
+                        每一条都会复用主动工具同一套 `daily_dynamic_monitors` 定义；这里直接配置关键词、标签词、最近几天、条数上限和扫描页数上限。到了时间窗口就停，抓到多少算多少。
                       </div>
                     </div>
                     <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
@@ -1746,7 +1787,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
                                 outline: "none",
                               }}
                             />
-                            <label style={{ fontSize: "0.8125rem", color: "var(--text-secondary)" }}>保留条数</label>
+                            <label style={{ fontSize: "0.8125rem", color: "var(--text-secondary)" }}>条数上限</label>
                             <input
                               type="number"
                               min={1}
@@ -1802,7 +1843,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
                     </div>
                   ) : (
                     <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.7 }}>
-                      还没有关键词监控。新增后，定时情报会直接复用这条定义的关键词、标签词、时间窗和抓取上限。
+                      还没有关键词监控。新增后，定时情报会直接复用这条定义的关键词、标签词、时间窗、条数上限和扫描页数上限。
                     </div>
                   )}
                   <button
@@ -1852,22 +1893,22 @@ export default function ModuleDetail({ module, onBack }: Props) {
                       flexWrap: "wrap",
                     }}
                   >
-                    <label style={{ fontSize: "0.8125rem", color: "var(--text-secondary)" }}>抓取上限</label>
+                    <label style={{ fontSize: "0.8125rem", color: "var(--text-secondary)" }}>最近几天</label>
                     <input
                       type="number"
                       min={1}
-                      max={1000}
-                      value={moduleConfig.fixed_up_monitor_limit ?? moduleConfig.fetch_follow_limit ?? 50}
+                      max={365}
+                      value={moduleConfig.fixed_up_days_back ?? BILIBILI_FIXED_UP_MONITOR_DEFAULT_DAYS_BACK}
                       onChange={(e) => setModuleConfig({
                         ...moduleConfig,
-                        fixed_up_monitor_limit: normalizeBilibiliPositiveInt(
+                        fixed_up_days_back: normalizeBilibiliPositiveInt(
                           e.target.value,
-                          moduleConfig.fetch_follow_limit ?? 50,
-                          1000,
+                          moduleConfig.fixed_up_days_back ?? BILIBILI_FIXED_UP_MONITOR_DEFAULT_DAYS_BACK,
+                          365,
                         ),
                       })}
                       style={{
-                        width: "110px",
+                        width: "96px",
                         padding: "8px 10px",
                         borderRadius: "var(--radius-md)",
                         border: "1px solid var(--border-light)",
@@ -1878,7 +1919,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
                       }}
                     />
                     <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                      固定 UP 每次最多保留多少条动态
+                      固定 UP 按这个时间窗口截止，跑到时间点就停，抓到多少返回多少
                     </span>
                   </div>
                   <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -2294,6 +2335,7 @@ export default function ModuleDetail({ module, onBack }: Props) {
                       follow_feed_types: moduleConfig.follow_feed_types || [8, 2, 4, 64],
                       fetch_follow_limit: moduleConfig.fetch_follow_limit ?? 50,
                       fixed_up_monitor_limit: moduleConfig.fixed_up_monitor_limit ?? moduleConfig.fetch_follow_limit ?? 50,
+                      fixed_up_days_back: moduleConfig.fixed_up_days_back ?? BILIBILI_FIXED_UP_MONITOR_DEFAULT_DAYS_BACK,
                       keyword_filter: moduleConfig.keyword_filter ?? true,
                       up_uids: Array.from(new Set((moduleConfig.up_uids || []).map((item) => String(item || "").trim()).filter(Boolean))),
                       daily_dynamic_monitors: normalizedDailyDynamicMonitors,
@@ -2430,6 +2472,50 @@ export default function ModuleDetail({ module, onBack }: Props) {
           {module.id === "xiaohongshu-tracker" && (
             <Card title="小红书登录" icon={<span style={{ fontSize: "18px" }}>📕</span>}>
               <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: "12px",
+                    flexWrap: "wrap",
+                    padding: "12px 14px",
+                    borderRadius: "var(--radius-md)",
+                    background: moduleConfig.auth_ready ? "rgba(16, 185, 129, 0.1)" : "var(--bg-hover)",
+                    border: `1px solid ${moduleConfig.auth_ready ? "rgba(16, 185, 129, 0.28)" : "var(--border-light)"}`,
+                  }}
+                >
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                    <div style={{ fontSize: "0.875rem", fontWeight: 600, color: "var(--text-main)" }}>
+                      {moduleConfig.auth_ready
+                        ? moduleConfig.auth_source === "global"
+                          ? "当前已复用主动工具的小红书 Cookie"
+                          : "当前已保存模块专用的小红书 Cookie"
+                        : "当前还没有可复用的小红书 Cookie"}
+                    </div>
+                    <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+                      这里直接复用主动工具那条 Cookie 获取链路；定时情报会优先读取这里或主动工具里已保存的 Cookie。
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleFetchXhsCookieFromBrowser}
+                    disabled={gettingXhsCookie}
+                    style={{
+                      padding: "8px 14px",
+                      borderRadius: "var(--radius-md)",
+                      background: gettingXhsCookie ? "var(--bg-muted)" : "var(--color-primary)",
+                      color: "white",
+                      fontSize: "0.8125rem",
+                      fontWeight: 600,
+                      border: "none",
+                      cursor: gettingXhsCookie ? "not-allowed" : "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {gettingXhsCookie ? "获取中..." : "一键复用浏览器 Cookie"}
+                  </button>
+                </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
                   <label style={{ fontSize: "0.8125rem", fontWeight: 500, color: "var(--text-secondary)" }}>
                     web_session
@@ -2478,6 +2564,8 @@ export default function ModuleDetail({ module, onBack }: Props) {
                     await saveModuleConfig({
                       web_session: moduleConfig.web_session || "",
                       id_token: moduleConfig.id_token || "",
+                      auth_ready: Boolean((moduleConfig.web_session || "").trim()),
+                      auth_source: (moduleConfig.web_session || "").trim() ? "module" : moduleConfig.auth_source,
                     });
                   }}
                   style={{
@@ -2516,6 +2604,63 @@ export default function ModuleDetail({ module, onBack }: Props) {
                   <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
                     这里直接编辑小红书监控的真实定义。默认不抓评论；开启评论时默认按前 20 条高赞抓取。
                   </div>
+                </div>
+
+                <div style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  flexWrap: "wrap",
+                  padding: "12px 14px",
+                  borderRadius: "var(--radius-md)",
+                  background: "var(--bg-hover)",
+                  border: "1px solid var(--border-light)",
+                }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "4px", minWidth: "200px" }}>
+                    <div style={{ fontSize: "0.8125rem", fontWeight: 600, color: "var(--text-main)" }}>插件 bridge 设置</div>
+                    <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+                      情报流定时抓取直接复用主动工具的小红书插件链路参数。
+                    </div>
+                  </div>
+                  <label style={{ fontSize: "0.8125rem", color: "var(--text-secondary)" }}>扩展端口</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={moduleConfig.extension_port ?? 9334}
+                    onChange={(e) => setModuleConfig({
+                      ...moduleConfig,
+                      extension_port: Math.max(1, Number(e.target.value || 9334)),
+                    })}
+                    style={{
+                      width: "96px",
+                      padding: "8px 10px",
+                      borderRadius: "var(--radius-md)",
+                      border: "1px solid var(--border-light)",
+                      background: "var(--bg-app)",
+                      color: "var(--text-main)",
+                      fontSize: "0.8125rem",
+                      outline: "none",
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setModuleConfig({
+                      ...moduleConfig,
+                      dedicated_window_mode: !(moduleConfig.dedicated_window_mode ?? true),
+                    })}
+                    style={{
+                      padding: "8px 14px",
+                      borderRadius: "var(--radius-md)",
+                      border: `1px solid ${(moduleConfig.dedicated_window_mode ?? true) ? "var(--color-primary)" : "var(--border-light)"}`,
+                      background: (moduleConfig.dedicated_window_mode ?? true) ? "var(--color-primary)" : "var(--bg-app)",
+                      color: (moduleConfig.dedicated_window_mode ?? true) ? "white" : "var(--text-secondary)",
+                      fontSize: "0.8125rem",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {(moduleConfig.dedicated_window_mode ?? true) ? "独立窗口" : "当前窗口"}
+                  </button>
                 </div>
 
                 <div style={{
@@ -3530,6 +3675,8 @@ export default function ModuleDetail({ module, onBack }: Props) {
                       creator_monitors: normalizedCreatorMonitors,
                       creator_groups: moduleConfig.creator_groups || [],
                       creator_push_enabled: moduleConfig.creator_push_enabled ?? false,
+                      extension_port: moduleConfig.extension_port ?? 9334,
+                      dedicated_window_mode: moduleConfig.dedicated_window_mode ?? true,
                     }, "爬取策略已保存");
                   }}
                   style={{

@@ -145,6 +145,22 @@ def _normalize_image_url(url: str | None) -> str:
     return value
 
 
+def _resolve_dynamic_folder_name(item: dict[str, Any]) -> str:
+    from abo.tools.bilibili import resolve_bilibili_dynamic_monitor_subfolder
+
+    return resolve_bilibili_dynamic_monitor_subfolder(
+        author=item.get("author") or item.get("up_name") or "",
+        monitor_subfolder=(
+            item.get("monitor_subfolder")
+            or item.get("subfolder")
+            or item.get("folder_name")
+            or ""
+        ),
+        monitor_label=item.get("monitor_label") or "",
+        crawl_source=item.get("crawl_source") or "",
+    )
+
+
 def _safe_json_response(resp: httpx.Response) -> dict:
     try:
         data = resp.json()
@@ -2348,12 +2364,7 @@ def build_bilibili_dynamic_obsidian_path(
         item_type=dynamic_type,
         images=[],
         tags=merge_tags(item.get("tags") or []),
-        folder_name=str(
-            item.get("monitor_subfolder")
-            or item.get("subfolder")
-            or item.get("folder_name")
-            or ""
-        ).strip(),
+        folder_name=_resolve_dynamic_folder_name(item),
         metadata={
             "author_id": str(item.get("author_id") or item.get("up_uid") or "").strip(),
             "matched_keywords": normalize_string_list(item.get("matched_keywords")),
@@ -2497,12 +2508,7 @@ async def save_selected_dynamics_to_vault(
                 item_type=dynamic_type,
                 images=images,
                 tags=merge_tags(item.get("tags") or []),
-                folder_name=str(
-                    item.get("monitor_subfolder")
-                    or item.get("subfolder")
-                    or item.get("folder_name")
-                    or ""
-                ).strip(),
+                folder_name=_resolve_dynamic_folder_name(item),
                 metadata={
                     "author_id": str(item.get("author_id") or ""),
                     "matched_keywords": normalize_string_list(item.get("matched_keywords")),

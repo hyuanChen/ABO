@@ -136,7 +136,7 @@ const SMART_GROUP_TASK_KEY = "bilibili_followed_smart_group_task_id";
 const BILIBILI_DYNAMICS_CACHE_KEY = "bilibili_dynamics_cache";
 const BILIBILI_FOLLOWED_CACHE_KEY = "bilibili_followed_cache";
 const DEFAULT_DYNAMIC_FETCH_META: DynamicFetchMeta = { scope: "global", label: "全关注流" };
-const MAX_DYNAMIC_KEEP_LIMIT = 200;
+const MAX_DYNAMIC_KEEP_LIMIT = 1000;
 const PAGINATION_SIZE_OPTIONS = [20, 50];
 const FIXED_UP_IMPORT_GROUPS_PAGE_SIZE = 10;
 const TARGETED_DYNAMIC_GROUPS_PAGE_SIZE = 10;
@@ -288,6 +288,8 @@ function clampPositiveInt(value: unknown, fallback: number, max?: number): numbe
 }
 
 const LEGACY_MONITOR_PAGE_LIMIT = 5;
+const FIXED_UP_MONITOR_DEFAULT_DAYS_BACK = 3;
+const FOLLOWED_GROUP_MONITOR_DEFAULT_DAYS_BACK = 3;
 
 function normalizeMonitorPageLimit(value: unknown, fallback: number): number {
   const normalized = clampPositiveInt(value, fallback, 1000);
@@ -300,7 +302,7 @@ function normalizeMonitorPageLimit(value: unknown, fallback: number): number {
 function getDailyMonitorDefaults(config?: Partial<BilibiliTrackerConfig>) {
   return {
     daysBack: clampPositiveInt((config as { days_back?: number } | undefined)?.days_back, 7, 365),
-    limit: clampPositiveInt((config as { fetch_follow_limit?: number } | undefined)?.fetch_follow_limit, 50, MAX_DYNAMIC_KEEP_LIMIT),
+    limit: 50,
     pageLimit: normalizeMonitorPageLimit((config as { page_limit?: number } | undefined)?.page_limit, 1000),
   };
 }
@@ -407,7 +409,8 @@ function buildDailyMonitorSaveSubfolder(
 }
 
 function buildTrackedUpsSubfolder(label: string): string {
-  return ["每日监视UP", normalizeSubfolderSegment(label, "未命名范围")].join("/");
+  void label;
+  return ["每日监视UP", "固定UP监督"].join("/");
 }
 
 function buildTargetedGroupSubfolder(label: string): string {
@@ -442,7 +445,7 @@ function normalizeFollowedGroupMonitor(
     group_value: groupValue,
     label,
     enabled: seed.enabled ?? true,
-    days_back: clampPositiveInt(seed.days_back, defaults.daysBack ?? 7, 365),
+    days_back: clampPositiveInt(seed.days_back, FOLLOWED_GROUP_MONITOR_DEFAULT_DAYS_BACK, 365),
     limit: clampPositiveInt(
       seed.limit ?? (seed as { fetch_limit?: number }).fetch_limit,
       defaults.limit ?? 50,
@@ -467,6 +470,7 @@ interface BilibiliTrackerConfig {
   up_uids: string[];
   favorite_up_uids: string[];
   favorite_up_excluded_uids: string[];
+  fixed_up_days_back?: number;
   daily_dynamic_monitors: BilibiliDailyDynamicMonitor[];
   followed_up_group_monitors: BilibiliFollowedGroupMonitor[];
   followed_up_groups: string[];
@@ -666,6 +670,7 @@ export function BilibiliTool() {
   });
   const [dailyMonitorTermInput, setDailyMonitorTermInput] = useState("");
   const [dailyMonitorDaysBackInput, setDailyMonitorDaysBackInput] = useState("7");
+  const [dailyMonitorLimitInput, setDailyMonitorLimitInput] = useState("50");
   const [selectedTypes, setSelectedTypes] = useState<string[]>(["video", "image", "text", "article"]);
   const [daysBack, setDaysBack] = useState(7);
   const [daysBackInput, setDaysBackInput] = useState("7");
@@ -743,6 +748,7 @@ export function BilibiliTool() {
     up_uids: [],
     favorite_up_uids: [],
     favorite_up_excluded_uids: [],
+    fixed_up_days_back: FIXED_UP_MONITOR_DEFAULT_DAYS_BACK,
     daily_dynamic_monitors: [],
     followed_up_group_monitors: [],
     followed_up_groups: [],
@@ -899,11 +905,12 @@ export function BilibiliTool() {
         ((config.followed_up_group_options || DEFAULT_SMART_GROUP_OPTIONS) as BilibiliSmartGroupOption[])
           .map((option) => [option.value, option.label])
       );
-      setTrackerConfig({
-        up_uids: config.up_uids || [],
-        favorite_up_uids: config.favorite_up_uids || [],
-        favorite_up_excluded_uids: config.favorite_up_excluded_uids || [],
-        daily_dynamic_monitors: (config.daily_dynamic_monitors || []).map((item: Partial<BilibiliDailyDynamicMonitor>) => normalizeDailyDynamicMonitor(item, monitorDefaults)),
+    setTrackerConfig({
+      up_uids: config.up_uids || [],
+      favorite_up_uids: config.favorite_up_uids || [],
+      favorite_up_excluded_uids: config.favorite_up_excluded_uids || [],
+      fixed_up_days_back: clampPositiveInt(config.fixed_up_days_back, FIXED_UP_MONITOR_DEFAULT_DAYS_BACK, 365),
+      daily_dynamic_monitors: (config.daily_dynamic_monitors || []).map((item: Partial<BilibiliDailyDynamicMonitor>) => normalizeDailyDynamicMonitor(item, monitorDefaults)),
         followed_up_group_monitors: (config.followed_up_group_monitors || []).map((item: Partial<BilibiliFollowedGroupMonitor>) => normalizeFollowedGroupMonitor(
           item,
           groupLabelLookup,
@@ -1069,6 +1076,7 @@ export function BilibiliTool() {
       tag_filters: terms,
       enabled: true,
       days_back: clampPositiveInt(dailyMonitorDaysBackInput, 7, 365),
+      limit: clampPositiveInt(dailyMonitorLimitInput, 50, MAX_DYNAMIC_KEEP_LIMIT),
     });
     const nextMonitors = [
       ...trackerConfig.daily_dynamic_monitors.filter((monitor) => monitor.id !== nextMonitor.id),
@@ -1077,6 +1085,7 @@ export function BilibiliTool() {
     await updateDailyDynamicMonitors(nextMonitors, "已添加每日动态监控");
     setDailyMonitorTermInput("");
     setDailyMonitorDaysBackInput("7");
+    setDailyMonitorLimitInput("50");
   };
 
   const handleToggleDailyDynamicMonitor = async (monitorId: string) => {
@@ -1122,6 +1131,42 @@ export function BilibiliTool() {
         : monitor
     ));
     await updateDailyDynamicMonitors(nextMonitors, "已更新监控时间范围");
+  };
+
+  const handleUpdateDailyMonitorLimit = async (monitorId: string, value: string) => {
+    const currentMonitor = trackerConfig.daily_dynamic_monitors.find((monitor) => monitor.id === monitorId);
+    if (!currentMonitor) {
+      return;
+    }
+    const nextLimit = clampPositiveInt(value, currentMonitor.limit || 50, MAX_DYNAMIC_KEEP_LIMIT);
+    if (nextLimit === currentMonitor.limit) {
+      return;
+    }
+    const nextMonitors = trackerConfig.daily_dynamic_monitors.map((monitor) => (
+      monitor.id === monitorId
+        ? normalizeDailyDynamicMonitor({
+            ...monitor,
+            limit: nextLimit,
+          })
+        : monitor
+    ));
+    await updateDailyDynamicMonitors(nextMonitors, "已更新监控条数上限");
+  };
+
+  const handleUpdateFixedUpMonitorDaysBack = async (value: string) => {
+    const currentDaysBack = clampPositiveInt(
+      trackerConfig.fixed_up_days_back,
+      FIXED_UP_MONITOR_DEFAULT_DAYS_BACK,
+      365,
+    );
+    const nextDaysBack = clampPositiveInt(value, currentDaysBack, 365);
+    if (nextDaysBack === currentDaysBack) {
+      return;
+    }
+    await saveTrackerConfig(
+      { fixed_up_days_back: nextDaysBack },
+      "已更新固定 UP 监督时间范围",
+    );
   };
 
 
@@ -2421,6 +2466,12 @@ export function BilibiliTool() {
     }
     await runDynamicsPreview({
       authorIds: trackedUpMembers.map((up) => up.mid),
+      daysBackOverride: clampPositiveInt(
+        trackerConfig.fixed_up_days_back,
+        FIXED_UP_MONITOR_DEFAULT_DAYS_BACK,
+        365,
+      ),
+      limitOverride: MAX_DYNAMIC_KEEP_LIMIT,
       label: `每日监视 UP · ${trackedUpMembers.length} 个 UP`,
       scope: "ups",
       monitorSubfolder: buildTrackedUpsSubfolder(`已启用监视UP ${trackedUpMembers.length} 个`),
@@ -5279,7 +5330,7 @@ export function BilibiliTool() {
                       <div
                         style={{
                           display: "grid",
-                          gridTemplateColumns: "minmax(0, 1fr) minmax(116px, 140px) auto",
+                          gridTemplateColumns: "minmax(0, 1fr) minmax(116px, 140px) minmax(116px, 140px) auto",
                           gap: "10px",
                           alignItems: "end",
                         }}
@@ -5310,6 +5361,26 @@ export function BilibiliTool() {
                             value={dailyMonitorDaysBackInput}
                             onChange={(e) => setDailyMonitorDaysBackInput(e.target.value)}
                             onBlur={() => setDailyMonitorDaysBackInput(String(clampPositiveInt(dailyMonitorDaysBackInput, 7, 365)))}
+                            style={{
+                              width: "100%",
+                              padding: "10px 12px",
+                              borderRadius: "var(--radius-sm)",
+                              border: "1px solid var(--border-light)",
+                              background: "var(--bg-card)",
+                              color: "var(--text-main)",
+                              fontSize: "0.8125rem",
+                            }}
+                          />
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                          <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontWeight: 700 }}>条数上限</div>
+                          <input
+                            type="number"
+                            min={1}
+                            max={MAX_DYNAMIC_KEEP_LIMIT}
+                            value={dailyMonitorLimitInput}
+                            onChange={(e) => setDailyMonitorLimitInput(e.target.value)}
+                            onBlur={() => setDailyMonitorLimitInput(String(clampPositiveInt(dailyMonitorLimitInput, 50, MAX_DYNAMIC_KEEP_LIMIT)))}
                             style={{
                               width: "100%",
                               padding: "10px 12px",
@@ -5384,6 +5455,18 @@ export function BilibiliTool() {
                                       >
                                         最近 {monitor.days_back} 天
                                       </span>
+                                      <span
+                                        style={{
+                                          padding: "4px 8px",
+                                          borderRadius: "999px",
+                                          background: "rgba(16, 185, 129, 0.12)",
+                                          color: "#0F9F6E",
+                                          fontSize: "0.6875rem",
+                                          fontWeight: 800,
+                                        }}
+                                      >
+                                        上限 {monitor.limit} 条
+                                      </span>
                                     </div>
                                     <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginTop: "4px", lineHeight: 1.6 }}>
                                       入库目录：{buildDailyMonitorSubfolder(monitor.label)}
@@ -5413,6 +5496,31 @@ export function BilibiliTool() {
                                         }}
                                       />
                                       <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>天内动态</span>
+                                      <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>条数上限</span>
+                                      <input
+                                        key={`${monitor.id}-${monitor.limit}`}
+                                        type="number"
+                                        min={1}
+                                        max={MAX_DYNAMIC_KEEP_LIMIT}
+                                        defaultValue={monitor.limit}
+                                        onBlur={(e) => void handleUpdateDailyMonitorLimit(monitor.id, e.currentTarget.value)}
+                                        onKeyDown={(e) => {
+                                          if (isActionEnterKey(e)) {
+                                            e.preventDefault();
+                                            e.currentTarget.blur();
+                                          }
+                                        }}
+                                        style={{
+                                          width: "84px",
+                                          padding: "6px 8px",
+                                          borderRadius: "var(--radius-sm)",
+                                          border: "1px solid var(--border-light)",
+                                          background: "var(--bg-card)",
+                                          color: "var(--text-main)",
+                                          fontSize: "0.75rem",
+                                        }}
+                                      />
+                                      <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>条</span>
                                     </div>
                                   </div>
                                   <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -5545,6 +5653,54 @@ export function BilibiliTool() {
                     <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
                       <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.7 }}>
                         上面的「智能分组追踪」只负责看分组来源和维护固定监督名单；这里不再改监督配置，只负责查看当前范围、触发今日抓取，并把结果送进情报 Feed。
+                      </div>
+
+                      <div
+                        style={{
+                          padding: "14px",
+                          borderRadius: "var(--radius-sm)",
+                          border: "1px solid rgba(0, 174, 236, 0.18)",
+                          background: "rgba(0, 174, 236, 0.06)",
+                          display: "flex",
+                          justifyContent: "space-between",
+                          gap: "14px",
+                          alignItems: "flex-end",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: "0.875rem", fontWeight: 800, color: "var(--text-main)" }}>关注监控时间范围</div>
+                          <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginTop: "4px", lineHeight: 1.6 }}>
+                            固定 UP 监督默认 3 天，可自由改；不同 UP 会并行抓取，实际会一直扫到这个日期边界再停。
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                          <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>最近几天</span>
+                          <input
+                            key={`fixed-up-days-back-${trackerConfig.fixed_up_days_back ?? FIXED_UP_MONITOR_DEFAULT_DAYS_BACK}`}
+                            type="number"
+                            min={1}
+                            max={365}
+                            defaultValue={trackerConfig.fixed_up_days_back ?? FIXED_UP_MONITOR_DEFAULT_DAYS_BACK}
+                            onBlur={(e) => void handleUpdateFixedUpMonitorDaysBack(e.currentTarget.value)}
+                            onKeyDown={(e) => {
+                              if (isActionEnterKey(e)) {
+                                e.preventDefault();
+                                e.currentTarget.blur();
+                              }
+                            }}
+                            style={{
+                              width: "92px",
+                              padding: "8px 10px",
+                              borderRadius: "var(--radius-sm)",
+                              border: "1px solid var(--border-light)",
+                              background: "var(--bg-card)",
+                              color: "var(--text-main)",
+                              fontSize: "0.8125rem",
+                            }}
+                          />
+                          <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>天内动态</span>
+                        </div>
                       </div>
 
                     <div

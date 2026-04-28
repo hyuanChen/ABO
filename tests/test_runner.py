@@ -7,6 +7,11 @@ from abo.store.cards import CardStore
 from abo.store.papers import PaperStore
 from abo.preferences.engine import PreferenceEngine
 from abo.runtime.broadcaster import Broadcaster
+from abo.runtime.feed_visibility import (
+    clear_all_temporarily_hidden_cards,
+    is_card_temporarily_hidden,
+    temporarily_hide_cards,
+)
 
 
 class TrackingModule(Module):
@@ -186,6 +191,32 @@ class DuplicateXhsModule(Module):
         ]
 
 
+class RuntimeCapModule(Module):
+    id = "runtime-cap-module"
+    name = "Runtime Cap Module"
+    schedule = "0 8 * * *"
+
+    def __init__(self):
+        self._runtime_max_cards = 5
+
+    async def fetch(self):
+        return [Item(id=f"item-{index}", raw={}) for index in range(3)]
+
+    async def process(self, items, prefs):
+        return [
+            Card(
+                id=f"item-{index}",
+                title=f"Runtime Card {index}",
+                summary="runtime test",
+                score=0.9 - index * 0.1,
+                tags=["runtime"],
+                source_url=f"http://test.com/{index}",
+                obsidian_path=f"Runtime/item-{index}.md",
+            )
+            for index in range(3)
+        ]
+
+
 class RecordingBroadcaster(Broadcaster):
     def __init__(self):
         super().__init__()
@@ -290,6 +321,32 @@ async def test_runner_skips_broadcast_for_already_processed_duplicate_content(tm
 
 
 @pytest.mark.anyio
+async def test_runner_clears_temporary_hidden_cards_when_module_runs_again(tmp_path):
+    db_path = tmp_path / "cards.db"
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+
+    store = CardStore(db_path=db_path)
+    prefs = PreferenceEngine()
+    broadcaster = RecordingBroadcaster()
+    runner = ModuleRunner(store, prefs, broadcaster, vault_path=vault_path)
+    module = DuplicateXhsModule(source="keyword")
+
+    clear_all_temporarily_hidden_cards()
+    try:
+        await runner.run(module)
+        hidden_ids = temporarily_hide_cards(store, ["xhs-keyword-note-1"])
+        assert hidden_ids == ["xhs-keyword-note-1"]
+        assert is_card_temporarily_hidden("xhs-keyword-note-1") is True
+
+        await runner.run(module)
+
+        assert is_card_temporarily_hidden("xhs-keyword-note-1") is False
+    finally:
+        clear_all_temporarily_hidden_cards()
+
+
+@pytest.mark.anyio
 async def test_runner_respects_max_cards(tmp_path, monkeypatch):
     """Test that only max_cards highest scored cards are kept."""
     # Create dependencies with tmp_path for isolation
@@ -332,7 +389,28 @@ async def test_runner_respects_max_cards(tmp_path, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_runner_persists_normalized_paper_records(tmp_path):
+async def test_runner_allows_module_runtime_card_cap_to_exceed_pref_limit(tmp_path, monkeypatch):
+    db_path = tmp_path / "cards.db"
+    vault_path = tmp_path / "vault"
+    vault_path.mkdir()
+
+    store = CardStore(db_path=db_path)
+    prefs = PreferenceEngine()
+    broadcaster = Broadcaster()
+
+    monkeypatch.setattr(prefs, "threshold", lambda module_id: 0.0)
+    monkeypatch.setattr(prefs, "max_cards", lambda module_id: 2)
+
+    runner = ModuleRunner(store, prefs, broadcaster, vault_path=vault_path)
+    count = await runner.run(RuntimeCapModule())
+
+    assert count == 3
+    cards = store.list(module_id="runtime-cap-module")
+    assert len(cards) == 3
+
+
+@pytest.mark.anyio
+async def test_runner_does_not_persist_paper_records_until_explicit_action(tmp_path):
     db_path = tmp_path / "cards.db"
     paper_db_path = tmp_path / "papers.db"
     vault_path = tmp_path / "vault"
@@ -349,10 +427,7 @@ async def test_runner_persists_normalized_paper_records(tmp_path):
 
     assert count == 1
     record = paper_store.get("arxiv:2604.00001")
-    assert record is not None
-    assert record["title"] == "Follow-up Paper"
-    assert record["source_modules"] == ["paper-module"]
-    assert record["citation_count"] == 12
+    assert record is None
 
 
 @pytest.mark.anyio

@@ -12,6 +12,7 @@ from abo.config import is_paper_ai_scoring_enabled
 from abo.paper_paths import sanitize_paper_title_for_path
 from abo.paper_tracking import load_module_preferences, normalize_followup_monitors
 from abo.sdk import Module, Item, Card, agent_json
+from abo.store.cards import CardStore
 from abo.store.papers import PaperStore
 
 
@@ -42,7 +43,16 @@ class SemanticScholarTracker(Module):
         return load_module_preferences(self.id)
 
     def _load_existing_ids(self) -> set[str]:
-        return PaperStore().existing_identifiers(source_module=self.id)
+        existing_ids = set(PaperStore().existing_identifiers(saved_only=True))
+        try:
+            existing_ids.update(
+                CardStore().existing_processed_content_ids(
+                    module_ids=["arxiv-tracker", self.id],
+                )
+            )
+        except Exception as exc:
+            print(f"[s2] Failed to load crawl history identifiers: {exc}")
+        return existing_ids
 
     async def _rate_limited_request(self, client: httpx.AsyncClient, url: str, params: dict = None) -> httpx.Response:
         """Make a rate-limited request to Semantic Scholar API."""
@@ -373,19 +383,29 @@ class SemanticScholarTracker(Module):
             existing_ids = existing_ids or set()
             seen_item_ids = set(existing_ids)
             filtered_papers = []
+            date_matched_count = 0
+            skipped_existing_count = 0
+            outside_window_count = 0
+            missing_date_count = 0
 
             for paper in citing_papers:
                 paper_id_new = paper.get("paperId", "")
                 external_ids = paper.get("externalIds", {}) or {}
                 arxiv_id = external_ids.get("ArXiv", "")
                 dedupe_key = arxiv_id if arxiv_id else (f"s2_{paper_id_new}" if paper_id_new else "")
-                if paper_id_new in existing_ids or (dedupe_key and dedupe_key in seen_item_ids):
-                    continue
 
                 published_at = self._parse_publication_datetime(paper)
                 if cutoff and published_at and published_at < cutoff:
+                    outside_window_count += 1
                     continue
                 if cutoff and not published_at:
+                    missing_date_count += 1
+                    continue
+
+                date_matched_count += 1
+
+                if paper_id_new in existing_ids or (dedupe_key and dedupe_key in seen_item_ids):
+                    skipped_existing_count += 1
                     continue
 
                 filtered_papers.append(paper)
@@ -403,7 +423,9 @@ class SemanticScholarTracker(Module):
 
             print(
                 f"[s2] Filtered to {len(items)} follow-up papers "
-                f"(days_back={days_back or 'all'}, sort_by={sort_by})"
+                f"(days_back={days_back or 'all'}, sort_by={sort_by}, "
+                f"date_matched={date_matched_count}, skipped_existing={skipped_existing_count}, "
+                f"outside_window={outside_window_count}, missing_date={missing_date_count})"
             )
             return items
 

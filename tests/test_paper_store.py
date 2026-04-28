@@ -160,3 +160,43 @@ def test_existing_identifiers_ignores_legacy_semantic_scholar_tracker_records(tm
     assert "legacy-s2-paper" not in identifiers
     assert "s2:current-s2-paper" in identifiers
     assert "current-s2-paper" in identifiers
+
+
+def test_existing_identifiers_saved_only_ignores_seen_but_unsaved_papers(tmp_path):
+    store = PaperStore(db_path=tmp_path / "papers.db")
+
+    store.upsert_from_payload(
+        {
+            "id": "2604.00001",
+            "title": "Seen But Unsaved Paper",
+            "authors": ["Alice Author"],
+            "source_url": "https://arxiv.org/abs/2604.00001",
+            "metadata": {
+                "abo-type": "arxiv-paper",
+                "arxiv_id": "2604.00001",
+            },
+        },
+        source_module="arxiv-tracker",
+    )
+    store.upsert_from_payload(
+        {
+            "id": "2604.00002",
+            "title": "Saved Paper",
+            "authors": ["Bob Author"],
+            "source_url": "https://arxiv.org/abs/2604.00002",
+            "path": "arxiv/Saved Paper.md",
+            "metadata": {
+                "abo-type": "arxiv-paper",
+                "arxiv_id": "2604.00002",
+                "saved_to_literature": True,
+            },
+        },
+        source_module="semantic-scholar-tracker",
+    )
+
+    all_identifiers = store.existing_identifiers()
+    saved_identifiers = store.existing_identifiers(saved_only=True)
+
+    assert "2604.00001" in all_identifiers
+    assert "2604.00001" not in saved_identifiers
+    assert "2604.00002" in saved_identifiers

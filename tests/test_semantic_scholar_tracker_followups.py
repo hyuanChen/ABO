@@ -124,6 +124,66 @@ async def test_fetch_followups_filters_recent_days_and_sorts_by_recency(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_fetch_followups_logs_existing_dedupe_separately_from_date_filter(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    tracker = SemanticScholarTracker()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    recent_date = (now - timedelta(days=2)).strftime("%Y-%m-%d")
+    old_date = (now - timedelta(days=40)).strftime("%Y-%m-%d")
+
+    async def fake_search(_client: httpx.AsyncClient, _query: str) -> dict:
+        return {
+            "paperId": "source-paper",
+            "title": "Source Paper",
+            "citationCount": 3,
+        }
+
+    async def fake_get_citing_papers(_client: httpx.AsyncClient, _paper_id: str, max_results: int | None = None) -> list[dict]:
+        return [
+            _paper("paper-existing", "Existing Recent Follow-up", recent_date, 5, year=2026, external_ids={"ArXiv": "2604.00001"}),
+            _paper("paper-new", "New Recent Follow-up", recent_date, 3, year=2026, external_ids={"ArXiv": "2604.00002"}),
+            _paper("paper-old", "Old Follow-up", old_date, 1, year=2026, external_ids={"ArXiv": "2603.00001"}),
+        ]
+
+    monkeypatch.setattr(tracker, "search_paper_by_title", fake_search)
+    monkeypatch.setattr(tracker, "get_citing_papers", fake_get_citing_papers)
+
+    items = await tracker.fetch_followups(
+        query="Source Paper",
+        days_back=30,
+        existing_ids={"2604.00001"},
+        sort_by="recency",
+    )
+
+    assert [item.id for item in items] == ["2604.00002"]
+    output = capsys.readouterr().out
+    assert "date_matched=2" in output
+    assert "skipped_existing=1" in output
+    assert "outside_window=1" in output
+
+
+def test_load_existing_ids_reuses_saved_papers_and_crawl_history(monkeypatch: pytest.MonkeyPatch):
+    tracker = SemanticScholarTracker()
+
+    class DummyPaperStore:
+        def existing_identifiers(self, saved_only: bool = False) -> set[str]:
+            assert saved_only is True
+            return {"2604.00001"}
+
+    class DummyCardStore:
+        def existing_processed_content_ids(self, *, module_ids=None) -> set[str]:
+            assert module_ids == ["arxiv-tracker", "semantic-scholar-tracker"]
+            return {"s2_paper-2", "2604.00003"}
+
+    monkeypatch.setattr(s2_module, "PaperStore", DummyPaperStore)
+    monkeypatch.setattr(s2_module, "CardStore", DummyCardStore)
+
+    assert tracker._load_existing_ids() == {"2604.00001", "s2_paper-2", "2604.00003"}
+
+
+@pytest.mark.asyncio
 async def test_fetch_followups_applies_max_results_after_sort(monkeypatch: pytest.MonkeyPatch):
     tracker = SemanticScholarTracker()
 

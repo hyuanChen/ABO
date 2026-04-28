@@ -91,6 +91,58 @@ async def test_arxiv_tracker_fetch_reads_keyword_monitors_and_merges_matches(mon
     assert [match["label"] for match in merged.raw["monitor_matches"]] == ["Vision-Language", "Robotics"]
 
 
+async def test_arxiv_tracker_fetch_logs_existing_dedupe_after_date_filter(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    tracker = ArxivTracker()
+
+    monkeypatch.setattr(
+        tracker,
+        "_load_config",
+        lambda: {
+            "keyword_monitors": [
+                {
+                    "id": "robotics",
+                    "label": "Robotics",
+                    "query": "robot,manipulation",
+                    "categories": ["cs.RO"],
+                    "enabled": True,
+                },
+            ],
+            "max_results": 5,
+            "days_back": 30,
+        },
+    )
+    monkeypatch.setattr(tracker, "_load_existing_ids", lambda: {"2604.00001"})
+
+    async def fake_arxiv_api_search(
+        keywords: list[str],
+        categories: list[str] | None = None,
+        mode: str = "AND",
+        max_results: int = 50,
+        days_back: int | None = None,
+        sort_by: str = "submittedDate",
+        sort_order: str = "descending",
+        author: str | None = None,
+        title: str | None = None,
+    ) -> list[dict]:
+        assert days_back == 30
+        return [
+            _arxiv_paper("2604.00001", "Existing Robot Policy", "cs.RO"),
+            _arxiv_paper("2604.00002", "New Robot Policy", "cs.RO"),
+        ]
+
+    monkeypatch.setattr("abo.default_modules.arxiv.arxiv_api_search", fake_arxiv_api_search)
+
+    items = await tracker.fetch()
+
+    assert [item.id for item in items] == ["2604.00002"]
+    output = capsys.readouterr().out
+    assert "api_matched=2" in output
+    assert "skipped_existing=1" in output
+
+
 def test_normalize_keyword_monitors_defaults_to_cs_all_categories():
     monitors = normalize_keyword_monitors(
         {

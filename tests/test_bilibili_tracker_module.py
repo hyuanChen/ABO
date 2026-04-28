@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from abo.default_modules.bilibili import BilibiliTracker
+from abo.sdk.types import Card
 from abo.sdk.types import Item
+from abo.store.cards import CardStore
 from abo.tools.bilibili import BiliDynamic, BilibiliToolAPI, bilibili_filter_prefetched_dynamics
 
 
@@ -186,10 +188,37 @@ def test_bilibili_prefetched_filter_uses_same_keyword_matching_logic():
     assert result["dynamics"][0]["matched_tags"] == ["插件"]
 
 
-def test_bilibili_keep_limit_is_capped_to_200():
+def test_bilibili_prefetched_filter_uses_shared_reference_time_for_cutoff():
+    reference_time = datetime.now() - timedelta(seconds=10)
+    result = bilibili_filter_prefetched_dynamics(
+        [
+            {
+                "id": "bili-dyn-prefetched-cutoff-1",
+                "dynamic_id": "prefetched-cutoff-1",
+                "title": "边界动态",
+                "content": "这条动态应该跟主动抓取共用同一个时间截断参考点。",
+                "author": "测试UP",
+                "url": "https://t.bilibili.com/prefetched-cutoff-1",
+                "published_at": (reference_time - timedelta(days=7) + timedelta(seconds=5)).isoformat(),
+                "tags": ["科研"],
+            }
+        ],
+        keywords=["科研"],
+        limit=10,
+        days_back=7,
+        reference_time=reference_time.isoformat(),
+        monitor_label="边界测试",
+    )
+
+    assert result["total_found"] == 1
+    assert result["dynamics"][0]["dynamic_id"] == "prefetched-cutoff-1"
+    assert result["fetch_stats"]["reference_time"] == reference_time.isoformat()
+
+
+def test_bilibili_keep_limit_is_capped_to_1000():
     api = BilibiliToolAPI.__new__(BilibiliToolAPI)
-    assert api._normalize_keep_limit(9999) == 200
-    assert api._normalize_keep_limit("250") == 200
+    assert api._normalize_keep_limit(9999) == 1000
+    assert api._normalize_keep_limit("2500") == 1000
 
 
 async def test_bilibili_save_selected_dynamics_respects_monitor_subfolder(monkeypatch, tmp_path):
@@ -291,13 +320,17 @@ async def test_bilibili_fetch_skips_previously_seen_dynamics(monkeypatch, tmp_pa
         captured["days_back"] = kwargs.get("days_back")
         captured["limit"] = kwargs.get("limit")
         captured["page_limit"] = kwargs.get("page_limit")
+        captured["keywords"] = kwargs.get("keywords")
+        captured["tag_filters"] = kwargs.get("tag_filters")
         captured["monitor_subfolder"] = kwargs.get("monitor_subfolder")
+        captured["scan_cutoff_days"] = kwargs.get("scan_cutoff_days")
+        captured["collect_all_until_cutoff"] = kwargs.get("collect_all_until_cutoff")
         return {
             "dynamics": [
                 {
                     "id": "bili-dyn-9001",
                     "title": "旧内容",
-                    "content": "已经抓过的动态",
+                    "content": "已经抓过的科研动态",
                     "url": "https://t.bilibili.com/9001",
                     "dynamic_id": "9001",
                     "author": "测试UP",
@@ -306,8 +339,8 @@ async def test_bilibili_fetch_skips_previously_seen_dynamics(monkeypatch, tmp_pa
                 },
                 {
                     "id": "bili-dyn-9002",
-                    "title": "新内容",
-                    "content": "新的动态",
+                    "title": "科研新内容",
+                    "content": "新的科研动态",
                     "url": "https://t.bilibili.com/9002",
                     "dynamic_id": "9002",
                     "author": "测试UP",
@@ -322,10 +355,48 @@ async def test_bilibili_fetch_skips_previously_seen_dynamics(monkeypatch, tmp_pa
     items = await tracker.fetch(max_results=5)
 
     assert captured["days_back"] == 30
-    assert captured["limit"] == 8
+    assert captured["limit"] is None
     assert captured["page_limit"] == 6
-    assert captured["monitor_subfolder"] == "每日关键词监控/科研监控/关键词/科研"
+    assert captured["keywords"] == []
+    assert captured["tag_filters"] == []
+    assert captured["monitor_subfolder"] is None
+    assert captured["scan_cutoff_days"] is None
+    assert captured["collect_all_until_cutoff"] is True
     assert [str(item.raw.get("dynamic_id")) for item in items] == ["9002"]
+
+
+def test_bilibili_processed_history_only_counts_explicit_feedback(tmp_path):
+    tracker = BilibiliTracker()
+    store = CardStore(tmp_path / "cards.db")
+
+    store.save(
+        Card(
+            id="bili-dyn-9001",
+            module_id="bilibili-tracker",
+            title="科研动态",
+            summary="第一次抓取",
+            score=0.82,
+            tags=["科研"],
+            source_url="https://t.bilibili.com/9001",
+            obsidian_path="bilibili/dynamic/科研动态.md",
+            metadata={"dynamic_id": "9001"},
+            created_at=1714000000.0,
+        )
+    )
+
+    item = _item(
+        "bili-dyn-9001",
+        {
+            "dynamic_id": "9001",
+            "url": "https://t.bilibili.com/9001",
+        },
+    )
+
+    assert tracker._has_seen_dynamic(store, item) is False
+
+    store.record_feedback("bili-dyn-9001", "skip")
+
+    assert tracker._has_seen_dynamic(store, item) is True
 
 
 async def test_bilibili_fetch_reuses_global_cookie_and_defaults_follow_feed(monkeypatch, tmp_path):
@@ -419,6 +490,7 @@ async def test_bilibili_fetch_separates_keyword_monitors_from_fixed_up_supervisi
                         "sessdata": "sess-token",
                         "fetch_follow_limit": 6,
                         "fixed_up_monitor_limit": 11,
+                        "fixed_up_days_back": 30,
                         "keyword_filter": True,
                         "days_back": 14,
                         "daily_dynamic_monitors": [
@@ -498,16 +570,22 @@ async def test_bilibili_fetch_separates_keyword_monitors_from_fixed_up_supervisi
     assert captured_resolve_args == {}
     assert len(captured_calls) == 2
     assert captured_calls[0]["author_ids"] is None
-    assert captured_calls[0]["keywords"] == ["科研"]
-    assert captured_calls[0]["tag_filters"] == ["知识库"]
-    assert captured_calls[0]["limit"] == 9
+    assert captured_calls[0]["keywords"] == []
+    assert captured_calls[0]["tag_filters"] == []
+    assert captured_calls[0]["limit"] is None
+    assert captured_calls[0]["days_back"] == 21
     assert captured_calls[0]["page_limit"] == 4
-    assert captured_calls[0]["monitor_subfolder"] == "每日关键词监控/科研监控/关键词/科研/标签/知识库"
+    assert captured_calls[0].get("scan_cutoff_days") is None
+    assert captured_calls[0].get("monitor_subfolder") is None
+    assert captured_calls[0]["collect_all_until_cutoff"] is True
     assert captured_calls[1]["author_ids"] == ["1001", "1002"]
     assert captured_calls[1]["keywords"] == []
     assert captured_calls[1]["tag_filters"] == []
-    assert captured_calls[1]["limit"] == 11
+    assert captured_calls[1]["limit"] is None
+    assert captured_calls[1]["days_back"] == 30
+    assert captured_calls[1]["page_limit"] == 1000
     assert captured_calls[1]["monitor_subfolder"] == "每日监视UP/固定UP监督"
+    assert captured_calls[1]["collect_all_until_cutoff"] is True
 
     assert [str(item.raw.get("dynamic_id") or "") for item in items] == ["keyword-1", "fixed-1"]
     assert items[0].raw["monitor_source"] == "daily-monitor"
@@ -598,8 +676,15 @@ async def test_bilibili_fetch_reuses_monitor_limits_even_when_module_max_results
     items = await tracker.fetch(max_results=2)
 
     assert len(captured_calls) == 2
-    assert captured_calls[0]["limit"] == 20
-    assert captured_calls[1]["limit"] == 20
+    assert captured_calls[0]["keywords"] == []
+    assert captured_calls[0]["tag_filters"] == []
+    assert captured_calls[0]["limit"] is None
+    assert captured_calls[0]["page_limit"] == 1000
+    assert captured_calls[0].get("scan_cutoff_days") is None
+    assert captured_calls[0]["collect_all_until_cutoff"] is True
+    assert captured_calls[1]["limit"] is None
+    assert captured_calls[1]["page_limit"] == 1000
+    assert captured_calls[1]["collect_all_until_cutoff"] is True
     assert [str(item.raw.get("dynamic_id") or "") for item in items] == [
         "keyword-1",
         "keyword-2",
@@ -612,7 +697,7 @@ async def test_bilibili_fetch_reuses_monitor_limits_even_when_module_max_results
     assert items[-1].raw["monitor_source_label"] == "固定UP监督"
 
 
-async def test_bilibili_fetch_batches_multiple_keyword_monitors_from_one_shared_followed_scan(monkeypatch, tmp_path):
+async def test_bilibili_fetch_batches_keyword_monitors_from_shared_followed_scan_until_longest_cutoff(monkeypatch, tmp_path):
     import abo.tools.bilibili as bilibili_tool
 
     tracker = BilibiliTracker()
@@ -716,8 +801,9 @@ async def test_bilibili_fetch_batches_multiple_keyword_monitors_from_one_shared_
     assert len(captured_calls) == 1
     assert captured_calls[0]["days_back"] == 14
     assert captured_calls[0]["page_limit"] == 3
-    assert captured_calls[0]["limit"] == 60
-    assert captured_calls[0]["scan_cutoff_days"] == 7
+    assert captured_calls[0]["limit"] is None
+    assert captured_calls[0].get("scan_cutoff_days") is None
+    assert captured_calls[0]["collect_all_until_cutoff"] is True
     assert [str(item.raw.get("dynamic_id") or "") for item in items] == ["obsidian-1", "research-1"]
     assert items[0].raw["monitor_label"] == "知识库监控"
     assert items[0].raw["monitor_subfolder"] == "每日关键词监控/知识库监控/标签/知识库"
@@ -725,6 +811,82 @@ async def test_bilibili_fetch_batches_multiple_keyword_monitors_from_one_shared_
     assert items[1].raw["monitor_label"] == "科研监控"
     assert items[1].raw["monitor_subfolder"] == "每日关键词监控/科研监控/关键词/科研"
     assert items[1].raw["matched_keywords"] == ["科研"]
+
+
+async def test_bilibili_fetch_daily_keyword_monitors_respect_explicit_limit(monkeypatch, tmp_path):
+    import abo.tools.bilibili as bilibili_tool
+
+    tracker = BilibiliTracker()
+    captured_calls: list[dict[str, object]] = []
+    prefs_path = tmp_path / ".abo" / "preferences.json"
+    prefs_path.parent.mkdir(parents=True, exist_ok=True)
+    prefs_path.write_text(
+        json.dumps(
+            {
+                "modules": {
+                    "bilibili-tracker": {
+                        "follow_feed": True,
+                        "sessdata": "sess-token",
+                        "fetch_follow_limit": 10,
+                        "keyword_filter": True,
+                        "daily_dynamic_monitors": [
+                            {
+                                "id": "bili-dm-legacy-limit",
+                                "label": "科研监控",
+                                "keywords": ["科研"],
+                                "enabled": True,
+                                "days_back": 7,
+                                "limit": 3,
+                                "page_limit": 1,
+                            }
+                        ],
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(tracker, "_load_seen", lambda: set())
+    monkeypatch.setattr(tracker, "_save_seen", lambda seen: None)
+    monkeypatch.setattr(tracker, "_get_history_store", lambda: object())
+    monkeypatch.setattr(tracker, "_has_seen_dynamic", lambda _store, _item: False)
+
+    async def fake_fetch_followed(**kwargs):
+        captured_calls.append(dict(kwargs))
+        return {
+            "fetch_stats": {"reference_time": datetime.now().isoformat()},
+            "dynamics": [
+                {
+                    "id": f"bili-dyn-research-{index}",
+                    "title": f"科研速报 {index}",
+                    "content": "关键词监控命中",
+                    "url": f"https://t.bilibili.com/research-{index}",
+                    "dynamic_id": f"research-{index}",
+                    "author": "科研UP",
+                    "author_id": f"100{index}",
+                    "dynamic_type": "text",
+                    "published_at": (datetime.now() - timedelta(minutes=index)).isoformat(),
+                }
+                for index in range(1, 7)
+            ],
+        }
+
+    monkeypatch.setattr(bilibili_tool, "bilibili_fetch_followed", fake_fetch_followed)
+
+    items = await tracker.fetch(max_results=10)
+
+    assert len(captured_calls) == 1
+    assert captured_calls[0]["limit"] is None
+    assert captured_calls[0]["page_limit"] == 1
+    assert captured_calls[0]["collect_all_until_cutoff"] is True
+    assert [str(item.raw.get("dynamic_id") or "") for item in items] == [
+        "research-1",
+        "research-2",
+        "research-3",
+    ]
 
 
 async def test_bilibili_fetch_runs_followed_group_monitors_as_independent_tasks(monkeypatch, tmp_path):
@@ -869,11 +1031,87 @@ async def test_bilibili_fetch_fixed_up_supervision_uses_dynamic_pipeline_without
     assert len(captured_calls) == 1
     assert captured_calls[0]["author_ids"] == ["10086"]
     assert captured_calls[0]["keywords"] == []
+    assert captured_calls[0]["limit"] is None
+    assert captured_calls[0]["page_limit"] == 1000
     assert captured_calls[0]["monitor_subfolder"] == "每日监视UP/固定UP监督"
+    assert captured_calls[0]["collect_all_until_cutoff"] is True
     assert len(items) == 1
     assert items[0].raw["dynamic_id"] == "fixed-only-1"
     assert items[0].raw["monitor_source"] == "manual-up"
     assert items[0].raw["monitor_source_label"] == "固定UP监督"
+
+
+async def test_bilibili_fetch_returns_partial_results_when_keyword_monitor_crawl_fails(monkeypatch, tmp_path):
+    import abo.tools.bilibili as bilibili_tool
+
+    tracker = BilibiliTracker()
+    prefs_path = tmp_path / ".abo" / "preferences.json"
+    prefs_path.parent.mkdir(parents=True, exist_ok=True)
+    prefs_path.write_text(
+        json.dumps(
+            {
+                "modules": {
+                    "bilibili-tracker": {
+                        "follow_feed": True,
+                        "sessdata": "sess-token",
+                        "days_back": 7,
+                        "fixed_up_days_back": 21,
+                        "daily_dynamic_monitors": [
+                            {
+                                "id": "bili-dm-1",
+                                "label": "科研监控",
+                                "keywords": ["科研"],
+                                "enabled": True,
+                                "days_back": 7,
+                                "page_limit": 3,
+                            }
+                        ],
+                        "up_uids": ["10086"],
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(tracker, "_load_seen", lambda: set())
+    monkeypatch.setattr(tracker, "_save_seen", lambda seen: None)
+    monkeypatch.setattr(tracker, "_get_history_store", lambda: object())
+    monkeypatch.setattr(tracker, "_has_seen_dynamic", lambda _store, _item: False)
+
+    captured_calls: list[dict[str, object]] = []
+
+    async def fake_fetch_followed(**kwargs):
+        captured_calls.append(dict(kwargs))
+        author_ids = kwargs.get("author_ids") or []
+        if not author_ids:
+            raise RuntimeError("shared keyword crawl failed")
+        return {
+            "dynamics": [
+                {
+                    "id": "bili-dyn-fixed-only",
+                    "title": "固定监督动态",
+                    "content": "即使关键词抓取失败，也应该保留固定UP结果。",
+                    "url": "https://t.bilibili.com/fixed-only",
+                    "dynamic_id": "fixed-only-1",
+                    "author": "固定UP",
+                    "author_id": "10086",
+                    "dynamic_type": "text",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(bilibili_tool, "bilibili_fetch_followed", fake_fetch_followed)
+
+    items = await tracker.fetch(max_results=20)
+
+    assert len(captured_calls) == 2
+    assert captured_calls[1]["author_ids"] == ["10086"]
+    assert captured_calls[1]["days_back"] == 21
+    assert [str(item.raw.get("dynamic_id") or "") for item in items] == ["fixed-only-1"]
+    assert items[0].raw["monitor_source"] == "manual-up"
 
 
 async def test_bilibili_targeted_fetch_uses_author_space_pages_and_keeps_scanning(monkeypatch):
@@ -1412,6 +1650,7 @@ async def test_bilibili_targeted_single_author_stops_after_frontend_keep_limit(m
         days_back,
         page_limit,
         scan_cutoff_days,
+        collect_all_until_cutoff=False,
     ):
         captured["scan_result_limit"] = scan_result_limit
         captured["stop_result_limit"] = stop_result_limit
@@ -1752,6 +1991,7 @@ async def test_bilibili_targeted_group_limit_is_final_keep_count(monkeypatch):
         days_back,
         page_limit,
         scan_cutoff_days,
+        collect_all_until_cutoff=False,
     ):
         captured_scan_limits.append((author_id, scan_result_limit))
         author_rank = int(str(author_id).replace("author-", ""))
@@ -1802,6 +2042,7 @@ async def test_bilibili_targeted_group_round_robins_authors_before_final_keep(mo
         days_back,
         page_limit,
         scan_cutoff_days,
+        collect_all_until_cutoff=False,
     ):
         if author_id == "hot-author":
             return [

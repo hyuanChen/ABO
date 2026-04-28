@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ABO 情报篇 - 小红书宣发海报</title>
+  <style>
+    :root {
+      /* 更温和高级的莫兰迪纸张色系 */
+      --bg: #f5f1ea;
+      --paper: #fffefb;
+      --ink: #2c2621;
+      --muted: #82786d;
+      --line: #e3d7c8;
+      
+      --green: #2e755f;
+      --green-soft: #eaf5f0;
+      --gold: #9e7135;
+      --gold-soft: #fcf4e6;
+      --rose: #ab515d;
+      --rose-soft: #faedf0;
+      --blue: #407296;
+      --blue-soft: #eff5fa;
+      
+      --shadow: 0 32px 64px -12px rgba(85, 75, 65, 0.12);
+      --shadow-sm: 0 8px 24px -4px rgba(85, 75, 65, 0.06);
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    html {
+      background: var(--bg);
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    .canvas {
+      /* 适配小红书常见的 3:4 比例倾向，或者窄屏长图 */
+      width: min(600px, 100vw);
+      padding: 20px 16px;
+    }
+
+    .poster {
+      display: flex;
+      flex-direction: column;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: 
+        radial-gradient(circle at top left, rgba(255, 255, 255, 0.9), transparent 50%),
+        var(--paper);
+      box-shadow: var(--shadow);
+      padding: 32px 28px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* 背景网格装饰 */
+    .poster::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: repeating-linear-gradient(0deg, var(--line) 0, var(--line) 1px, transparent 1px, transparent 24px);
+      opacity: 0.15;
+      pointer-events: none;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      position: relative;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      background: var(--ink);
+      color: var(--paper);
+      border-radius: 6px;
+      padding: 5px 12px;
+      font-weight: bold;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    h1 {
+      margin: 20px 0 12px;
+      font-family: "Songti SC", "STSong", "Noto Serif SC", serif;
+      font-size: clamp(32px, 7.5vw, 42px);
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+      position: relative;
+    }
+
+    .highlight {
+      position: relative;
+      display: inline-block;
+      z-index: 1;
+    }
+
+    .highlight::after {
+      content: '';
+      position: absolute;
+      bottom: 4px;
+      left: 0;
+      width: 100%;
+      height: 10px;
+      background: var(--gold-soft);
+      z-index: -1;
+      border-radius: 4px;
+    }
+
+    .lead {
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.6;
+      position: relative;
+    }
+
+    .who {
+      display: inline-flex;
+      align-items: flex-start;
+      border: 1.5px dashed var(--line);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.6);
+      padding: 10px 14px;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1.5;
+      position: relative;
+      backdrop-filter: blur(4px);
+    }
+
+    .section {
+      margin-top: 28px;
+      position: relative;
+    }
+
+    .section-title {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 19px;
+      font-weight: 800;
+      color: var(--ink);
+    }
+
+    .section-title small {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 500;
+      position: relative;
+      padding-left: 12px;
+    }
+
+    .section-title small::before {
+      content: '•';
+      position: absolute;
+      left: 0;
+      color: var(--line);
+    }
+
+    .grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .fit {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px 20px;
+      transition: transform 0.2s ease;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .fit:hover {
+      transform: translateY(-2px);
+    }
+
+    .fit strong {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .fit p {
+      margin: 0;
+      color: rgba(0,0,0,0.65);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 12px;
+    }
+
+    .chip {
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.8);
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      color: inherit;
+    }
+
+    .quote {
+      margin-top: 20px;
+      padding: 20px;
+      border-radius: 16px;
+      position: relative;
+      text-align: center;
+    }
+
+    .quote strong {
+      font-family: "Songti SC", "STSong", "Noto Serif SC", serif;
+      font-size: 20px;
+      line-height: 1.5;
+      color: inherit; /* 让它继承父级 accent 的颜色 */
+      display: block;
+      margin-bottom: 12px;
+    }
+
+    .quote p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.7;
+    }
+
+    .accent-green { background: var(--green-soft); border-color: rgba(46, 117, 95, 0.15); color: var(--green); }
+    .accent-gold { background: var(--gold-soft); border-color: rgba(158, 113, 53, 0.15); color: var(--gold); }
+    .accent-rose { background: var(--rose-soft); border-color: rgba(171, 81, 93, 0.15); color: var(--rose); }
+    .accent-blue { background: var(--blue-soft); border-color: rgba(64, 114, 150, 0.15); color: var(--blue); }
+
+    .footer {
+      margin-top: 28px;
+      border-top: 1px dashed var(--line);
+      padding-top: 16px;
+      display: flex;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      position: relative;
+    }
+
+    .footer-flow {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .arrow {
+      color: var(--line);
+    }
+
+    @media (max-width: 600px) {
+      .canvas { padding: 12px; }
+      .poster { padding: 24px 20px; border-radius: 16px; }
+      h1 { font-size: 28px; }
+      .quote { padding: 16px; }
+      .quote strong { font-size: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="canvas">
+    <article class="poster">
+      
+      <div class="topbar">
+        <span class="pill">ABO 情报篇</span>
+        <span>拯救吃灰收藏夹计划 🚀</span>
+      </div>
+      
+      <h1>拒绝数字囤积！<br><span class="highlight">把注意力夺回来</span></h1>
+      
+      <p class="lead">收藏=学会？别骗自己了！阿布帮你清空「数字囤积」，将散落的灵感重新整理。过滤噪音，定时推送，让你只专注真正有价值的输入。</p>
+      
+      <div class="who">
+        💡 献给「收藏从未停止，阅读从未开始」的你：<br>
+        把散落的内容变成个人注意力地图，夺回信息主导权。
+      </div>
+
+      <section class="section">
+        <div class="section-title">
+          <h2>如何打造专属情报库？</h2>
+          <small>从信息过载到井然有序</small>
+        </div>
+        
+        <div class="grid">
+          <!-- 卡片 1 -->
+          <div class="fit accent-rose">
+            <strong>📥 聚合散落输入</strong>
+            <p>打通小红书、B站等信息源。设定专属关键词与博主白名单，精准过滤水文噪音，提取今日真情报。</p>
+            <div class="chips">
+              <span class="chip">📌 小红书同步</span>
+              <span class="chip">📺 B站收藏</span>
+            </div>
+          </div>
+          
+          <!-- 卡片 2 -->
+          <div class="fit accent-gold">
+            <strong>🧽 过滤无效噪音</strong>
+            <p>每日情报划重点！快速判断是否值得精读保存。在筛选中记录真实偏好，共同留下真正心动的内容。</p>
+            <div class="chips">
+              <span class="chip">✨ 今日情报</span>
+              <span class="chip">🎯 长期偏好</span>
+            </div>
+          </div>
+          
+          <!-- 卡片 3 -->
+          <div class="fit accent-green">
+            <strong>🗂️ 构建个人数字库</strong>
+            <p>高价值内容自动沉淀至专属情报库和 Wiki。智能分类打标签，定期回顾总结，让知识有迹可循。</p>
+            <div class="chips">
+              <span class="chip">🧠 专属Wiki</span>
+              <span class="chip">🤖 自动复盘</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-title">
+          <h2>最终你能收获什么？</h2>
+          <small>把信息变成你的资产</small>
+        </div>
+        <!-- 将这里的颜色更换为 accent-blue -->
+        <div class="quote accent-blue">
+          <strong>“让好内容不再死在收藏夹，<br>而是长成你大脑的第二根底柱。”</strong>
+          <p>告别信息焦虑，每日情报小结 + 长期偏好积累，让每一次点击和收藏，都变成真实的复利。</p>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="footer-flow">
+          <span>聚合收藏</span>
+          <span class="arrow">➔</span>
+          <span>每日情报</span>
+          <span class="arrow">➔</span>
+          <span>专属Wiki</span>
+          <span class="arrow">➔</span>
+          <span>定期复盘</span>
+        </div>
+      </footer>
+
+    </article>
+  </main>
+</body>
+</html>

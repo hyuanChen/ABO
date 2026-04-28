@@ -4,13 +4,14 @@ ABO Backend — FastAPI 入口
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
+import json
 from pathlib import Path
 import os
 import re
 from typing import Any, Awaitable
 
 import frontmatter
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -40,6 +41,11 @@ from .paper_paths import build_arxiv_grouped_relative_dir, sanitize_paper_title_
 from .paper_cards import sanitize_feed_card_payload
 from .runtime.broadcaster import broadcaster
 from .runtime.discovery import ModuleRegistry, start_watcher
+from .runtime.feed_visibility import (
+    is_card_temporarily_hidden,
+    temporarily_hide_cards,
+    temporarily_hidden_unread_counts,
+)
 from .runtime.runner import ModuleRunner
 from .vault.unified_entry import UnifiedVaultEntry
 from .runtime.scheduler import ModuleScheduler
@@ -53,6 +59,7 @@ from .vault.writer import ensure_vault_structure
 from .bilibili_tracker_config import (
     BILIBILI_TRACKER_DEFAULT_DAYS_BACK,
     BILIBILI_TRACKER_DEFAULT_LIMIT,
+    BILIBILI_TRACKER_FIXED_UP_DEFAULT_DAYS_BACK,
     build_bilibili_legacy_fields,
     normalize_bilibili_dynamic_monitors,
     normalize_bilibili_followed_group_monitors,
@@ -90,6 +97,9 @@ _DEBUG_FEED_FLOW_MODULE_GROUPS = {
     "bilibili": (
         "bilibili-tracker",
     ),
+    "bilibili-fixed-up": (
+        "bilibili-tracker",
+    ),
     "xiaohongshu": (
         "xiaohongshu-tracker",
     ),
@@ -102,6 +112,8 @@ _DEBUG_FEED_FLOW_MODULE_GROUPS["all"] = (
     *_DEBUG_FEED_FLOW_MODULE_GROUPS["papers"],
     *_DEBUG_FEED_FLOW_MODULE_GROUPS["social"],
 )
+_DEBUG_FEED_FLOW_SNAPSHOT_LIMIT = 500
+_DEBUG_FEED_FLOW_OVERRIDE_LOCK = asyncio.Lock()
 _INTELLIGENCE_DELIVERY_MODULE_IDS = (
     *_DEFAULT_PUSH_MODULE_IDS,
     *_SOCIAL_EARLY_MODULE_IDS,
@@ -115,6 +127,48 @@ def _validate_cron(expr: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _list_visible_cards(
+    *,
+    module_id: str | None = None,
+    unread_only: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[Card]:
+    if not unread_only:
+        return _card_store.list(
+            module_id=module_id,
+            unread_only=False,
+            limit=limit,
+            offset=offset,
+        )
+
+    visible_cards: list[Card] = []
+    scan_offset = 0
+    batch_size = max(100, offset + limit)
+
+    while len(visible_cards) < offset + limit:
+        batch = _card_store.list(
+            module_id=module_id,
+            unread_only=True,
+            limit=batch_size,
+            offset=scan_offset,
+        )
+        if not batch:
+            break
+
+        visible_cards.extend(
+            card
+            for card in batch
+            if not is_card_temporarily_hidden(str(card.id or ""))
+        )
+        scan_offset += batch_size
+
+        if len(batch) < batch_size:
+            break
+
+    return visible_cards[offset:offset + limit]
 
 
 def _shift_daily_time(time_text: str, delta_minutes: int) -> str:
@@ -882,9 +936,34 @@ async def feed_ws(ws: WebSocket):
     try:
         while True:
             msg = await ws.receive_text()
-            print(f"[websocket] Received: {msg[:50]}...")
+            clean_msg = str(msg or "").strip()
+            if not clean_msg:
+                continue
+            if clean_msg == "ping":
+                await ws.send_text(json.dumps({"type": "pong"}))
+                continue
+            try:
+                payload = json.loads(clean_msg)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict) and payload.get("type") == "ping":
+                await ws.send_text(json.dumps({
+                    "type": "pong",
+                    "timestamp": payload.get("timestamp"),
+                }))
+                continue
+            if isinstance(payload, dict) and payload.get("type") == "pong":
+                continue
+            print(f"[websocket] Received: {clean_msg[:50]}...")
+    except WebSocketDisconnect as e:
+        close_code = getattr(e, "code", None)
+        if close_code in (1000, 1001, 1005):
+            print(f"[websocket] Feed client disconnected (code={close_code})")
+        else:
+            print(f"[websocket] Feed connection closed unexpectedly (code={close_code}): {e}")
+        broadcaster.unregister(ws)
     except Exception as e:
-        print(f"[websocket] Connection closed: {e}")
+        print(f"[websocket] Connection closed with error: {e}")
         broadcaster.unregister(ws)
 
 
@@ -904,9 +983,11 @@ async def get_cards(
         if unread_only:
             demo_cards = [c for c in demo_cards if not c.get("read")]
         return {"cards": demo_cards[offset:offset + limit]}
-    cards = _card_store.list(
-        module_id=module_id, unread_only=unread_only,
-        limit=limit, offset=offset,
+    cards = _list_visible_cards(
+        module_id=module_id,
+        unread_only=unread_only,
+        limit=limit,
+        offset=offset,
     )
     return {"cards": [sanitize_feed_card_payload(c.to_dict()) for c in cards]}
 
@@ -915,7 +996,15 @@ async def get_cards(
 async def unread_counts():
     if is_demo_mode():
         return DEMO_UNREAD_COUNTS
-    return _card_store.unread_counts()
+    counts = dict(_card_store.unread_counts())
+    hidden_counts = temporarily_hidden_unread_counts(_card_store)
+    for module_id, hidden_count in hidden_counts.items():
+        remaining = int(counts.get(module_id, 0) or 0) - int(hidden_count or 0)
+        if remaining > 0:
+            counts[module_id] = remaining
+        else:
+            counts.pop(module_id, None)
+    return counts
 
 
 @app.get("/api/cards/prioritized")
@@ -932,6 +1021,12 @@ async def get_prioritized_cards(
         limit=limit,
         unread_only=unread_only,
     )
+    if unread_only:
+        cards = [
+            card
+            for card in cards
+            if not is_card_temporarily_hidden(str(card.id or ""))
+        ]
     return {"cards": [sanitize_feed_card_payload(c.to_dict()) for c in cards]}
 
 
@@ -986,11 +1081,34 @@ class BatchFeedbackReq(BaseModel):
     action: FeedbackAction
 
 
+class TemporaryHideReq(BaseModel):
+    card_ids: list[str]
+
+
 def _has_nonzero_rewards(rewards: dict[str, Any]) -> bool:
     for value in rewards.values():
         if isinstance(value, (int, float)) and value != 0:
             return True
     return False
+
+
+def _record_explicit_paper_feedback(card: Card, action: FeedbackAction) -> None:
+    if action.value != "dislike":
+        return
+
+    metadata = {
+        **(card.metadata or {}),
+        "feedback": action.value,
+        "handled_feedback": action.value,
+        "saved_to_literature": bool((card.metadata or {}).get("saved_to_literature")),
+    }
+    _paper_store.upsert_from_payload(
+        {
+            **card.to_dict(),
+            "metadata": metadata,
+        },
+        source_module=card.module_id,
+    )
 
 
 async def _apply_card_feedback(card: Card, action: FeedbackAction) -> tuple[dict[str, Any], list[str]]:
@@ -1023,6 +1141,7 @@ async def _apply_card_feedback(card: Card, action: FeedbackAction) -> tuple[dict
 
     # Record in card store
     affected_card_ids = _card_store.record_feedback(card.id, action.value)
+    _record_explicit_paper_feedback(card, action)
 
     # Save liked items to markdown
     if action.value == "like":
@@ -1101,14 +1220,37 @@ async def feedback_batch(body: BatchFeedbackReq):
     }
 
 
+@app.post("/api/cards/hide-temporary")
+async def hide_cards_temporarily(body: TemporaryHideReq):
+    unique_card_ids = list(dict.fromkeys(
+        card_id.strip()
+        for card_id in body.card_ids
+        if isinstance(card_id, str) and card_id.strip()
+    ))
+    hidden_card_ids = temporarily_hide_cards(_card_store, unique_card_ids)
+    return {
+        "ok": True,
+        "hidden_card_ids": hidden_card_ids,
+    }
+
+
 def _get_debug_feed_flow_skip_reason(module_id: str) -> str | None:
     prefs = _prefs.all_data()
     module_prefs = dict((prefs.get("modules", {}) or {}).get(module_id, {}) or {})
+    return _get_debug_feed_flow_skip_reason_with_prefs(module_id, module_prefs=module_prefs)
+
+
+def _get_debug_feed_flow_skip_reason_with_prefs(
+    module_id: str,
+    *,
+    module_prefs: dict[str, Any],
+    debug_variant: str | None = None,
+) -> str | None:
 
     if module_id == "arxiv-tracker":
         enabled_monitors = [
             monitor
-            for monitor in normalize_keyword_monitors(module_prefs)
+            for monitor in normalize_keyword_monitors(module_prefs or {})
             if monitor.get("enabled", True)
         ]
         if not enabled_monitors:
@@ -1117,14 +1259,14 @@ def _get_debug_feed_flow_skip_reason(module_id: str) -> str | None:
     if module_id == "semantic-scholar-tracker":
         enabled_monitors = [
             monitor
-            for monitor in normalize_followup_monitors(module_prefs)
+            for monitor in normalize_followup_monitors(module_prefs or {})
             if monitor.get("enabled", True)
         ]
         if not enabled_monitors:
             return "未配置启用的 Follow Up 监控器，调试入口只会执行已保存监控，不会使用手动 crawl 的临时 query。"
 
     if module_id == "xiaohongshu-tracker":
-        normalized = normalize_xhs_tracker_config(module_prefs)
+        normalized = normalize_xhs_tracker_config(module_prefs or {})
         active_keyword_monitors = [
             monitor for monitor in normalized["keyword_monitors"]
             if monitor.get("enabled", True)
@@ -1143,48 +1285,145 @@ def _get_debug_feed_flow_skip_reason(module_id: str) -> str | None:
         if not active_keyword_monitors and not active_following_monitors and not following_enabled and not (creator_enabled and active_creator_monitors):
             return "未配置启用的小红书监控词条；关键词、关注流或博主抓取至少需要有一条启用中的定义。"
 
-        if not _get_effective_xhs_cookie(module_prefs):
+        if not _get_effective_xhs_cookie(module_prefs or {}):
             return "未连接可复用的小红书 Cookie；关注流搜索、关键词搜索和博主最新动态都不会执行。请先在主动工具里重新连接 Cookie。"
 
     if module_id == "bilibili-tracker":
+        fixed_up_uids = [
+            str(uid).strip()
+            for uid in ((module_prefs or {}).get("up_uids") or [])
+            if str(uid).strip()
+        ]
+        if debug_variant == "fixed-up-only":
+            if not fixed_up_uids:
+                return "未配置固定 UP 监督；请先在 B站主动工具或设置里添加至少一个固定 UP。"
+            return None
+
         active_daily_monitors = [
-            monitor for monitor in normalize_bilibili_dynamic_monitors(module_prefs)
+            monitor for monitor in normalize_bilibili_dynamic_monitors(module_prefs or {})
             if monitor.get("enabled", True)
         ]
         active_group_monitors = [
-            monitor for monitor in normalize_bilibili_followed_group_monitors(module_prefs)
+            monitor for monitor in normalize_bilibili_followed_group_monitors(module_prefs or {})
             if monitor.get("enabled", True)
-        ]
-        fixed_up_uids = [
-            str(uid).strip()
-            for uid in (module_prefs.get("up_uids") or [])
-            if str(uid).strip()
         ]
 
         if not active_daily_monitors and not active_group_monitors and not fixed_up_uids:
             return "未配置启用的 B站监控词条；常驻关键词、智能分组或固定 UP 至少需要保留一类。"
 
-        if (active_daily_monitors or active_group_monitors) and _is_effective_bilibili_follow_feed_enabled(module_prefs) and not _get_effective_bilibili_sessdata(module_prefs) and not fixed_up_uids:
+        if (active_daily_monitors or active_group_monitors) and _is_effective_bilibili_follow_feed_enabled(module_prefs or {}) and not _get_effective_bilibili_sessdata(module_prefs or {}) and not fixed_up_uids:
             return "未连接可复用的 B站 SESSDATA / Cookie；已关注动态、关键词监控和智能分组都不会执行。请先在主动工具里重新连接 B站 Cookie。"
 
     return None
 
 
-def _get_debug_feed_flow_zero_output_message(module_id: str) -> str | None:
+def _get_debug_feed_flow_zero_output_message(module_id: str, *, debug_variant: str | None = None) -> str | None:
     if module_id == "arxiv-tracker":
         return "已执行，但没有新增 arXiv 论文；常见原因是当前关键词时间窗口内没有新论文，或结果已入库。"
     if module_id == "semantic-scholar-tracker":
-        return "已执行，但没有新增 Follow Up 论文；常见原因是结果已入库、超出时间窗口，或当前源论文暂无新增引用。"
+        return "已执行，但没有新增 Follow Up 论文；常见原因是结果已入库、已在历史记录中处理过、超出时间窗口，或当前源论文暂无新增引用。"
     if module_id == "xiaohongshu-tracker":
-        return "已执行，但没有新增小红书情报；常见原因是结果已被历史去重、当前时间窗内没有新内容，或 Cookie 已失效。"
+        return "已执行，但没有新增小红书情报；常见原因是结果已在历史记录中处理过、当前时间窗内没有新内容，或 Cookie 已失效。"
     if module_id == "bilibili-tracker":
-        return "已执行，但没有新增 B站情报；常见原因是结果已被历史去重、当前关注源暂无更新，或登录态已失效。"
+        if debug_variant == "fixed-up-only":
+            return "已执行，但没有新增固定 UP 情报；常见原因是结果已在历史记录中处理过、最近时间窗内没有新动态，或当前固定 UP 近期没有更新。"
+        return "已执行，但没有新增 B站情报；常见原因是结果已在历史记录中处理过、当前关注源暂无更新，或登录态已失效。"
     return None
 
 
-async def _run_debug_feed_flow_module(module_id: str) -> tuple[int, dict[str, object]]:
+def _copy_jsonable_data(data: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(data, ensure_ascii=False))
+
+
+def _get_debug_feed_flow_module_overrides(requested_scope: str) -> dict[str, dict[str, Any]]:
+    if requested_scope != "bilibili-fixed-up":
+        return {}
+    return {
+        "bilibili-tracker": {
+            "follow_feed": False,
+            "keywords": [],
+            "keyword_filter": False,
+            "daily_dynamic_monitors": [],
+            "followed_up_group_monitors": [],
+            "followed_up_groups": [],
+            "followed_up_original_groups": [],
+        }
+    }
+
+
+def _get_debug_feed_flow_variant_for_scope(requested_scope: str, module_id: str) -> str | None:
+    if requested_scope == "bilibili-fixed-up" and module_id == "bilibili-tracker":
+        return "fixed-up-only"
+    return None
+
+
+def _get_debug_feed_flow_module_name(module_id: str, *, fallback_name: str, debug_variant: str | None = None) -> str:
+    if module_id == "bilibili-tracker" and debug_variant == "fixed-up-only":
+        return "B站固定 UP 监督"
+    return fallback_name
+
+
+@asynccontextmanager
+async def _temporary_debug_feed_flow_module_overrides(module_overrides: dict[str, dict[str, Any]]):
+    normalized_overrides = {
+        str(module_id).strip(): dict(override or {})
+        for module_id, override in (module_overrides or {}).items()
+        if str(module_id).strip() and isinstance(override, dict) and override
+    }
+    if not normalized_overrides:
+        yield
+        return
+
+    prefs_path = Path.home() / ".abo" / "preferences.json"
+    async with _DEBUG_FEED_FLOW_OVERRIDE_LOCK:
+        original_file_text = prefs_path.read_text(encoding="utf-8") if prefs_path.exists() else None
+        original_prefs_data = _copy_jsonable_data(_prefs.all_data())
+
+        current_data = _prefs.all_data()
+        modules = current_data.setdefault("modules", {})
+        for module_id, override in normalized_overrides.items():
+            merged = dict(modules.get(module_id, {}) or {})
+            merged.update(_copy_jsonable_data(override))
+            modules[module_id] = merged
+        _prefs._save()
+
+        try:
+            yield
+        finally:
+            _prefs._data = original_prefs_data
+            prefs_path.parent.mkdir(parents=True, exist_ok=True)
+            if original_file_text is None:
+                with suppress(FileNotFoundError):
+                    prefs_path.unlink()
+            else:
+                prefs_path.write_text(original_file_text, encoding="utf-8")
+
+
+def _build_debug_feed_flow_snapshot() -> dict[str, object]:
+    cards = _list_visible_cards(
+        unread_only=True,
+        limit=_DEBUG_FEED_FLOW_SNAPSHOT_LIMIT,
+        offset=0,
+    )
+    return {
+        "feed_cards": [sanitize_feed_card_payload(card.to_dict()) for card in cards],
+        "unread_counts": _card_store.unread_counts(),
+    }
+
+
+async def _run_debug_feed_flow_module(
+    module_id: str,
+    *,
+    module_prefs_override: dict[str, Any] | None = None,
+    debug_variant: str | None = None,
+) -> tuple[int, dict[str, object]]:
     module = _registry.get(module_id)
-    module_name = module.name if module else module_id
+    base_module_name = module.name if module else module_id
+    module_name = _get_debug_feed_flow_module_name(
+        module_id,
+        fallback_name=base_module_name,
+        debug_variant=debug_variant,
+    )
     if not module:
         return 0, {
             "module_id": module_id,
@@ -1194,7 +1433,16 @@ async def _run_debug_feed_flow_module(module_id: str) -> tuple[int, dict[str, ob
             "message": "Module not found",
         }
 
-    skip_reason = _get_debug_feed_flow_skip_reason(module_id)
+    prefs = _prefs.all_data()
+    module_prefs = dict((prefs.get("modules", {}) or {}).get(module_id, {}) or {})
+    if module_prefs_override:
+        module_prefs.update(_copy_jsonable_data(module_prefs_override))
+
+    skip_reason = _get_debug_feed_flow_skip_reason_with_prefs(
+        module_id,
+        module_prefs=module_prefs,
+        debug_variant=debug_variant,
+    )
     if skip_reason:
         return 0, {
             "module_id": module_id,
@@ -1207,12 +1455,26 @@ async def _run_debug_feed_flow_module(module_id: str) -> tuple[int, dict[str, ob
 
     try:
         card_count: int | None = None
-        run_now_with_count = getattr(_scheduler, "run_now_with_count", None)
-        if callable(run_now_with_count):
-            card_count = await run_now_with_count(module_id, _registry)
-            ok = card_count is not None
+        if _scheduler is None:
+            runner = ModuleRunner(
+                _card_store,
+                _prefs,
+                broadcaster,
+                get_vault_path(),
+                paper_store=_paper_store,
+            )
+            async with _temporary_debug_feed_flow_module_overrides({module_id: module_prefs_override} if module_prefs_override else {}):
+                card_count = await runner.run(module)
+            ok = True
         else:
-            ok = await _scheduler.run_now(module_id, _registry)
+            run_now_with_count = getattr(_scheduler, "run_now_with_count", None)
+            if callable(run_now_with_count):
+                async with _temporary_debug_feed_flow_module_overrides({module_id: module_prefs_override} if module_prefs_override else {}):
+                    card_count = await run_now_with_count(module_id, _registry)
+                ok = card_count is not None
+            else:
+                async with _temporary_debug_feed_flow_module_overrides({module_id: module_prefs_override} if module_prefs_override else {}):
+                    ok = await _scheduler.run_now(module_id, _registry)
 
         if not ok:
             return 0, {
@@ -1232,7 +1494,10 @@ async def _run_debug_feed_flow_module(module_id: str) -> tuple[int, dict[str, ob
         if card_count is not None:
             result["card_count"] = card_count
             if card_count == 0:
-                zero_output_message = _get_debug_feed_flow_zero_output_message(module_id)
+                zero_output_message = _get_debug_feed_flow_zero_output_message(
+                    module_id,
+                    debug_variant=debug_variant,
+                )
                 if zero_output_message:
                     result["message"] = zero_output_message
         return 1, result
@@ -1249,12 +1514,10 @@ async def _run_debug_feed_flow_module(module_id: str) -> tuple[int, dict[str, ob
 @app.post("/api/debug/feed-flow")
 async def debug_run_feed_flow(body: dict | None = None):
     """Run feed-related modules immediately for developer testing."""
-    if not _scheduler:
-        raise HTTPException(503, "Scheduler not ready")
-
     data = body or {}
     requested_scope = str(data.get("scope", "all") or "all").strip().lower()
     raw_module_ids = data.get("module_ids")
+    module_overrides = _get_debug_feed_flow_module_overrides(requested_scope)
 
     module_ids: list[str] = []
     if isinstance(raw_module_ids, list):
@@ -1280,13 +1543,21 @@ async def debug_run_feed_flow(body: dict | None = None):
     for module_id in module_ids:
         if module_id in social_parallel_ids:
             continue
-        completed_delta, result = await _run_debug_feed_flow_module(module_id)
+        completed_delta, result = await _run_debug_feed_flow_module(
+            module_id,
+            module_prefs_override=module_overrides.get(module_id),
+            debug_variant=_get_debug_feed_flow_variant_for_scope(requested_scope, module_id),
+        )
         completed += completed_delta
         results_by_module_id[module_id] = result
 
     if social_parallel_ids:
         social_results = await asyncio.gather(*[
-            _run_debug_feed_flow_module(module_id)
+            _run_debug_feed_flow_module(
+                module_id,
+                module_prefs_override=module_overrides.get(module_id),
+                debug_variant=_get_debug_feed_flow_variant_for_scope(requested_scope, module_id),
+            )
             for module_id in module_ids
             if module_id in social_parallel_ids
         ])
@@ -1306,6 +1577,7 @@ async def debug_run_feed_flow(body: dict | None = None):
         "completed": completed,
         "total": len(module_ids),
         "results": results,
+        **_build_debug_feed_flow_snapshot(),
     }
 
 
@@ -1563,7 +1835,6 @@ async def crawl_arxiv_live(data: dict = None):
                 timeout=30,
             )
             results.append(paper_data)
-            _paper_store.upsert_from_payload(paper_data, source_module="arxiv-tracker")
 
             await broadcaster.send_event({
                 "type": "crawl_progress",
@@ -2024,7 +2295,6 @@ async def crawl_arxiv_by_category(data: dict = None):
         for i, paper in enumerate(api_papers):
             paper_data = await paper_to_card_data(paper)
             results.append(paper_data)
-            _paper_store.upsert_from_payload(paper_data, source_module="arxiv-tracker")
 
             await broadcaster.send_event({
                 "type": "crawl_progress",
@@ -2141,7 +2411,6 @@ async def fetch_semantic_scholar_follow_ups(data: dict):
                     "metadata": card.metadata,
                 }
                 results.append(paper_data)
-                _paper_store.upsert_from_payload(paper_data, source_module="semantic-scholar-tracker")
 
                 # Send partial result
                 await broadcaster.send_event({
@@ -2853,8 +3122,6 @@ async def crawl_semantic_scholar_tracker(data: dict = None):
                             "source_url": source_card.source_url,
                             "metadata": source_card.metadata,
                         }
-                        _paper_store.upsert_from_payload(source_data, source_module="semantic-scholar-tracker")
-
                         await broadcaster.send_event({
                             "type": "crawl_paper",
                             "module": "semantic-scholar-tracker",
@@ -2942,7 +3209,6 @@ async def crawl_semantic_scholar_tracker(data: dict = None):
                         "metadata": card.metadata,
                     }
                     results.append(paper_data)
-                    _paper_store.upsert_from_payload(paper_data, source_module="semantic-scholar-tracker")
 
                     await broadcaster.send_event({
                         "type": "crawl_paper",
@@ -2993,6 +3259,46 @@ async def crawl_semantic_scholar_tracker(data: dict = None):
             "error": error_msg
         })
         raise HTTPException(500, f"Semantic Scholar crawl failed: {e}")
+
+
+@app.post("/api/modules/semantic-scholar-tracker/resolve-source")
+async def resolve_semantic_scholar_tracker_source(data: dict = None):
+    """Resolve a partial Follow Up monitor query to the canonical source paper."""
+    from .default_modules.semantic_scholar_tracker import SemanticScholarTracker
+
+    data = data or {}
+    query = str(data.get("query") or "").strip()
+    if not query:
+        raise HTTPException(400, "query is required")
+
+    tracker = SemanticScholarTracker()
+    try:
+        source_paper = await tracker.resolve_source_paper(query)
+    except Exception as e:
+        raise HTTPException(500, f"Semantic Scholar source resolve failed: {e}")
+
+    if not source_paper:
+        return {"found": False, "query": query, "paper": None}
+
+    external_ids = source_paper.get("externalIds", {}) or {}
+    paper_id = source_paper.get("paperId", "")
+    arxiv_id = external_ids.get("ArXiv", "") or ""
+    s2_url = source_paper.get("url", "") or (f"https://www.semanticscholar.org/paper/{paper_id}" if paper_id else "")
+
+    return {
+        "found": True,
+        "query": query,
+        "paper": {
+            "paper_id": paper_id,
+            "title": source_paper.get("title", ""),
+            "year": source_paper.get("year"),
+            "publication_date": source_paper.get("publicationDate", ""),
+            "citation_count": source_paper.get("citationCount", 0),
+            "arxiv_id": arxiv_id,
+            "s2_url": s2_url,
+            "url": f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else s2_url,
+        },
+    }
 
 
 @app.post("/api/modules/semantic-scholar-tracker/cancel")
@@ -3223,6 +3529,7 @@ class ModuleConfig(BaseModel):
     follow_feed_types: list[int] = [8, 2, 4, 64]
     fetch_follow_limit: int = 20
     fixed_up_monitor_limit: int = BILIBILI_TRACKER_DEFAULT_LIMIT
+    fixed_up_days_back: int | None = None
     creator_groups: list[str] = []
     creator_profiles: dict = {}
     creator_name_map: dict = {}
@@ -3314,6 +3621,7 @@ async def get_module_config(module_id: str):
         "follow_feed_types": module_prefs.get("follow_feed_types", [8, 2, 4, 64]),
         "fetch_follow_limit": module_prefs.get("fetch_follow_limit", 20),
         "fixed_up_monitor_limit": module_prefs.get("fixed_up_monitor_limit"),
+        "fixed_up_days_back": module_prefs.get("fixed_up_days_back"),
         "creator_push_enabled": module_prefs.get("creator_push_enabled", False),
         "disabled_creator_ids": module_prefs.get("disabled_creator_ids", []),
         "creator_groups": module_prefs.get("creator_groups", []),
@@ -3328,6 +3636,8 @@ async def get_module_config(module_id: str):
         "cookie": module_prefs.get("cookie", ""),
         "web_session": module_prefs.get("web_session", ""),
         "id_token": module_prefs.get("id_token", ""),
+        "extension_port": module_prefs.get("extension_port", 9334),
+        "dedicated_window_mode": module_prefs.get("dedicated_window_mode", True),
         "keyword_monitors": [],
         "followup_monitors": [],
         "daily_dynamic_monitors": [],
@@ -3344,6 +3654,10 @@ async def get_module_config(module_id: str):
         config["fixed_up_monitor_limit"] = module_prefs.get(
             "fixed_up_monitor_limit",
             module_prefs.get("fetch_follow_limit", BILIBILI_TRACKER_DEFAULT_LIMIT),
+        )
+        config["fixed_up_days_back"] = module_prefs.get(
+            "fixed_up_days_back",
+            BILIBILI_TRACKER_FIXED_UP_DEFAULT_DAYS_BACK,
         )
         config["days_back"] = module_prefs.get("days_back", BILIBILI_TRACKER_DEFAULT_DAYS_BACK)
         bilibili_monitors = normalize_bilibili_dynamic_monitors(module_prefs)
@@ -3520,6 +3834,12 @@ async def update_module_config(module_id: str, data: dict):
         module_prefs["fetch_follow_limit"] = max(1, int(data["fetch_follow_limit"] or 1))
     if "fixed_up_monitor_limit" in data:
         module_prefs["fixed_up_monitor_limit"] = max(1, int(data["fixed_up_monitor_limit"] or 1))
+    if "fixed_up_days_back" in data:
+        raw_fixed_up_days_back = data["fixed_up_days_back"]
+        if raw_fixed_up_days_back in (None, "", 0, "0"):
+            module_prefs["fixed_up_days_back"] = None
+        else:
+            module_prefs["fixed_up_days_back"] = max(1, int(raw_fixed_up_days_back))
     if "creator_push_enabled" in data:
         module_prefs["creator_push_enabled"] = bool(data["creator_push_enabled"])
     if "disabled_creator_ids" in data:
@@ -3582,6 +3902,10 @@ async def update_module_config(module_id: str, data: dict):
         module_prefs["sessdata"] = data["sessdata"]
     if "cookie" in data:
         module_prefs["cookie"] = data["cookie"]
+    if "extension_port" in data:
+        module_prefs["extension_port"] = max(1, int(data["extension_port"] or 9334))
+    if "dedicated_window_mode" in data:
+        module_prefs["dedicated_window_mode"] = bool(data["dedicated_window_mode"])
     if module_id == "xiaohongshu-tracker":
         xhs_config = normalize_xhs_tracker_config(module_prefs)
         module_prefs["keyword_monitors"] = xhs_config["keyword_monitors"]

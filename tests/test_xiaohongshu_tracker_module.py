@@ -1,9 +1,12 @@
 import json
 from pathlib import Path
+from datetime import datetime, timedelta
 
 import pytest
 
 from abo.default_modules.xiaohongshu import XiaohongshuTracker
+from abo.sdk.types import Card
+from abo.store.cards import CardStore
 from abo.sdk.types import Item
 from abo.tools.xiaohongshu import XHSComment, XHSNote
 
@@ -65,7 +68,14 @@ async def test_xiaohongshu_fetch_uses_auto_crawl_config(monkeypatch):
         min_likes: int,
         **kwargs,
     ):
-        calls["search"] = (keywords, cookie, limit, per_keyword_limit, min_likes)
+        calls["search"] = (
+            keywords,
+            cookie,
+            limit,
+            per_keyword_limit,
+            min_likes,
+            kwargs.get("sort_by"),
+        )
         return [
             _item("search-item-1", "note-search-1", "关键词笔记1", "keyword:科研"),
             _item("search-item-2", "note-search-2", "关键词笔记2", "keyword:写作"),
@@ -86,7 +96,7 @@ async def test_xiaohongshu_fetch_uses_auto_crawl_config(monkeypatch):
     assert calls["users"] == [("user-1", "web_session=ws-token; id_token=id-token", 5)]
     assert calls["follow"] is not None
     assert calls["follow"][0] == "web_session=ws-token; id_token=id-token"
-    assert calls["search"] == (["科研", "写作"], "web_session=ws-token; id_token=id-token", 2, 4, 800)
+    assert calls["search"] == (["科研", "写作"], "web_session=ws-token; id_token=id-token", 8, 4, 800, "comprehensive")
 
 
 async def test_xiaohongshu_fetch_skips_cookie_based_crawls_without_cookie(monkeypatch):
@@ -209,7 +219,7 @@ async def test_xiaohongshu_fetch_uses_configured_max_results(monkeypatch):
 
     items = await tracker.fetch(max_results=20)
 
-    assert len(items) == 3
+    assert len(items) == 10
 
 
 async def test_xiaohongshu_fetch_skips_previously_seen_notes(monkeypatch):
@@ -251,6 +261,32 @@ async def test_xiaohongshu_fetch_skips_previously_seen_notes(monkeypatch):
     items = await tracker.fetch(max_results=5)
 
     assert [item.raw["note_id"] for item in items] == ["note-new"]
+
+
+def test_xiaohongshu_processed_history_only_counts_explicit_feedback(tmp_path):
+    tracker = XiaohongshuTracker()
+    store = CardStore(tmp_path / "cards.db")
+
+    store.save(
+        Card(
+            id="xhs-keyword:note-1",
+            module_id="xiaohongshu-tracker",
+            title="科研工作流",
+            summary="第一次抓取",
+            score=0.81,
+            tags=["科研"],
+            source_url="https://www.xiaohongshu.com/explore/note-1",
+            obsidian_path="xhs/note-1.md",
+            metadata={"note_id": "note-1"},
+            created_at=1714000000.0,
+        )
+    )
+
+    assert tracker._has_seen_note(store, note_id="note-1", url="https://www.xiaohongshu.com/explore/note-1") is False
+
+    store.record_feedback("xhs-keyword:note-1", "skip")
+
+    assert tracker._has_seen_note(store, note_id="note-1", url="https://www.xiaohongshu.com/explore/note-1") is True
 
 
 async def test_xiaohongshu_fetch_expands_selected_smart_groups_from_creator_profiles(monkeypatch):
@@ -492,12 +528,75 @@ async def test_xiaohongshu_fetch_following_notes_delegates_to_followed_backend(m
     assert items[0].raw["user_id"] == "followed-author-1"
 
 
-async def test_xiaohongshu_search_by_keywords_delegates_to_shared_search_flow(monkeypatch):
+async def test_xiaohongshu_fetch_user_notes_reuses_tracker_plugin_options(monkeypatch):
+    tracker = XiaohongshuTracker()
+
+    monkeypatch.setattr(
+        tracker,
+        "_load_config",
+        lambda: {
+            "extension_port": 9555,
+            "dedicated_window_mode": True,
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    async def fake_fetch_xhs_creator_recent_result(**kwargs):
+        captured.update(kwargs)
+        return {
+            "notes": [
+                {
+                    "id": "note-user-1",
+                    "title": "指定博主笔记",
+                    "content": "这里应该复用情报流保存的插件参数。",
+                    "author": "博主A",
+                    "author_id": "user123",
+                    "likes": 23,
+                    "collects": 5,
+                    "comments_count": 1,
+                    "url": "https://www.xiaohongshu.com/explore/note-user-1",
+                    "published_at": "2026-04-28T10:00:00",
+                    "cover_image": None,
+                    "note_type": "normal",
+                    "images": [],
+                    "video_url": None,
+                    "xsec_token": "",
+                    "xsec_source": "",
+                    "comments_preview": [],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        "abo.default_modules.xiaohongshu.fetch_xhs_creator_recent_result",
+        fake_fetch_xhs_creator_recent_result,
+    )
+
+    items = await tracker._fetch_user_notes(
+        user_id="https://www.xiaohongshu.com/user/profile/user123",
+        cookie="web_session=test-token",
+        limit=2,
+        fallback_author="博主A",
+    )
+
+    assert captured["creator_query"] == "user123"
+    assert captured["cookie"] == "web_session=test-token"
+    assert captured["max_notes"] == 2
+    assert captured["extension_port"] == 9555
+    assert captured["dedicated_window_mode"] is True
+    assert captured["require_extension_success"] is True
+    assert captured["enforce_safety"] is False
+    assert len(items) == 1
+    assert items[0].raw["author"] == "博主A"
+
+
+async def test_xiaohongshu_search_by_keywords_delegates_to_shared_runtime_flow(monkeypatch):
     tracker = XiaohongshuTracker()
 
     captured_calls: list[dict[str, object]] = []
 
-    async def fake_xiaohongshu_search(
+    async def fake_fetch_xhs_keyword_search_result(
         keyword: str,
         max_results: int = 20,
         min_likes: int = 100,
@@ -548,9 +647,12 @@ async def test_xiaohongshu_search_by_keywords_delegates_to_shared_search_flow(mo
         }
 
     async def fail_direct_search_by_keyword(*args, **kwargs):
-        raise AssertionError("tracker keyword monitor should reuse xiaohongshu_search instead of direct API.search_by_keyword")
+        raise AssertionError("tracker keyword monitor should reuse the shared keyword-search runtime instead of direct API.search_by_keyword")
 
-    monkeypatch.setattr("abo.default_modules.xiaohongshu.xiaohongshu_search", fake_xiaohongshu_search)
+    monkeypatch.setattr(
+        "abo.default_modules.xiaohongshu.fetch_xhs_keyword_search_result",
+        fake_fetch_xhs_keyword_search_result,
+    )
     monkeypatch.setattr("abo.tools.xiaohongshu.XiaohongshuAPI.search_by_keyword", fail_direct_search_by_keyword)
 
     items = await tracker._search_by_keywords(
@@ -568,7 +670,7 @@ async def test_xiaohongshu_search_by_keywords_delegates_to_shared_search_flow(mo
     assert captured_calls == [
         {
             "keyword": "科研",
-            "max_results": 12,
+            "max_results": 3,
             "min_likes": 500,
             "sort_by": "time",
             "recent_days": 7,
@@ -581,6 +683,67 @@ async def test_xiaohongshu_search_by_keywords_delegates_to_shared_search_flow(mo
     assert [item.raw["note_id"] for item in items] == ["科研-1"]
     assert items[0].raw["crawl_source"] == "keyword:科研"
     assert items[0].raw["matched_keywords"] == ["科研"]
+
+
+async def test_xiaohongshu_fetch_expands_legacy_multi_keyword_monitor_to_per_keyword_limits(monkeypatch):
+    tracker = XiaohongshuTracker()
+
+    monkeypatch.setattr(
+        tracker,
+        "_load_config",
+        lambda: {
+            "web_session": "ws-token",
+            "enable_keyword_search": True,
+            "keywords": ["科研", "写作"],
+            "keyword_search_limit": 4,
+            "keyword_min_likes": 500,
+            "following_scan": {"enabled": False},
+            "following_scan_monitors": [],
+            "creator_push_enabled": False,
+            "creator_monitors": [],
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    async def fake_search_by_keywords(
+        keywords: list[str],
+        cookie: str,
+        limit: int,
+        per_keyword_limit: int,
+        min_likes: int,
+        **kwargs,
+    ):
+        captured["keywords"] = keywords
+        captured["limit"] = limit
+        captured["per_keyword_limit"] = per_keyword_limit
+        captured["sort_by"] = kwargs.get("sort_by")
+        return [
+            _item(f"search-item-{index}", f"note-search-{index}", f"关键词笔记{index}", f"keyword:{keywords[0]}")
+            for index in range(1, 9)
+        ]
+
+    monkeypatch.setattr(tracker, "_search_by_keywords", fake_search_by_keywords)
+
+    items = await tracker.fetch(max_results=4)
+
+    assert captured == {
+        "keywords": ["科研", "写作"],
+        "limit": 8,
+        "per_keyword_limit": 4,
+        "sort_by": "comprehensive",
+    }
+    assert [item.raw["note_id"] for item in items] == [
+        "note-search-1",
+        "note-search-2",
+        "note-search-3",
+        "note-search-4",
+        "note-search-5",
+        "note-search-6",
+        "note-search-7",
+        "note-search-8",
+    ]
+    assert getattr(tracker, "_runtime_max_cards", None) == 8
 
 
 async def test_xiaohongshu_following_monitor_without_keyword_filter_fetches_full_feed(monkeypatch):
@@ -668,6 +831,114 @@ async def test_xiaohongshu_following_monitor_without_keyword_filter_fetches_full
     assert [item.raw["note_id"] for item in items] == ["note-open-feed"]
 
 
+async def test_xiaohongshu_fetch_reuses_monitor_limits_even_when_module_max_results_is_small(monkeypatch):
+    tracker = XiaohongshuTracker()
+
+    monkeypatch.setattr(
+        tracker,
+        "_load_config",
+        lambda: {
+            "web_session": "ws-token",
+            "enable_keyword_search": True,
+            "creator_push_enabled": False,
+            "creator_monitors": [],
+            "keyword_monitors": [
+                {
+                    "id": "xhs-km-1",
+                    "label": "世界模型",
+                    "keywords": ["世界模型"],
+                    "enabled": True,
+                    "per_keyword_limit": 10,
+                    "min_likes": 500,
+                    "recent_days": 7,
+                    "sort_by": "time",
+                }
+            ],
+            "following_scan": {
+                "enabled": True,
+                "keywords": ["健身"],
+                "fetch_limit": 10,
+                "recent_days": 7,
+                "sort_by": "time",
+                "keyword_filter": True,
+            },
+            "following_scan_monitors": [
+                {
+                    "id": "xhs-fm-1",
+                    "label": "健身",
+                    "keywords": ["健身"],
+                    "enabled": True,
+                    "fetch_limit": 10,
+                    "recent_days": 7,
+                    "sort_by": "time",
+                    "keyword_filter": True,
+                    "include_comments": False,
+                    "comments_limit": 20,
+                    "comments_sort_by": "likes",
+                }
+            ],
+        },
+    )
+
+    captured: dict[str, object] = {}
+
+    async def fake_fetch_following_notes(
+        cookie: str,
+        keywords: list[str],
+        limit: int,
+        *,
+        recent_days: int = 7,
+        sort_by: str = "time",
+        extension_port: int = 9334,
+        dedicated_window_mode: bool = True,
+    ):
+        captured["follow_limit"] = limit
+        return [
+            _item(f"follow-item-{index}", f"follow-note-{index}", f"关注流笔记{index}", "following")
+            for index in range(1, 7)
+        ]
+
+    async def fake_search_by_keywords(
+        keywords: list[str],
+        cookie: str,
+        limit: int,
+        per_keyword_limit: int,
+        min_likes: int,
+        **kwargs,
+    ):
+        captured["keyword_limit"] = limit
+        captured["keyword_per_keyword_limit"] = per_keyword_limit
+        return [
+            _item(f"keyword-item-{index}", f"keyword-note-{index}", f"关键词笔记{index}", "keyword:世界模型")
+            for index in range(1, 7)
+        ]
+
+    monkeypatch.setattr(tracker, "_fetch_following_notes", fake_fetch_following_notes)
+    monkeypatch.setattr(tracker, "_search_by_keywords", fake_search_by_keywords)
+
+    items = await tracker.fetch(max_results=6)
+
+    assert captured == {
+        "follow_limit": 10,
+        "keyword_limit": 10,
+        "keyword_per_keyword_limit": 10,
+    }
+    assert [item.raw["crawl_source"] for item in items] == [
+        "following",
+        "following",
+        "following",
+        "following",
+        "following",
+        "following",
+        "keyword:世界模型",
+        "keyword:世界模型",
+        "keyword:世界模型",
+        "keyword:世界模型",
+        "keyword:世界模型",
+        "keyword:世界模型",
+    ]
+
+
 async def test_xiaohongshu_creator_monitor_respects_recent_days_and_time_sort(monkeypatch):
     tracker = XiaohongshuTracker()
 
@@ -703,9 +974,10 @@ async def test_xiaohongshu_creator_monitor_respects_recent_days_and_time_sort(mo
         lambda user_id: type("Decision", (), {"allowed": True, "reason": "", "cooldown_until": ""})(),
     )
 
-    old_time = "2026-04-20T08:00:00"
-    mid_time = "2026-04-27T08:00:00"
-    new_time = "2026-04-27T10:00:00"
+    now = datetime.now()
+    old_time = (now - timedelta(days=8)).isoformat()
+    mid_time = (now - timedelta(hours=12)).isoformat()
+    new_time = (now - timedelta(hours=1)).isoformat()
 
     async def fake_fetch_user_notes(user_id: str, cookie: str, limit: int, *, fallback_author: str = ""):
         return [

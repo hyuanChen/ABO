@@ -43,6 +43,21 @@ type FollowUpConfigResponse = {
   sort_by?: "recency" | "citation_count";
 };
 
+type FollowUpSourceResolveResponse = {
+  found: boolean;
+  query: string;
+  paper?: {
+    title?: string;
+    paper_id?: string;
+    arxiv_id?: string;
+    year?: number;
+    publication_date?: string;
+    citation_count?: number;
+    url?: string;
+    s2_url?: string;
+  } | null;
+};
+
 type ArxivMonitorConfig = {
   keyword_monitors: KeywordMonitor[];
   max_results: number;
@@ -373,16 +388,40 @@ export default function PaperMonitorPanel() {
       return;
     }
 
+    setSavingKey("followup");
+    let resolvedTitle = query;
+    try {
+      const resolved = await api.post<FollowUpSourceResolveResponse>(
+        "/api/modules/semantic-scholar-tracker/resolve-source",
+        { query },
+      );
+      resolvedTitle = resolved.paper?.title?.trim() || query;
+
+      if (!resolved.found || !resolvedTitle) {
+        toast.error("没有找到源论文", "请换成更完整的论文标题或 arXiv ID 后再添加");
+        return;
+      }
+      setFollowupLabelDraft((current) => current.trim() ? current : resolvedTitle);
+    } catch (error) {
+      toast.error("解析源论文失败", error instanceof Error ? error.message : "请稍后重试");
+      return;
+    } finally {
+      setSavingKey(null);
+    }
+
     const nextMonitor: FollowUpMonitor = {
       id: makeLocalId("followup"),
-      label: followupLabelDraft.trim() || query,
-      query,
+      label: followupLabelDraft.trim() || resolvedTitle,
+      query: resolvedTitle,
       enabled: true,
     };
 
+    const duplicateKeys = new Set([query, resolvedTitle].map((value) => value.trim().toLowerCase()).filter(Boolean));
     if (
       followupConfig.followup_monitors.some(
-        (monitor) => monitor.query.trim().toLowerCase() === nextMonitor.query.toLowerCase()
+        (monitor) =>
+          duplicateKeys.has(monitor.query.trim().toLowerCase()) ||
+          duplicateKeys.has(monitor.label.trim().toLowerCase())
       )
     ) {
       toast.error("Follow Up 监控已存在", "可以直接开关，或删除后重新添加");
@@ -1003,7 +1042,7 @@ export default function PaperMonitorPanel() {
                 }}
               >
                 <Plus style={{ width: "16px", height: "16px" }} />
-                添加 Follow Up 监控
+                {savingKey === "followup" ? "处理中..." : "添加 Follow Up 监控"}
               </button>
               <button
                 type="button"

@@ -43,11 +43,12 @@ from abo.tools.xhs_creator_safety import (
     check_creator_allowed,
 )
 from abo.tools.xhs_runtime import (
+    fetch_xhs_keyword_search_result,
     fetch_xhs_creator_recent_result,
     fetch_xhs_following_feed_result,
 )
 from abo.tools.xhs_task_queue import xhs_serial_task
-from abo.tools.xiaohongshu import XiaohongshuAPI, xiaohongshu_search
+from abo.tools.xiaohongshu import XiaohongshuAPI
 from abo.xhs_tracker_config import DEFAULT_XHS_RECENT_DAYS
 from abo.xhs_tracker_config import normalize_string_list, normalize_xhs_tracker_config
 
@@ -137,7 +138,7 @@ class XiaohongshuTracker(Module):
         clean_url = str(url or "").strip()
         if history_store is None or (not clean_note_id and not clean_url):
             return False
-        return history_store.has_crawl_record(
+        return history_store.has_processed_crawl_record(
             module_ids=self.id,
             content_id=clean_note_id,
             source_url=clean_url,
@@ -331,6 +332,7 @@ class XiaohongshuTracker(Module):
         following_scan = dict(normalized["following_scan"])
         following_scan_monitors = list(normalized.get("following_scan_monitors") or [])
         creator_monitors = list(normalized["creator_monitors"])
+        has_explicit_empty_keyword_monitors = isinstance(config.get("keyword_monitors"), list) and not config.get("keyword_monitors")
 
         if keywords:
             keyword_monitors = [
@@ -362,7 +364,7 @@ class XiaohongshuTracker(Module):
                     "comments_sort_by": "likes",
                 }
             ]
-        elif not keyword_monitors:
+        elif not keyword_monitors and not has_explicit_empty_keyword_monitors and bool(config.get("enable_keyword_search", True)):
             keyword_monitors = [
                 {
                     "id": "xhs-km-default",
@@ -416,6 +418,31 @@ class XiaohongshuTracker(Module):
         items: list[Item] = []
         seen_ids: set[str] = set()
         history_store = self._get_history_store()
+        result_cap = max(1, int(max_results or 1))
+
+        structured_requested_total = 0
+        structured_requested_total += sum(
+            max(1, int(monitor.get("per_user_limit", 3) or 3))
+            for monitor in creator_monitors
+            if isinstance(monitor, dict) and monitor.get("enabled", True)
+        )
+        structured_requested_total += sum(
+            max(1, int(monitor.get("fetch_limit", 20) or 20))
+            for monitor in following_scan_monitors
+            if isinstance(monitor, dict) and monitor.get("enabled", True)
+        )
+        if not following_scan_monitors and following_scan.get("enabled"):
+            structured_requested_total += max(1, int(following_scan.get("fetch_limit", 20) or 20))
+        structured_requested_total += sum(
+            max(1, int(monitor.get("per_keyword_limit", 10) or 10))
+            * max(1, len(normalize_string_list(monitor.get("keywords"))))
+            for monitor in keyword_monitors
+            if isinstance(monitor, dict)
+            and monitor.get("enabled", True)
+            and normalize_string_list(monitor.get("keywords"))
+        )
+        if structured_requested_total > 0:
+            result_cap = max(result_cap, structured_requested_total)
 
         async def append_unique(new_items: list[Item]) -> None:
             for item in new_items:
@@ -427,12 +454,12 @@ class XiaohongshuTracker(Module):
                     continue
                 seen_ids.add(note_id)
                 items.append(item)
-                if len(items) >= max_results:
+                if len(items) >= result_cap:
                     return
 
         active_creator_monitors = [monitor for monitor in creator_monitors if monitor.get("enabled", True)]
         if active_creator_monitors:
-            fallback_per_user_limit = max(1, min(10, max_results // max(len(active_creator_monitors), 1)))
+            fallback_per_user_limit = 3
             creator_fetch_count = 0
             for monitor in active_creator_monitors:
                 if creator_fetch_count >= DEFAULT_BATCH_LIMIT:
@@ -453,56 +480,65 @@ class XiaohongshuTracker(Module):
                 author_label = str(monitor.get("author") or monitor.get("label") or "").strip()
                 user_items = await self._fetch_user_notes(user_id, cookie, candidate_limit, fallback_author=author_label)
                 await append_unique(self._filter_notes_by_recent_days(user_items, recent_days, sort_by=monitor.get("sort_by", "time"))[:per_user_limit])
-                if len(items) >= max_results:
-                    return items[:max_results]
+                if len(items) >= result_cap:
+                    self._runtime_max_cards = result_cap
+                    return items[:result_cap]
 
         active_following_monitors = [monitor for monitor in following_scan_monitors if monitor.get("enabled", True)]
         if not active_following_monitors and following_scan.get("enabled"):
             active_following_monitors = [following_scan]
+        active_keyword_monitors = [
+            monitor
+            for monitor in keyword_monitors
+            if monitor.get("enabled", True) and normalize_string_list(monitor.get("keywords"))
+        ]
 
-        if cookie and len(items) < max_results:
+        if cookie and len(items) < result_cap:
             for monitor in active_following_monitors:
                 follow_keywords = normalize_string_list(monitor.get("keywords"))
                 if not follow_keywords and monitor.get("keyword_filter", True):
                     continue
-                await append_unique(
-                    await self._fetch_following_notes(
-                        cookie=cookie,
-                        keywords=follow_keywords if monitor.get("keyword_filter", True) and follow_keywords else [""],
-                        limit=min(int(monitor.get("fetch_limit", 20) or 20), max_results - len(items)),
-                        recent_days=int(monitor.get("recent_days", DEFAULT_XHS_RECENT_DAYS) or DEFAULT_XHS_RECENT_DAYS),
-                        sort_by=str(monitor.get("sort_by", "time") or "time"),
-                        extension_port=max(1, int(config.get("extension_port", 9334) or 9334)),
-                        dedicated_window_mode=bool(config.get("dedicated_window_mode", True)),
-                    )
+                follow_limit = max(1, int(monitor.get("fetch_limit", 20) or 20))
+                follow_items = await self._fetch_following_notes(
+                    cookie=cookie,
+                    keywords=follow_keywords if monitor.get("keyword_filter", True) and follow_keywords else [""],
+                    limit=follow_limit,
+                    recent_days=int(monitor.get("recent_days", DEFAULT_XHS_RECENT_DAYS) or DEFAULT_XHS_RECENT_DAYS),
+                    sort_by=str(monitor.get("sort_by", "time") or "time"),
+                    extension_port=max(1, int(config.get("extension_port", 9334) or 9334)),
+                    dedicated_window_mode=bool(config.get("dedicated_window_mode", True)),
                 )
-                if len(items) >= max_results:
-                    return items[:max_results]
+                await append_unique(
+                    list(follow_items or [])[:follow_limit]
+                )
+                if len(items) >= result_cap:
+                    self._runtime_max_cards = result_cap
+                    return items[:result_cap]
 
-        if cookie and len(items) < max_results:
-            for monitor in keyword_monitors:
-                if not monitor.get("enabled", True):
-                    continue
+        if cookie and len(items) < result_cap:
+            for monitor in active_keyword_monitors:
                 monitor_keywords = normalize_string_list(monitor.get("keywords"))
-                if not monitor_keywords:
-                    continue
-                await append_unique(
-                    await self._search_by_keywords(
-                        keywords=monitor_keywords,
-                        cookie=cookie,
-                        limit=max_results - len(items),
-                        per_keyword_limit=int(monitor.get("per_keyword_limit", 10) or 10),
-                        min_likes=int(monitor.get("min_likes", 500) or 0),
-                        recent_days=int(monitor.get("recent_days", DEFAULT_XHS_RECENT_DAYS) or DEFAULT_XHS_RECENT_DAYS),
-                        sort_by=str(monitor.get("sort_by", "time") or "time"),
-                        extension_port=max(1, int(config.get("extension_port", 9334) or 9334)),
-                        dedicated_window_mode=bool(config.get("dedicated_window_mode", False)),
-                    )
+                keyword_limit = max(1, int(monitor.get("per_keyword_limit", 10) or 10))
+                monitor_total_limit = max(keyword_limit, keyword_limit * max(1, len(monitor_keywords)))
+                keyword_items = await self._search_by_keywords(
+                    keywords=monitor_keywords,
+                    cookie=cookie,
+                    limit=monitor_total_limit,
+                    per_keyword_limit=int(monitor.get("per_keyword_limit", 10) or 10),
+                    min_likes=int(monitor.get("min_likes", 500) or 0),
+                    recent_days=int(monitor.get("recent_days", DEFAULT_XHS_RECENT_DAYS) or DEFAULT_XHS_RECENT_DAYS),
+                    sort_by="comprehensive",
+                    extension_port=max(1, int(config.get("extension_port", 9334) or 9334)),
+                    dedicated_window_mode=bool(config.get("dedicated_window_mode", True)),
                 )
-                if len(items) >= max_results:
+                await append_unique(
+                    list(keyword_items or [])[:monitor_total_limit]
+                )
+                if len(items) >= result_cap:
                     break
 
-        return items[:max_results]
+        self._runtime_max_cards = result_cap
+        return items[:result_cap]
 
     def _note_to_item(
         self,
@@ -607,6 +643,9 @@ class XiaohongshuTracker(Module):
 
     async def _fetch_user_notes(self, user_id: str, cookie: str, limit: int, *, fallback_author: str = "") -> list[Item]:
         clean_id = self._extract_user_id(user_id)
+        config = self._load_config()
+        extension_port = max(1, int(config.get("extension_port", 9334) or 9334))
+        dedicated_window_mode = bool(config.get("dedicated_window_mode", True))
 
         # 作者主页抓取只走插件 bridge 主链路；失败后不再用 HTTP/RSSHub 兜底，
         # 避免风险页出现后继续请求主页相关资源。
@@ -618,8 +657,8 @@ class XiaohongshuTracker(Module):
                     recent_days=365,
                     max_notes=max(limit, 1),
                     use_extension=True,
-                    extension_port=9334,
-                    dedicated_window_mode=False,
+                    extension_port=extension_port,
+                    dedicated_window_mode=dedicated_window_mode,
                     require_extension_success=True,
                     enforce_safety=False,
                     record_creator_metrics=True,
@@ -683,20 +722,21 @@ class XiaohongshuTracker(Module):
         recent_days: int = DEFAULT_XHS_RECENT_DAYS,
         sort_by: str = "time",
         extension_port: int = 9334,
-        dedicated_window_mode: bool = False,
+        dedicated_window_mode: bool = True,
     ) -> list[Item]:
         """Search notes by keywords using the verified Playwright-based tool flow."""
         items: list[Item] = []
         seen_ids: set[str] = set()
-        candidate_limit = max(limit, min(per_keyword_limit * 3, 50), 5)
         for keyword in keywords:
-            if len(items) >= candidate_limit:
+            remaining_limit = max(0, limit - len(items))
+            if remaining_limit <= 0:
                 break
+            request_limit = max(1, min(per_keyword_limit, remaining_limit))
             try:
-                result = await xiaohongshu_search(
+                result = await fetch_xhs_keyword_search_result(
                     keyword=keyword,
                     sort_by=sort_by,
-                    max_results=candidate_limit,
+                    max_results=request_limit,
                     min_likes=min_likes,
                     recent_days=recent_days,
                     cookie=cookie,
@@ -714,7 +754,7 @@ class XiaohongshuTracker(Module):
                     continue
                 seen_ids.add(note_id)
                 items.append(self._serialized_note_to_item(note, source=f"keyword:{keyword}", matched_keywords=[keyword]))
-                if len(items) >= candidate_limit:
+                if len(items) >= limit:
                     break
         return self._filter_notes_by_recent_days(items, recent_days, sort_by=sort_by)[:limit]
 

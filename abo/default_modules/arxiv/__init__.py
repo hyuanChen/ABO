@@ -61,7 +61,7 @@ class ArxivTracker(Module):
         return load_module_preferences(self.id)
 
     def _load_existing_ids(self) -> set[str]:
-        return PaperStore().existing_identifiers(source_module=self.id)
+        return PaperStore().existing_identifiers(saved_only=True)
 
     async def _rate_limited_request(self, client: httpx.AsyncClient, url: str, timeout: int = 60) -> httpx.Response:
         """Make a rate-limited request to arXiv."""
@@ -366,6 +366,9 @@ class ArxivTracker(Module):
                 continue
 
             papers: list[dict] = []
+            api_matched_count = 0
+            skipped_existing_count = 0
+            skipped_duplicate_count = 0
             if mode == "AND_OR":
                 seen_monitor_ids: set[str] = set()
                 for group in groups:
@@ -377,25 +380,43 @@ class ArxivTracker(Module):
                         days_back=days_back,
                         sort_by="submittedDate",
                     )
+                    api_matched_count += len(group_papers)
                     for paper in group_papers:
                         paper_id = str(paper.get("id", "")).strip()
-                        if not paper_id or paper_id in seen_monitor_ids or paper_id in existing_ids:
+                        if not paper_id:
+                            continue
+                        if paper_id in seen_monitor_ids:
+                            skipped_duplicate_count += 1
+                            continue
+                        if paper_id in existing_ids:
+                            skipped_existing_count += 1
                             continue
                         seen_monitor_ids.add(paper_id)
                         papers.append(paper)
             else:
-                papers = [
-                    paper
-                    for paper in await arxiv_api_search(
-                        keywords=groups[0],
-                        categories=expanded_categories or None,
-                        mode="AND",
-                        max_results=max_results,
-                        days_back=days_back,
-                        sort_by="submittedDate",
-                    )
-                    if str(paper.get("id", "")).strip() and str(paper.get("id", "")).strip() not in existing_ids
-                ]
+                api_papers = await arxiv_api_search(
+                    keywords=groups[0],
+                    categories=expanded_categories or None,
+                    mode="AND",
+                    max_results=max_results,
+                    days_back=days_back,
+                    sort_by="submittedDate",
+                )
+                api_matched_count += len(api_papers)
+                for paper in api_papers:
+                    paper_id = str(paper.get("id", "")).strip()
+                    if not paper_id:
+                        continue
+                    if paper_id in existing_ids:
+                        skipped_existing_count += 1
+                        continue
+                    papers.append(paper)
+
+            print(
+                f"[arxiv] Monitor '{monitor['label']}' selected {len(papers)} papers "
+                f"(days_back={days_back}, api_matched={api_matched_count}, "
+                f"skipped_existing={skipped_existing_count}, skipped_duplicate={skipped_duplicate_count})"
+            )
 
             match_info = {
                 "id": monitor["id"],

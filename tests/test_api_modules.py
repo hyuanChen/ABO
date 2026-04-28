@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from abo.main import app
 import abo.main as main_module
 from abo.sdk.types import Card
+from abo.runtime.feed_visibility import clear_all_temporarily_hidden_cards
 from abo.store.cards import CardStore
 
 
@@ -97,6 +98,44 @@ def test_run_module_not_found(client):
     data = response.json()
     assert "detail" in data
     assert "not found" in data["detail"].lower() or "Module" in data["detail"]
+
+
+def test_hide_temporary_endpoint_hides_feed_card_without_persisting_skip(client, monkeypatch, tmp_path):
+    test_store = CardStore(tmp_path / "cards.db")
+    test_store.save(
+        Card(
+            id="xhs-keyword:note-1",
+            module_id="xiaohongshu-tracker",
+            title="科研工作流",
+            summary="第一次抓取",
+            score=0.81,
+            tags=["科研"],
+            source_url="https://www.xiaohongshu.com/explore/note-1",
+            obsidian_path="xhs/note-1.md",
+            metadata={"note_id": "note-1"},
+            created_at=time.time(),
+        )
+    )
+
+    original_store = main_module._card_store
+    monkeypatch.setattr(main_module, "_card_store", test_store)
+    clear_all_temporarily_hidden_cards()
+    try:
+        response = client.post("/api/cards/hide-temporary", json={"card_ids": ["xhs-keyword:note-1"]})
+        assert response.status_code == 200
+        assert response.json()["hidden_card_ids"] == ["xhs-keyword:note-1"]
+
+        unread_response = client.get("/api/cards?unread_only=true&limit=10")
+        assert unread_response.status_code == 200
+        assert unread_response.json()["cards"] == []
+
+        stored = test_store.get("xhs-keyword:note-1")
+        assert stored is not None
+        assert test_store.is_unread("xhs-keyword:note-1") is True
+        assert test_store.has_processed_crawl_record(module_ids="xiaohongshu-tracker", content_id="note-1") is False
+    finally:
+        clear_all_temporarily_hidden_cards()
+        monkeypatch.setattr(main_module, "_card_store", original_store)
 
 
 def test_status_includes_scheduler_info(client):
@@ -182,6 +221,54 @@ def test_debug_feed_flow_runs_requested_scope_modules(client, monkeypatch):
     assert [item["card_count"] for item in data["results"]] == [2, 2]
 
 
+def test_debug_feed_flow_falls_back_to_direct_runner_when_scheduler_is_not_ready(client, monkeypatch):
+    calls: list[str] = []
+
+    async def fake_run(self, module):
+        calls.append(module.id)
+        return 4
+
+    monkeypatch.setattr(main_module.ModuleRunner, "run", fake_run)
+
+    original_all_data = main_module._prefs.all_data
+    monkeypatch.setattr(
+        main_module._prefs,
+        "all_data",
+        lambda: {
+            **original_all_data(),
+            "modules": {
+                **(original_all_data().get("modules", {}) or {}),
+                "arxiv-tracker": {
+                    "keyword_monitors": [
+                        {"id": "kw-1", "label": "Robotics", "query": "robotics", "enabled": True},
+                    ],
+                },
+                "semantic-scholar-tracker": {
+                    "followup_monitors": [
+                        {"id": "fu-1", "label": "RT-2", "query": "RT-2", "enabled": True},
+                    ],
+                },
+            },
+        },
+    )
+
+    original_scheduler = main_module._scheduler
+    main_module._scheduler = None
+    try:
+        response = client.post("/api/debug/feed-flow", json={"scope": "papers"})
+    finally:
+        main_module._scheduler = original_scheduler
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["scope"] == "papers"
+    assert data["completed"] == 2
+    assert data["total"] == 2
+    assert calls == ["arxiv-tracker", "semantic-scholar-tracker"]
+    assert [item["card_count"] for item in data["results"]] == [4, 4]
+
+
 def test_debug_feed_flow_runs_bilibili_scope_only(client):
     calls: list[str] = []
 
@@ -206,6 +293,49 @@ def test_debug_feed_flow_runs_bilibili_scope_only(client):
     assert calls == ["bilibili-tracker"]
     assert [item["module_id"] for item in data["results"]] == ["bilibili-tracker"]
     assert data["results"][0]["card_count"] == 3
+
+
+def test_debug_feed_flow_runs_bilibili_scope_with_fixed_up_only_config(client, monkeypatch):
+    calls: list[str] = []
+
+    class FakeScheduler:
+        async def run_now_with_count(self, module_id, registry):
+            calls.append(module_id)
+            return 5
+
+    original_all_data = main_module._prefs.all_data
+    monkeypatch.setattr(
+        main_module._prefs,
+        "all_data",
+        lambda: {
+            **original_all_data(),
+            "modules": {
+                **(original_all_data().get("modules", {}) or {}),
+                "bilibili-tracker": {
+                    "up_uids": ["10086", "10010"],
+                    "follow_feed": False,
+                },
+            },
+        },
+    )
+
+    original_scheduler = main_module._scheduler
+    main_module._scheduler = FakeScheduler()
+    try:
+        response = client.post("/api/debug/feed-flow", json={"scope": "bilibili"})
+    finally:
+        main_module._scheduler = original_scheduler
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["scope"] == "bilibili"
+    assert data["completed"] == 1
+    assert data["total"] == 1
+    assert calls == ["bilibili-tracker"]
+    assert data["results"][0]["module_id"] == "bilibili-tracker"
+    assert data["results"][0]["status"] == "completed"
+    assert data["results"][0]["card_count"] == 5
 
 
 def test_debug_feed_flow_runs_social_scope_in_parallel(client):
@@ -467,6 +597,8 @@ def test_get_xiaohongshu_module_config_exposes_following_scan_monitors_and_safe_
                 **(original_all_data().get("modules", {}) or {}),
                 "xiaohongshu-tracker": {
                     "creator_push_enabled": True,
+                    "extension_port": 9555,
+                    "dedicated_window_mode": False,
                     "creator_groups": ["research"],
                     "following_scan": {
                         "label": "关注流扫描",
@@ -532,6 +664,8 @@ def test_get_xiaohongshu_module_config_exposes_following_scan_monitors_and_safe_
     assert data["creator_monitors"][0]["recent_days"] == 14
     assert data["creator_monitors"][0]["comments_sort_by"] == "time"
     assert data["creator_monitors"][0]["smart_group_labels"] == ["科研学习"]
+    assert data["extension_port"] == 9555
+    assert data["dedicated_window_mode"] is False
 
 
 def test_get_xiaohongshu_module_config_defaults_creator_push_and_following_scan_to_disabled(client, monkeypatch):
@@ -556,6 +690,8 @@ def test_get_xiaohongshu_module_config_defaults_creator_push_and_following_scan_
     assert data["creator_groups"] == []
     assert data["following_scan"]["enabled"] is False
     assert data["following_scan_monitors"] == []
+    assert data["extension_port"] == 9334
+    assert data["dedicated_window_mode"] is True
 
 
 def test_get_xiaohongshu_module_config_marks_global_cookie_auth_ready(client, monkeypatch):
@@ -599,6 +735,7 @@ def test_get_bilibili_module_config_exposes_daily_monitors_group_monitors_and_fi
                     "follow_feed_types": [8, 64],
                     "fetch_follow_limit": 12,
                     "fixed_up_monitor_limit": 33,
+                    "fixed_up_days_back": 21,
                     "followed_up_filter_mode": "smart_only",
                     "followed_up_original_groups": [3, 9],
                     "daily_dynamic_monitors": [
@@ -648,8 +785,68 @@ def test_get_bilibili_module_config_exposes_daily_monitors_group_monitors_and_fi
     assert data["follow_feed_types"] == [8, 64]
     assert data["fetch_follow_limit"] == 12
     assert data["fixed_up_monitor_limit"] == 33
+    assert data["fixed_up_days_back"] == 21
     assert data["followed_up_filter_mode"] == "smart_only"
     assert data["followed_up_original_groups"] == [3, 9]
+
+
+def test_get_bilibili_module_config_uses_three_day_defaults_for_follow_monitors(client, monkeypatch):
+    original_all_data = main_module._prefs.all_data
+    monkeypatch.setattr(
+        main_module._prefs,
+        "all_data",
+        lambda: {
+            **original_all_data(),
+            "modules": {
+                **(original_all_data().get("modules", {}) or {}),
+                "bilibili-tracker": {
+                    "days_back": 14,
+                    "followed_up_groups": ["study"],
+                    "creator_group_options": [
+                        {"value": "study", "label": "学习区"},
+                    ],
+                },
+            },
+        },
+    )
+
+    response = client.get("/api/modules/bilibili-tracker/config")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["fixed_up_days_back"] == 3
+    assert len(data["followed_up_group_monitors"]) == 1
+    assert data["followed_up_group_monitors"][0]["group_value"] == "study"
+    assert data["followed_up_group_monitors"][0]["label"] == "学习区"
+    assert data["followed_up_group_monitors"][0]["days_back"] == 3
+
+
+def test_get_bilibili_module_config_defaults_daily_monitor_limit_to_50_per_keyword(client, monkeypatch):
+    original_all_data = main_module._prefs.all_data
+    monkeypatch.setattr(
+        main_module._prefs,
+        "all_data",
+        lambda: {
+            **original_all_data(),
+            "modules": {
+                **(original_all_data().get("modules", {}) or {}),
+                "bilibili-tracker": {
+                    "fetch_follow_limit": 12,
+                    "keywords": ["科研"],
+                    "enable_keyword_search": True,
+                },
+            },
+        },
+    )
+
+    response = client.get("/api/modules/bilibili-tracker/config")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["fetch_follow_limit"] == 12
+    assert len(data["daily_dynamic_monitors"]) == 1
+    assert data["daily_dynamic_monitors"][0]["keywords"] == ["科研"]
+    assert data["daily_dynamic_monitors"][0]["limit"] == 50
 
 
 def test_get_bilibili_module_config_marks_global_cookie_auth_ready(client, monkeypatch):
@@ -849,6 +1046,55 @@ def test_single_feedback_returns_affected_duplicate_card_ids(client, tmp_path, m
     assert store.list(unread_only=True, limit=10) == []
 
 
+def test_dislike_paper_card_records_explicit_paper_database_entry(client, tmp_path, monkeypatch):
+    store = CardStore(db_path=tmp_path / "cards.db")
+    store.save(
+        Card(
+            id="arxiv-monitor:2604.00001",
+            module_id="arxiv-tracker",
+            title="Tracked Paper",
+            summary="summary",
+            score=0.8,
+            tags=["robotics"],
+            source_url="https://arxiv.org/abs/2604.00001",
+            obsidian_path="Literature/arXiv/Tracked Paper.md",
+            metadata={
+                "abo-type": "arxiv-paper",
+                "arxiv_id": "2604.00001",
+                "paper_tracking_type": "keyword",
+            },
+        )
+    )
+
+    class DummyPaperStore:
+        def __init__(self):
+            self.payloads = []
+
+        def upsert_from_payload(self, payload, source_module=None):
+            self.payloads.append((payload, source_module))
+            return payload
+
+    paper_store = DummyPaperStore()
+    monkeypatch.setattr(main_module, "_card_store", store)
+    monkeypatch.setattr(main_module, "_paper_store", paper_store)
+    monkeypatch.setattr(main_module._prefs, "record_feedback", lambda tags, action: None)
+    monkeypatch.setattr(main_module._prefs, "update_from_feedback", lambda tags, action, module_id="": None)
+    monkeypatch.setattr(main_module._registry, "get", lambda module_id: None)
+    monkeypatch.setattr(main_module, "_activity_tracker", None)
+
+    response = client.post(
+        "/api/cards/arxiv-monitor:2604.00001/feedback",
+        json={"action": "dislike"},
+    )
+
+    assert response.status_code == 200
+    assert len(paper_store.payloads) == 1
+    payload, source_module = paper_store.payloads[0]
+    assert source_module == "arxiv-tracker"
+    assert payload["metadata"]["feedback"] == "dislike"
+    assert payload["metadata"]["saved_to_literature"] is False
+
+
 def test_paper_monitor_config_persists_four_monitors_and_defaults_non_empty(client, monkeypatch):
     class FakePrefs:
         def __init__(self):
@@ -921,3 +1167,42 @@ def test_paper_monitor_config_persists_four_monitors_and_defaults_non_empty(clie
     assert semantic_config["days_back"] == 365
     assert [monitor["label"] for monitor in semantic_config["followup_monitors"]] == ["RT-2", "OpenVLA"]
     assert semantic_config["sort_by"] == "recency"
+
+
+def test_semantic_scholar_resolve_source_returns_canonical_paper(client, monkeypatch):
+    import abo.default_modules.semantic_scholar_tracker as s2_module
+
+    class DummyTracker:
+        async def resolve_source_paper(self, query: str):
+            assert query == "Dreamzero"
+            return {
+                "paperId": "source-paper-id",
+                "title": "World Action Models are Zero-shot Policies",
+                "year": 2026,
+                "publicationDate": "2026-02-17",
+                "citationCount": 33,
+                "externalIds": {"ArXiv": "2602.15922"},
+                "url": "https://www.semanticscholar.org/paper/source-paper-id",
+            }
+
+    monkeypatch.setattr(s2_module, "SemanticScholarTracker", DummyTracker)
+
+    response = client.post(
+        "/api/modules/semantic-scholar-tracker/resolve-source",
+        json={"query": "Dreamzero"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["found"] is True
+    assert data["paper"]["title"] == "World Action Models are Zero-shot Policies"
+    assert data["paper"]["arxiv_id"] == "2602.15922"
+
+
+def test_semantic_scholar_resolve_source_requires_query(client):
+    response = client.post(
+        "/api/modules/semantic-scholar-tracker/resolve-source",
+        json={"query": " "},
+    )
+
+    assert response.status_code == 400

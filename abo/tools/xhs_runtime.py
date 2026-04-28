@@ -10,7 +10,8 @@ from abo.tools.xhs_creator_safety import (
     record_creator_failure,
     record_creator_success,
 )
-from abo.tools.xiaohongshu import XiaohongshuAPI
+from abo.tools.social_runtime_retry import run_social_runtime_with_retry
+from abo.tools.xiaohongshu import XiaohongshuAPI, xiaohongshu_search
 
 
 LookupCreatorMapping = Callable[[str], dict[str, Any] | None | Awaitable[dict[str, Any] | None]]
@@ -95,6 +96,35 @@ def serialize_xhs_note(note) -> dict[str, Any]:
     }
 
 
+async def fetch_xhs_keyword_search_result(
+    *,
+    keyword: str,
+    cookie: str,
+    max_results: int = 20,
+    min_likes: int = 100,
+    sort_by: str = "comprehensive",
+    recent_days: int | None = None,
+    use_extension: bool = True,
+    extension_port: int = 9334,
+    dedicated_window_mode: bool = False,
+) -> dict[str, Any]:
+    # Scheduled feed and proactive tool must share the same keyword-search runtime entry.
+    return await run_social_runtime_with_retry(
+        f"xiaohongshu keyword search: {keyword}",
+        lambda: xiaohongshu_search(
+            keyword=keyword,
+            max_results=max_results,
+            min_likes=min_likes,
+            sort_by=sort_by,
+            recent_days=recent_days,
+            cookie=cookie,
+            use_extension=use_extension,
+            extension_port=extension_port,
+            dedicated_window_mode=dedicated_window_mode,
+        ),
+    )
+
+
 async def fetch_xhs_following_feed_result(
     *,
     cookie: str,
@@ -107,39 +137,44 @@ async def fetch_xhs_following_feed_result(
     dedicated_window_mode: bool = False,
     update_creator_mapping: UpdateCreatorMapping | None = None,
 ) -> dict[str, Any]:
-    api = XiaohongshuAPI()
-    try:
-        notes = await api.get_following_feed_with_cookie(
-            cookie=cookie,
-            keywords=keywords,
-            max_notes=max(max_notes, 5),
-            use_extension=use_extension,
-            extension_port=extension_port,
-            dedicated_window_mode=dedicated_window_mode,
-        )
-        notes = filter_xhs_notes_by_recent_days(notes, recent_days, sort_by=sort_by)[:max_notes]
-
-        if update_creator_mapping is not None:
-            await _maybe_await(
-                update_creator_mapping(
-                    [
-                        {
-                            "author": note.author,
-                            "author_id": note.author_id,
-                            "profile_url": f"{api.BASE_URL}/user/profile/{note.author_id}" if note.author_id else "",
-                        }
-                        for note in notes
-                    ],
-                    "following-feed-search",
-                )
+    async def _fetch_following_once() -> dict[str, Any]:
+        api = XiaohongshuAPI()
+        try:
+            notes = await api.get_following_feed_with_cookie(
+                cookie=cookie,
+                keywords=keywords,
+                max_notes=max(max_notes, 5),
+                use_extension=use_extension,
+                extension_port=extension_port,
+                dedicated_window_mode=dedicated_window_mode,
             )
+            notes = filter_xhs_notes_by_recent_days(notes, recent_days, sort_by=sort_by)[:max_notes]
 
-        return {
-            "total_found": len(notes),
-            "notes": [serialize_xhs_note(note) for note in notes],
-        }
-    finally:
-        await api.close()
+            if update_creator_mapping is not None:
+                await _maybe_await(
+                    update_creator_mapping(
+                        [
+                            {
+                                "author": note.author,
+                                "author_id": note.author_id,
+                                "profile_url": f"{api.BASE_URL}/user/profile/{note.author_id}" if note.author_id else "",
+                            }
+                            for note in notes
+                        ],
+                        "following-feed-search",
+                    )
+                )
+            return {
+                "total_found": len(notes),
+                "notes": [serialize_xhs_note(note) for note in notes],
+            }
+        finally:
+            await api.close()
+
+    return await run_social_runtime_with_retry(
+        "xiaohongshu following feed",
+        _fetch_following_once,
+    )
 
 
 async def fetch_xhs_creator_recent_result(
@@ -187,15 +222,18 @@ async def fetch_xhs_creator_recent_result(
             record_creator_attempt(clean_user_id)
 
         try:
-            notes = await api.get_user_notes_with_cookie(
-                resolved_user_id,
-                cookie=cookie,
-                max_notes=max(1, min(max_notes, 50)),
-                use_extension=use_extension,
-                extension_port=extension_port,
-                dedicated_window_mode=dedicated_window_mode,
-                manual_current_tab=manual_current_tab,
-                require_extension_success=require_extension_success,
+            notes = await run_social_runtime_with_retry(
+                f"xiaohongshu creator recent: {clean_user_id}",
+                lambda: api.get_user_notes_with_cookie(
+                    resolved_user_id,
+                    cookie=cookie,
+                    max_notes=max(1, min(max_notes, 50)),
+                    use_extension=use_extension,
+                    extension_port=extension_port,
+                    dedicated_window_mode=dedicated_window_mode,
+                    manual_current_tab=manual_current_tab,
+                    require_extension_success=require_extension_success,
+                ),
             )
         except Exception as exc:
             if record_creator_metrics:

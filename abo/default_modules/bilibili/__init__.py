@@ -57,6 +57,7 @@ from abo.bilibili_tracker_config import (
     BILIBILI_TRACKER_DEFAULT_DAYS_BACK,
     BILIBILI_TRACKER_DEFAULT_LIMIT,
     BILIBILI_TRACKER_DEFAULT_PAGE_LIMIT,
+    BILIBILI_TRACKER_FIXED_UP_DEFAULT_DAYS_BACK,
     normalize_bilibili_dynamic_monitors,
     normalize_bilibili_followed_group_monitors,
     normalize_positive_int,
@@ -83,6 +84,7 @@ DEFAULT_CONFIG = {
     "follow_feed_types": [8, 2, 4, 64],  # Video, image, text, article
     "fetch_follow_limit": BILIBILI_TRACKER_DEFAULT_LIMIT,      # Number of dynamics to fetch
     "fixed_up_monitor_limit": BILIBILI_TRACKER_DEFAULT_LIMIT,
+    "fixed_up_days_back": BILIBILI_TRACKER_FIXED_UP_DEFAULT_DAYS_BACK,
     "keyword_filter": True,        # Filter by keywords
     "keywords": ["科研", "学术", "读博", "论文", "AI", "机器学习"],
     "daily_dynamic_monitors": [],
@@ -97,6 +99,8 @@ DEFAULT_CONFIG = {
 }
 
 FOLLOWED_DYNAMIC_BATCH_PAGE_SIZE = 20
+TRACKER_MONITOR_AUTO_LIMIT = 1000
+TRACKER_DYNAMIC_COLLECT_LIMIT = 50000
 
 FOLLOWED_UP_GROUP_KEYWORDS = {
     "ai-tech": ["ai", "人工智能", "大模型", "算法", "程序", "编程", "开发", "科技", "机器人", "芯片", "科普", "computer", "code"],
@@ -169,6 +173,12 @@ def _build_group_monitor_subfolder(label: str) -> str:
     )
 
 
+def _build_fixed_up_subfolder(author_label: object) -> str:
+    from abo.tools.bilibili import build_fixed_up_monitor_subfolder
+
+    return build_fixed_up_monitor_subfolder(author_label)
+
+
 class BilibiliTracker(Module):
     """Track Bilibili videos and dynamics from followed users."""
 
@@ -185,24 +195,16 @@ class BilibiliTracker(Module):
     API_BASE = "https://api.bilibili.com"
     RSSHUB_BASE = "https://rsshub.app"
 
-    # State management for deduplication
+    # Legacy cross-run seen-file dedupe is intentionally disabled.
+    # Feed dedupe should only follow explicit handled history in cards.db,
+    # while per-run duplicates are still removed in memory.
     _STATE_PATH = Path.home() / ".abo" / "data" / "bilibili_seen.json"
 
     def _load_seen(self) -> set[str]:
-        """Load seen dynamic IDs from state file."""
-        if self._STATE_PATH.exists():
-            try:
-                return set(json.loads(self._STATE_PATH.read_text(encoding="utf-8")))
-            except Exception:
-                return set()
         return set()
 
     def _save_seen(self, seen: set[str]):
-        """Save seen dynamic IDs to state file."""
-        self._STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._STATE_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(list(seen), ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, self._STATE_PATH)
+        return None
 
     def _get_history_store(self) -> CardStore | None:
         try:
@@ -223,7 +225,7 @@ class BilibiliTracker(Module):
         source_url = str(item.raw.get("url") or "").strip()
         if not content_id and not source_url:
             return False
-        return history_store.has_crawl_record(
+        return history_store.has_processed_crawl_record(
             module_ids=self.id,
             content_id=content_id,
             source_url=source_url,
@@ -332,7 +334,7 @@ class BilibiliTracker(Module):
             use_follow_feed: Whether to use followed users feed
         """
         items = []
-        seen = self._load_seen()
+        seen: set[str] = set()
         history_store = self._get_history_store()
         from abo.tools.bilibili import (
             bilibili_fetch_followed,
@@ -350,6 +352,13 @@ class BilibiliTracker(Module):
             except ValueError:
                 return None
             return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+
+        def resolve_daily_monitor_keep_limit(monitor: dict[str, object]) -> int:
+            return normalize_positive_int(
+                monitor.get("limit"),
+                default_monitor_limit,
+                maximum=TRACKER_MONITOR_AUTO_LIMIT,
+            )
 
         def append_unseen_item(item: Item) -> bool:
             if item.id in seen:
@@ -453,10 +462,15 @@ class BilibiliTracker(Module):
             default_monitor_limit,
             maximum=1000,
         )
+        default_fixed_up_days_back = normalize_positive_int(
+            config.get("fixed_up_days_back"),
+            BILIBILI_TRACKER_FIXED_UP_DEFAULT_DAYS_BACK,
+            maximum=365,
+        )
         default_page_limit = normalize_positive_int(
             config.get("page_limit"),
             BILIBILI_TRACKER_DEFAULT_PAGE_LIMIT,
-            maximum=100,
+            maximum=1000,
         )
         fixed_up_uids = list(
             dict.fromkeys(
@@ -514,13 +528,24 @@ class BilibiliTracker(Module):
         )
         should_run_fixed_up_dynamic_monitor = bool(parsed_sessdata and fixed_up_uids and not explicit_keywords)
 
+        async def safe_fetch_followed(stage: str, **kwargs) -> dict[str, object]:
+            try:
+                return await bilibili_fetch_followed(**kwargs)
+            except Exception as exc:
+                print(f"[bilibili] {stage} failed: {exc}")
+                return {
+                    "total_found": 0,
+                    "fetch_stats": {
+                        "source": "tracker-error",
+                        "partial_results": True,
+                        "partial_error": str(exc),
+                    },
+                    "dynamics": [],
+                }
+
         structured_requested_total = 0
         keyword_monitor_requested_total = sum(
-            normalize_positive_int(
-                monitor.get("limit"),
-                default_monitor_limit,
-                maximum=1000,
-            )
+            resolve_daily_monitor_keep_limit(monitor)
             for monitor in active_monitors
         )
         structured_requested_total += keyword_monitor_requested_total
@@ -534,126 +559,84 @@ class BilibiliTracker(Module):
         )
         if should_run_followed_keyword_search:
             structured_requested_total += default_monitor_limit
+        fixed_up_result_cap = min(
+            TRACKER_DYNAMIC_COLLECT_LIMIT,
+            max(
+                TRACKER_MONITOR_AUTO_LIMIT,
+                default_page_limit * 12 * max(1, len(fixed_up_uids)),
+            ),
+        )
         if should_run_fixed_up_dynamic_monitor:
-            structured_requested_total += default_fixed_up_monitor_limit
+            structured_requested_total += fixed_up_result_cap
         if structured_requested_total > 0:
             result_cap = max(result_cap, structured_requested_total)
 
         # Method 1: Followed users feed (if enabled and has SESSDATA)
         if use_follow_feed and parsed_sessdata:
             if active_monitors:
-                should_batch_keyword_monitors = len(active_monitors) > 1 and not explicit_keywords
+                shared_days_back = max(
+                    normalize_positive_int(monitor.get("days_back"), default_days_back, maximum=365)
+                    for monitor in active_monitors
+                )
+                shared_page_limit = max(
+                    normalize_positive_int(monitor.get("page_limit"), default_page_limit, maximum=1000)
+                    for monitor in active_monitors
+                )
+                shared_author_ids = sorted(selected_follow_uids) if selected_follow_uids else None
+                shared_result = await safe_fetch_followed(
+                    "shared keyword monitor crawl",
+                    sessdata=parsed_sessdata,
+                    keywords=[],
+                    tag_filters=[],
+                    author_ids=shared_author_ids,
+                    dynamic_types=dynamic_types,
+                    limit=None,
+                    days_back=shared_days_back,
+                    page_limit=shared_page_limit,
+                    collect_all_until_cutoff=True,
+                )
+                shared_dynamics = shared_result.get("dynamics") or []
+                shared_reference_time = (
+                    (shared_result.get("fetch_stats") or {}).get("reference_time")
+                    if isinstance(shared_result, dict)
+                    else None
+                )
 
-                if should_batch_keyword_monitors:
-                    shared_days_back = max(
-                        normalize_positive_int(monitor.get("days_back"), default_days_back, maximum=365)
-                        for monitor in active_monitors
+                for monitor in active_monitors:
+                    monitor_limit = resolve_daily_monitor_keep_limit(monitor)
+                    monitor_label = str(monitor.get("label") or "").strip() or "每日关键词监控"
+                    monitor_keywords = normalize_string_list(monitor.get("keywords")) if config.get("keyword_filter", True) else []
+                    monitor_tag_filters = normalize_string_list(monitor.get("tag_filters"))
+                    monitor_subfolder = _build_daily_monitor_subfolder(
+                        monitor_label,
+                        monitor_keywords,
+                        monitor_tag_filters,
                     )
-                    shared_page_limit = max(
-                        normalize_positive_int(monitor.get("page_limit"), default_page_limit, maximum=100)
-                        for monitor in active_monitors
+                    monitor_days_back = normalize_positive_int(
+                        monitor.get("days_back"),
+                        default_days_back,
+                        maximum=365,
                     )
-                    shared_candidate_limit = min(
-                        1000,
-                        max(
-                            keyword_monitor_requested_total,
-                            shared_page_limit * FOLLOWED_DYNAMIC_BATCH_PAGE_SIZE,
-                        ),
+                    filtered_result = bilibili_filter_prefetched_dynamics(
+                        shared_dynamics,
+                        keywords=monitor_keywords,
+                        tag_filters=monitor_tag_filters,
+                        limit=monitor_limit,
+                        days_back=monitor_days_back,
+                        reference_time=shared_reference_time,
+                        monitor_label=monitor_label,
+                        monitor_subfolder=monitor_subfolder,
+                        crawl_source="daily-monitor",
+                        crawl_source_label=monitor_label,
                     )
-                    shared_result = await bilibili_fetch_followed(
-                        sessdata=parsed_sessdata,
-                        keywords=[],
-                        tag_filters=[],
-                        author_ids=sorted(selected_follow_uids) if selected_follow_uids else None,
-                        dynamic_types=dynamic_types,
-                        limit=shared_candidate_limit,
-                        days_back=shared_days_back,
-                        page_limit=shared_page_limit,
-                        scan_cutoff_days=7,
-                    )
-                    shared_dynamics = shared_result.get("dynamics") or []
-
-                    for monitor in active_monitors:
-                        monitor_limit = normalize_positive_int(
-                            monitor.get("limit"),
-                            default_monitor_limit,
-                            maximum=1000,
-                        )
-                        monitor_label = str(monitor.get("label") or "").strip() or "每日关键词监控"
-                        monitor_keywords = normalize_string_list(monitor.get("keywords")) if config.get("keyword_filter", True) else []
-                        monitor_tag_filters = normalize_string_list(monitor.get("tag_filters"))
-                        monitor_subfolder = _build_daily_monitor_subfolder(
-                            monitor_label,
-                            monitor_keywords,
-                            monitor_tag_filters,
-                        )
-                        monitor_days_back = normalize_positive_int(
-                            monitor.get("days_back"),
-                            default_days_back,
-                            maximum=365,
-                        )
-                        filtered_result = bilibili_filter_prefetched_dynamics(
-                            shared_dynamics,
-                            keywords=monitor_keywords,
-                            tag_filters=monitor_tag_filters,
-                            limit=monitor_limit,
-                            days_back=monitor_days_back,
-                            monitor_label=monitor_label,
-                            monitor_subfolder=monitor_subfolder,
-                            crawl_source="daily-monitor",
-                            crawl_source_label=monitor_label,
-                        )
-                        if append_dynamic_batch(
-                            filtered_result.get("dynamics") or [],
-                            default_monitor_label=monitor_label,
-                            default_monitor_subfolder=monitor_subfolder,
-                            default_monitor_source="daily-monitor",
-                            default_monitor_source_label=monitor_label,
-                            batch_limit=monitor_limit,
-                        ):
-                            break
-                else:
-                    for monitor in active_monitors:
-                        monitor_limit = normalize_positive_int(
-                            monitor.get("limit"),
-                            default_monitor_limit,
-                            maximum=1000,
-                        )
-                        monitor_label = str(monitor.get("label") or "").strip() or "每日关键词监控"
-                        monitor_keywords = normalize_string_list(monitor.get("keywords")) if config.get("keyword_filter", True) else []
-                        monitor_tag_filters = normalize_string_list(monitor.get("tag_filters"))
-                        monitor_subfolder = _build_daily_monitor_subfolder(
-                            monitor_label,
-                            monitor_keywords,
-                            monitor_tag_filters,
-                        )
-                        monitor_days_back = normalize_positive_int(monitor.get("days_back"), default_days_back, maximum=365)
-                        monitor_page_limit = normalize_positive_int(
-                            monitor.get("page_limit"),
-                            default_page_limit,
-                            maximum=100,
-                        )
-                        result = await bilibili_fetch_followed(
-                            sessdata=parsed_sessdata,
-                            keywords=monitor_keywords,
-                            tag_filters=monitor_tag_filters,
-                            author_ids=sorted(selected_follow_uids) if selected_follow_uids else None,
-                            dynamic_types=dynamic_types,
-                            limit=monitor_limit,
-                            days_back=monitor_days_back,
-                            page_limit=monitor_page_limit,
-                            monitor_label=monitor_label,
-                            monitor_subfolder=monitor_subfolder,
-                        )
-                        if append_dynamic_batch(
-                            result.get("dynamics") or [],
-                            default_monitor_label=monitor_label,
-                            default_monitor_subfolder=monitor_subfolder,
-                            default_monitor_source="daily-monitor",
-                            default_monitor_source_label=monitor_label,
-                            batch_limit=monitor_limit,
-                        ):
-                            break
+                    if append_dynamic_batch(
+                        filtered_result.get("dynamics") or [],
+                        default_monitor_label=monitor_label,
+                        default_monitor_subfolder=monitor_subfolder,
+                        default_monitor_source="daily-monitor",
+                        default_monitor_source_label=monitor_label,
+                    ):
+                        break
 
             if active_group_monitors:
                 for monitor in active_group_monitors:
@@ -671,7 +654,7 @@ class BilibiliTracker(Module):
                     monitor_page_limit = normalize_positive_int(
                         monitor.get("page_limit"),
                         default_page_limit,
-                        maximum=100,
+                        maximum=1000,
                     )
                     group_author_ids = await self._resolve_followed_uid_filters(
                         sessdata=parsed_sessdata,
@@ -684,7 +667,8 @@ class BilibiliTracker(Module):
                     if not group_author_ids:
                         continue
                     monitor_subfolder = _build_group_monitor_subfolder(monitor_label)
-                    result = await bilibili_fetch_followed(
+                    result = await safe_fetch_followed(
+                        f"group monitor crawl: {monitor_label}",
                         sessdata=parsed_sessdata,
                         keywords=[],
                         tag_filters=[],
@@ -707,7 +691,8 @@ class BilibiliTracker(Module):
                         break
 
             if should_run_followed_keyword_search:
-                result = await bilibili_fetch_followed(
+                result = await safe_fetch_followed(
+                    "fallback followed keyword crawl",
                     sessdata=parsed_sessdata,
                     keywords=keywords if config.get("keyword_filter", True) else [],
                     author_ids=sorted(selected_follow_uids) if selected_follow_uids else None,
@@ -724,24 +709,32 @@ class BilibiliTracker(Module):
 
         if should_run_fixed_up_dynamic_monitor:
             fixed_up_label = "固定UP监督"
-            fixed_up_subfolder = "每日监视UP/固定UP监督"
-            result = await bilibili_fetch_followed(
+            result = await safe_fetch_followed(
+                "fixed up supervision crawl",
                 sessdata=parsed_sessdata,
                 keywords=[],
                 tag_filters=[],
                 author_ids=fixed_up_uids,
                 dynamic_types=dynamic_types,
-                limit=default_fixed_up_monitor_limit,
-                days_back=default_days_back,
-                monitor_subfolder=fixed_up_subfolder,
+                limit=None,
+                days_back=default_fixed_up_days_back,
+                page_limit=default_page_limit,
+                monitor_label=fixed_up_label,
+                monitor_subfolder=_build_fixed_up_subfolder("UP主"),
+                collect_all_until_cutoff=True,
             )
+            fixed_up_dynamics = []
+            for dynamic in result.get("dynamics") or []:
+                dynamic_copy = dict(dynamic)
+                dynamic_copy["monitor_subfolder"] = _build_fixed_up_subfolder(
+                    dynamic.get("author") or dynamic.get("up_name") or "UP主"
+                )
+                fixed_up_dynamics.append(dynamic_copy)
             append_dynamic_batch(
-                result.get("dynamics") or [],
+                fixed_up_dynamics,
                 default_monitor_label=fixed_up_label,
-                default_monitor_subfolder=fixed_up_subfolder,
                 default_monitor_source="manual-up",
                 default_monitor_source_label=fixed_up_label,
-                batch_limit=default_fixed_up_monitor_limit,
             )
 
         # Method 2: Specific UP主s (fallback when follow feed is unavailable)
@@ -749,18 +742,15 @@ class BilibiliTracker(Module):
             remaining = result_cap - len(items)
             if remaining > 0:
                 fallback_label = "固定UP监督"
-                fallback_subfolder = "每日监视UP/固定UP监督"
                 for uid in fixed_up_uids[:5]:
                     up_items = await self._fetch_up_videos(uid, [], max(1, remaining // len(fixed_up_uids)))
                     for item in up_items:
+                        item_up_name = item.raw.get("up_name") or item.raw.get("author") or "UP主"
                         item.raw["monitor_source"] = "manual-up"
                         item.raw["monitor_source_label"] = fallback_label
                         item.raw["monitor_label"] = fallback_label
-                        item.raw["monitor_subfolder"] = fallback_subfolder
+                        item.raw["monitor_subfolder"] = _build_fixed_up_subfolder(item_up_name)
                         append_unseen_item(item)
-
-        # Save seen IDs
-        self._save_seen(seen)
 
         items.sort(
             key=lambda item: parse_published_value(item.raw.get("published")) or datetime.min,

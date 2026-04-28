@@ -1,0 +1,237 @@
+:root {
+  --bg: #eee6da;
+  --paper: #fffdf8;
+  --ink: #241f1a;
+  --muted: #71675d;
+  --line: #ded0bf;
+  --green: #2e6d5b;
+  --green-soft: #e7f3ed;
+  --gold: #8b612b;
+  --gold-soft: #fbf0dc;
+  --rose: #9a4b54;
+  --rose-soft: #faecee;
+  --blue: #3f6687;
+  --blue-soft: #edf4fa;
+  --violet: #65559a;
+  --violet-soft: #f0ecfb;
+  --shadow: 0 24px 70px rgba(48, 39, 28, .12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+}
+
+.canvas {
+  width: min(780px, calc(100vw - 24px));
+  margin: 0 auto;
+  padding: 24px 0;
+}
+
+.poster {
+  min-height: min(1280px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 0 0, rgba(255, 249, 238, .95), transparent 36%),
+    repeating-linear-gradient(0deg, rgba(222, 208, 191, .14) 0, rgba(222, 208, 191, .14) 1px, transparent 1px, transparent 94px),
+    var(--paper);
+  box-shadow: var(--shadow);
+  padding: 42px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.pill,
+.who {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  border: 1px solid rgba(36, 31, 26, .12);
+  border-radius: 999px;
+  background: rgba(255, 253, 248, .78);
+  padding: 7px 12px;
+}
+
+h1 {
+  margin: 24px 0 0;
+  max-width: 8.2em;
+  font-family: "Songti SC", "STSong", "Noto Serif SC", serif;
+  font-size: clamp(46px, 8vw, 70px);
+  line-height: 1.04;
+  letter-spacing: -.06em;
+}
+
+.lead {
+  margin: 18px 0 0;
+  max-width: 34em;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1.9;
+}
+
+.who {
+  margin-top: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.section {
+  margin-top: 28px;
+}
+
+.section-title {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+h2 {
+  margin: 0;
+  font-size: 23px;
+  line-height: 1.25;
+}
+
+.section-title small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.grid {
+  display: grid;
+  gap: 14px;
+}
+
+.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.card,
+.quote {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 253, 248, .72);
+  padding: 18px;
+}
+
+.card strong,
+.quote strong {
+  display: block;
+  margin-bottom: 7px;
+  font-size: 15px;
+}
+
+.card p,
+.quote p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.chip {
+  border: 1px solid rgba(255, 253, 248, .82);
+  border-radius: 999px;
+  background: rgba(255, 253, 248, .62);
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.quote {
+  margin-top: 28px;
+  padding: 22px;
+}
+
+.quote strong {
+  font-family: "Songti SC", "STSong", "Noto Serif SC", serif;
+  font-size: 24px;
+  line-height: 1.25;
+  letter-spacing: -.04em;
+}
+
+.accent-green { background: var(--green-soft); border-color: color-mix(in srgb, var(--green) 26%, white); color: var(--green); }
+.accent-gold { background: var(--gold-soft); border-color: color-mix(in srgb, var(--gold) 26%, white); color: var(--gold); }
+.accent-rose { background: var(--rose-soft); border-color: color-mix(in srgb, var(--rose) 26%, white); color: var(--rose); }
+.accent-blue { background: var(--blue-soft); border-color: color-mix(in srgb, var(--blue) 26%, white); color: var(--blue); }
+.accent-violet { background: var(--violet-soft); border-color: color-mix(in srgb, var(--violet) 26%, white); color: var(--violet); }
+
+.footer {
+  margin-top: auto;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+@media (max-width: 760px) {
+  .canvas {
+    width: min(100vw - 16px, 780px);
+    padding: 8px 0 18px;
+  }
+
+  .poster {
+    min-height: auto;
+    padding: 24px;
+    border-radius: 14px;
+  }
+
+  h1 {
+    max-width: none;
+    font-size: 38px;
+  }
+
+  .lead {
+    font-size: 16px;
+  }
+
+  .three,
+  .two {
+    grid-template-columns: 1fr;
+  }
+
+  .section-title,
+  .footer,
+  .topbar {
+    align-items: start;
+    flex-direction: column;
+  }
+}

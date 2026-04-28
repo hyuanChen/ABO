@@ -26,7 +26,7 @@ import {
   type IntelligenceScope,
 } from "./intelligence";
 
-const WS_URL = "ws://127.0.0.1:8765/ws/feed";
+const FEED_SYNC_LIMIT = 200;
 
 const EMPTY_FEED_CONTEXT: FeedContext = {
   xhsCreatorProfiles: {},
@@ -43,7 +43,7 @@ const DEFAULT_EXPANDED_TREE_SECTIONS: Record<string, boolean> = {
   "social:xhs:creator": false,
   "social:bilibili": false,
   "social:bilibili:keyword": false,
-  "social:bilibili:smart": false,
+  "social:bilibili:fixed-up": false,
   "social:shared": false,
   papers: false,
   "paper:keyword": false,
@@ -140,28 +140,17 @@ function getBilibiliMonitorLabel(card: FeedCard): string {
 
 function isBilibiliKeywordMonitorCard(card: FeedCard): boolean {
   if (getCardPlatform(card).id !== "bilibili") return false;
+  if (isBilibiliFixedUpCard(card)) return false;
   const monitorSource = cardMetadataString(card, "monitor_source");
   const explicitMonitorLabel = cardMetadataString(card, "monitor_label");
   return monitorSource === "daily-monitor" || (!monitorSource && Boolean(explicitMonitorLabel));
 }
 
-function isBilibiliSmartMonitorCard(card: FeedCard): boolean {
+function isBilibiliFixedUpCard(card: FeedCard): boolean {
   if (getCardPlatform(card).id !== "bilibili") return false;
-  if (isBilibiliKeywordMonitorCard(card)) return false;
   const monitorSource = cardMetadataString(card, "monitor_source");
-  const smartGroupLabels = getSocialSmartGroupLabels(card);
-  return monitorSource === "manual-up" || smartGroupLabels.length > 0;
-}
-
-function isHiddenSocialFilterBranch(branch: string): boolean {
-  return branch === "bili-smart-group" || branch === "social-shared-smart-groups";
-}
-
-function isHiddenSocialDetailFilter(branch: string, detailKey: string): boolean {
-  if (branch === "xhs-creator" && detailKey.startsWith("xhs-creator:group:")) return true;
-  if (branch === "bili-smart-group" && detailKey.startsWith("bili-smart:")) return true;
-  if (branch === "social-shared-smart-groups" && detailKey.startsWith("shared-smart:")) return true;
-  return false;
+  const monitorLabel = getBilibiliMonitorLabel(card).replace(/\s+/g, "");
+  return monitorSource === "manual-up" || monitorLabel === "固定UP监督";
 }
 
 function getFeedCardAuthorLabel(card: FeedCard): string {
@@ -206,8 +195,8 @@ function matchesSocialBranch(card: FeedCard, branch: string): boolean {
       return platform === "xiaohongshu" && sourceKey !== "xhs-keyword" && sourceKey !== "xhs-following";
     case "bili-keyword":
       return isBilibiliKeywordMonitorCard(card);
-    case "bili-smart-group":
-      return isBilibiliSmartMonitorCard(card);
+    case "bili-fixed-up":
+      return isBilibiliFixedUpCard(card);
     case "social-shared-smart-groups":
       return (platform === "xiaohongshu" || platform === "bilibili") && smartGroupLabels.length > 0;
     default:
@@ -232,9 +221,8 @@ function matchesSocialDetail(card: FeedCard, detailKey: string): boolean {
   if (detailKey.startsWith("bili-keyword:")) {
     return getBilibiliMonitorLabel(card) === detailKey.slice("bili-keyword:".length);
   }
-  if (detailKey.startsWith("bili-smart:")) {
-    const label = detailKey.slice("bili-smart:".length);
-    return smartGroupLabels.includes(label) || getBilibiliMonitorLabel(card) === label;
+  if (detailKey.startsWith("bili-fixed-up:author:")) {
+    return getFeedCardAuthorLabel(card) === detailKey.slice("bili-fixed-up:author:".length);
   }
   if (detailKey.startsWith("shared-smart:")) {
     return smartGroupLabels.includes(detailKey.slice("shared-smart:".length));
@@ -297,12 +285,11 @@ function TreeFilterButton({
 
 export default function Feed() {
   const {
-    feedCards, setFeedCards, prependCard,
-    setUnreadCounts, config,
+    feedCards, setFeedCards,
+    setUnreadCounts, config, feedRealtimeStatus,
   } = useStore();
   const toast = useToast();
   const [focusIdx, setFocusIdx] = useState(0);
-  const [isConnected, setIsConnected] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [showShortcutOverlay, setShowShortcutOverlay] = useState(false);
   const [isBatchSkipping, setIsBatchSkipping] = useState(false);
@@ -320,7 +307,33 @@ export default function Feed() {
     [config?.feed_preferences],
   );
   const [groupMode, setGroupMode] = useState<FeedPreferences["group_mode"]>(feedPreferences.group_mode);
-  const wsRef = useRef<WebSocket | null>(null);
+  const realtimeBadge = useMemo(() => {
+    if (feedRealtimeStatus === "connected") {
+      return {
+        background: "rgba(168, 230, 207, 0.2)",
+        border: "rgba(168, 230, 207, 0.4)",
+        color: "#5BA88C",
+        icon: <Wifi style={{ width: "16px", height: "16px", color: "#5BA88C" }} />,
+        label: "实时连接正常",
+      };
+    }
+    if (feedRealtimeStatus === "reconnecting" || feedRealtimeStatus === "connecting") {
+      return {
+        background: "rgba(255, 214, 165, 0.18)",
+        border: "rgba(255, 214, 165, 0.45)",
+        color: "#C9882B",
+        icon: <Wifi style={{ width: "16px", height: "16px", color: "#C9882B" }} />,
+        label: "实时连接重连中",
+      };
+    }
+    return {
+      background: "rgba(255, 183, 178, 0.2)",
+      border: "rgba(255, 183, 178, 0.4)",
+      color: "#D48984",
+      icon: <WifiOff style={{ width: "16px", height: "16px", color: "#D48984" }} />,
+      label: "连接已断开",
+    };
+  }, [feedRealtimeStatus]);
   const containerRef = useRef<HTMLDivElement>(null);
   const focusIdxRef = useRef(0);
   const focusIntentRef = useRef<"sync" | "keyboard" | "scroll" | "pointer">("sync");
@@ -378,14 +391,6 @@ export default function Feed() {
     setGroupMode(feedPreferences.group_mode);
   }, [feedPreferences.group_mode]);
 
-  useEffect(() => {
-    if (scopeFilter !== "social") return;
-    if (isHiddenSocialFilterBranch(socialBranchFilter) || isHiddenSocialDetailFilter(socialBranchFilter, socialDetailFilter)) {
-      setSocialBranchFilter("all");
-      setSocialDetailFilter("all");
-    }
-  }, [scopeFilter, socialBranchFilter, socialDetailFilter]);
-
   function resetHierarchyFilters() {
     setScopeFilter("all");
     setSourceFilter("all");
@@ -412,7 +417,7 @@ export default function Feed() {
 
   async function loadCards() {
     try {
-      const r = await api.get<{ cards: FeedCard[] }>("/api/cards?unread_only=true");
+      const r = await api.get<{ cards: FeedCard[] }>(`/api/cards?unread_only=true&limit=${FEED_SYNC_LIMIT}`);
       const cards = (r.cards || []).filter((card) => !isLegacySemanticScholarTrackerCard(card));
 
       setFeedCards(cards);
@@ -433,39 +438,6 @@ export default function Feed() {
       .then(setUnreadCounts)
       .catch(() => {});
   }
-
-  // WebSocket
-  useEffect(() => {
-    const ws = new WebSocket(WS_URL);
-    ws.onopen = () => setIsConnected(true);
-    ws.onclose = () => setIsConnected(false);
-    ws.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        if (data.type === "new_card") {
-          const nextCard = data.card as FeedCard;
-          if (!isLegacySemanticScholarTrackerCard(nextCard)) {
-            prependCard(nextCard);
-          }
-          updateFocusIdx(0);
-        }
-        // Phase 4: Handle reward notifications
-        if (data.type === "reward_earned") {
-          const store = useStore.getState();
-          store.addReward({
-            action: data.action,
-            xp: data.rewards?.xp || 0,
-            happiness_delta: data.rewards?.happiness_delta || 0,
-            san_delta: data.rewards?.san_delta || 0,
-            message: data.metadata?.card_title || "",
-          });
-        }
-      } catch {}
-    };
-    ws.onerror = () => setIsConnected(false);
-    wsRef.current = ws;
-    return () => ws.close();
-  }, [prependCard]);
 
   const decoratedCards = useMemo(
     () => feedCards
@@ -501,17 +473,19 @@ export default function Feed() {
     const createCounter = () => new Map<string, { label: string; count: number }>();
     const xhsKeyword = createCounter();
     const xhsFollowing = createCounter();
+    const xhsCreatorGroups = createCounter();
     const xhsCreator = createCounter();
     const biliKeyword = createCounter();
-    const biliSmart = createCounter();
+    const biliFixedUp = createCounter();
     const sharedSmart = createCounter();
     let xhsTotal = 0;
     let xhsKeywordTotal = 0;
     let xhsFollowingTotal = 0;
+    let xhsCreatorGroupTotal = 0;
     let xhsCreatorTotal = 0;
     let biliTotal = 0;
     let biliKeywordTotal = 0;
-    let biliSmartTotal = 0;
+    let biliFixedUpTotal = 0;
     let sharedSmartCardTotal = 0;
 
     const addCount = (map: Map<string, { label: string; count: number }>, key: string, label: string) => {
@@ -558,6 +532,10 @@ export default function Feed() {
           continue;
         }
         xhsCreatorTotal += 1;
+        if (smartGroupLabels.length > 0) {
+          xhsCreatorGroupTotal += 1;
+          smartGroupLabels.forEach((label) => addCount(xhsCreatorGroups, `xhs-creator:group:${label}`, label));
+        }
         const authorLabel = getFeedCardAuthorLabel(card);
         addCount(xhsCreator, `xhs-creator:author:${authorLabel}`, authorLabel);
         continue;
@@ -570,14 +548,10 @@ export default function Feed() {
           const monitorLabel = getBilibiliMonitorLabel(card);
           addCount(biliKeyword, `bili-keyword:${monitorLabel}`, monitorLabel);
         }
-        if (isBilibiliSmartMonitorCard(card)) {
-          biliSmartTotal += 1;
-          if (smartGroupLabels.length > 0) {
-            smartGroupLabels.forEach((label) => addCount(biliSmart, `bili-smart:${label}`, label));
-          } else {
-            const fallbackLabel = getBilibiliMonitorLabel(card);
-            addCount(biliSmart, `bili-smart:${fallbackLabel}`, fallbackLabel);
-          }
+        if (isBilibiliFixedUpCard(card)) {
+          biliFixedUpTotal += 1;
+          const authorLabel = getFeedCardAuthorLabel(card);
+          addCount(biliFixedUp, `bili-fixed-up:author:${authorLabel}`, authorLabel);
         }
       }
     }
@@ -589,6 +563,8 @@ export default function Feed() {
         keywordOptions: toOptions(xhsKeyword),
         followingTotal: xhsFollowingTotal,
         followingOptions: toOptions(xhsFollowing),
+        creatorGroupTotal: xhsCreatorGroupTotal,
+        creatorGroupOptions: toOptions(xhsCreatorGroups),
         creatorTotal: xhsCreatorTotal,
         creatorOptions: toOptions(xhsCreator),
       },
@@ -596,8 +572,8 @@ export default function Feed() {
         total: biliTotal,
         keywordTotal: biliKeywordTotal,
         keywordOptions: toOptions(biliKeyword),
-        smartTotal: biliSmartTotal,
-        smartOptions: toOptions(biliSmart),
+        fixedUpTotal: biliFixedUpTotal,
+        fixedUpOptions: toOptions(biliFixedUp),
       },
       shared: {
         total: sharedSmartCardTotal,
@@ -1358,31 +1334,27 @@ export default function Feed() {
     try {
       const result = await api.post<{
         ok: boolean;
-        updated: number;
-        card_ids: string[];
-        affected_card_ids?: string[];
-        missing: string[];
-      }>("/api/cards/feedback/batch", {
+        hidden_card_ids: string[];
+      }>("/api/cards/hide-temporary", {
         card_ids: visibleCardIds,
-        action: "skip",
       });
-      const skippedIds = new Set(result.affected_card_ids || result.card_ids || []);
+      const skippedIds = new Set(result.hidden_card_ids || []);
       if (skippedIds.size > 0) {
         const currentFeedCards = useStore.getState().feedCards;
         setFeedCards(currentFeedCards.filter((card) => !skippedIds.has(card.id)));
       }
       await refreshUnreadCounts();
 
-      if (result.updated > 0) {
-        const message = result.missing.length > 0
-          ? `已跳过 ${result.updated} 条，忽略 ${result.missing.length} 条不存在记录`
-          : `已一键跳过当前筛选出的 ${result.updated} 条情报`;
-        toast.success("批量跳过完成", message);
+      if (skippedIds.size > 0) {
+        toast.success(
+          "当前筛选结果已清除",
+          `已从当前 Feed 暂时移除 ${skippedIds.size} 条情报；这不会写入 skip 历史，下次重新爬取时仍会继续出现。`,
+        );
       } else {
-        toast.success("无需跳过", "当前筛选结果里没有可处理的情报");
+        toast.success("无需清除", "当前筛选结果里没有可暂时移除的情报");
       }
     } catch (error) {
-      toast.error("批量跳过失败", error instanceof Error ? error.message : "请稍后重试");
+      toast.error("清除失败", error instanceof Error ? error.message : "请稍后重试");
     } finally {
       setIsBatchSkipping(false);
     }
@@ -1452,10 +1424,10 @@ export default function Feed() {
           </p>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 20px", borderRadius: "var(--radius-full)", background: isConnected ? "rgba(168, 230, 207, 0.2)" : "rgba(255, 183, 178, 0.2)", border: `1px solid ${isConnected ? "rgba(168, 230, 207, 0.4)" : "rgba(255, 183, 178, 0.4)"}` }}>
-          {isConnected ? <Wifi style={{ width: "16px", height: "16px", color: "#5BA88C" }} /> : <WifiOff style={{ width: "16px", height: "16px", color: "#D48984" }} />}
-          <span style={{ fontSize: "0.875rem", fontWeight: 600, color: isConnected ? "#5BA88C" : "#D48984" }}>
-            {isConnected ? "实时连接正常" : "连接已断开"}
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 20px", borderRadius: "var(--radius-full)", background: realtimeBadge.background, border: `1px solid ${realtimeBadge.border}` }}>
+          {realtimeBadge.icon}
+          <span style={{ fontSize: "0.875rem", fontWeight: 600, color: realtimeBadge.color }}>
+            {realtimeBadge.label}
           </span>
         </div>
       </div>
@@ -1963,6 +1935,27 @@ export default function Feed() {
                             : null
                         }
                       />
+                      {expandedTreeSections["social:xhs:creator"] && socialHierarchy.xhs.creatorGroupOptions.map((option) => (
+                        <TreeFilterButton
+                          key={option.key}
+                          active={scopeFilter === "social" && socialBranchFilter === "xhs-creator" && socialDetailFilter === option.key}
+                          label={`分组 · ${option.label}`}
+                          count={option.count}
+                          depth={3}
+                          onClick={() => {
+                            setScopeFilter("social");
+                            setSourceFilter("all");
+                            setSocialBranchFilter("xhs-creator");
+                            setSocialDetailFilter(option.key);
+                            setExpandedTreeSections((current) => ({
+                              ...current,
+                              social: true,
+                              "social:xhs": true,
+                              "social:xhs:creator": true,
+                            }));
+                          }}
+                        />
+                      ))}
                       {expandedTreeSections["social:xhs:creator"] && socialHierarchy.xhs.creatorOptions.map((option) => (
                         <TreeFilterButton
                           key={option.key}
@@ -2066,8 +2059,103 @@ export default function Feed() {
                         />
                       ))}
 
+                      <TreeFilterButton
+                        active={scopeFilter === "social" && socialBranchFilter === "bili-fixed-up" && socialDetailFilter === "all"}
+                        label="固定 UP 监督"
+                        count={socialHierarchy.bilibili.fixedUpTotal}
+                        depth={2}
+                        onClick={() => {
+                          const nextExpanded = socialBranchFilter === "bili-fixed-up" ? !expandedTreeSections["social:bilibili:fixed-up"] : true;
+                          setScopeFilter("social");
+                          setSourceFilter("all");
+                          setSocialBranchFilter("bili-fixed-up");
+                          setSocialDetailFilter("all");
+                          setExpandedTreeSections((current) => ({
+                            ...current,
+                            social: true,
+                            "social:bilibili": true,
+                            "social:bilibili:fixed-up": nextExpanded,
+                          }));
+                        }}
+                        trailing={
+                          socialHierarchy.bilibili.fixedUpOptions.length > 0
+                            ? (expandedTreeSections["social:bilibili:fixed-up"]
+                                ? <ChevronDown style={{ width: "14px", height: "14px" }} />
+                                : <ChevronRight style={{ width: "14px", height: "14px" }} />)
+                            : null
+                        }
+                      />
+                      {expandedTreeSections["social:bilibili:fixed-up"] && socialHierarchy.bilibili.fixedUpOptions.map((option) => (
+                        <TreeFilterButton
+                          key={option.key}
+                          active={scopeFilter === "social" && socialBranchFilter === "bili-fixed-up" && socialDetailFilter === option.key}
+                          label={option.label}
+                          count={option.count}
+                          depth={3}
+                          onClick={() => {
+                            setScopeFilter("social");
+                            setSourceFilter("all");
+                            setSocialBranchFilter("bili-fixed-up");
+                            setSocialDetailFilter(option.key);
+                            setExpandedTreeSections((current) => ({
+                              ...current,
+                              social: true,
+                              "social:bilibili": true,
+                              "social:bilibili:fixed-up": true,
+                            }));
+                          }}
+                        />
+                      ))}
+
                     </>
                   )}
+
+                  <TreeFilterButton
+                    active={scopeFilter === "social" && socialBranchFilter === "social-shared-smart-groups" && socialDetailFilter === "all"}
+                    label="跨平台智能分组"
+                    count={socialHierarchy.shared.total}
+                    depth={1}
+                    onClick={() => {
+                      const nextExpanded = socialBranchFilter === "social-shared-smart-groups" ? !expandedTreeSections["social:shared"] : true;
+                      setScopeFilter("social");
+                      setSourceFilter("all");
+                      setSocialBranchFilter("social-shared-smart-groups");
+                      setSocialDetailFilter("all");
+                      setExpandedTreeSections((current) => ({
+                        ...current,
+                        social: true,
+                        "social:shared": nextExpanded,
+                      }));
+                    }}
+                    leading={<Sparkles style={{ width: "14px", height: "14px" }} />}
+                    trailing={
+                      socialHierarchy.shared.options.length > 0
+                        ? (expandedTreeSections["social:shared"]
+                            ? <ChevronDown style={{ width: "14px", height: "14px" }} />
+                            : <ChevronRight style={{ width: "14px", height: "14px" }} />)
+                        : null
+                    }
+                  />
+                  {expandedTreeSections["social:shared"] && socialHierarchy.shared.options.map((option) => (
+                    <TreeFilterButton
+                      key={option.key}
+                      active={scopeFilter === "social" && socialBranchFilter === "social-shared-smart-groups" && socialDetailFilter === option.key}
+                      label={option.label}
+                      count={option.count}
+                      depth={2}
+                      onClick={() => {
+                        setScopeFilter("social");
+                        setSourceFilter("all");
+                        setSocialBranchFilter("social-shared-smart-groups");
+                        setSocialDetailFilter(option.key);
+                        setExpandedTreeSections((current) => ({
+                          ...current,
+                          social: true,
+                          "social:shared": true,
+                        }));
+                      }}
+                    />
+                  ))}
                 </>
               )}
 

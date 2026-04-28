@@ -21,13 +21,15 @@ from typing import Any, Optional
 import httpx
 
 from abo.default_modules.bilibili.wbi import enc_wbi, get_wbi_keys
+from abo.tools.social_runtime_retry import run_social_runtime_with_retry
 from abo.tools.bilibili_video_meta import (
     extract_bvid,
     fetch_bilibili_video_metadata,
     merge_tags,
 )
 
-MAX_FOLLOWED_DYNAMIC_KEEP_LIMIT = 200
+MAX_FOLLOWED_DYNAMIC_KEEP_LIMIT = 1000
+MAX_FOLLOWED_DYNAMIC_COLLECT_LIMIT = 50000
 MAX_FOLLOWED_DYNAMIC_PAGE_LIMIT = 1000
 FOLLOWED_DYNAMIC_PAGE_SIZE = 20
 SPACE_DYNAMIC_PAGE_SIZE = 12
@@ -138,6 +140,48 @@ def _parse_serialized_published_at(value: Any) -> datetime | None:
     return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
 
 
+def _parse_reference_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    return _parse_serialized_published_at(value)
+
+
+def _normalize_monitor_subfolder_segment(value: Any, fallback: str) -> str:
+    normalized = re.sub(r"\s+", " ", re.sub(r"[\\/]+", " ", str(value or ""))).strip()
+    return normalized or fallback
+
+
+def build_fixed_up_monitor_subfolder(author_label: Any) -> str:
+    return "/".join(
+        [
+            "每日监视UP",
+            "固定UP监督",
+            _normalize_monitor_subfolder_segment(author_label, "未命名UP"),
+        ]
+    )
+
+
+def resolve_bilibili_dynamic_monitor_subfolder(
+    *,
+    author: Any,
+    monitor_subfolder: Any = "",
+    monitor_label: Any = "",
+    crawl_source: Any = "",
+) -> str:
+    normalized_subfolder = str(monitor_subfolder or "").strip()
+    normalized_label = str(monitor_label or "").strip()
+    normalized_source = str(crawl_source or "").strip()
+    if (
+        normalized_source == "manual-up"
+        or normalized_label == "固定UP监督"
+        or normalized_label.startswith("每日监视UP")
+        or normalized_label.startswith("每日监视 UP")
+        or normalized_subfolder.startswith("每日监视UP")
+    ):
+        return build_fixed_up_monitor_subfolder(author or "UP主")
+    return normalized_subfolder
+
+
 def _resolve_serialized_dynamic_match_metadata(
     dynamic: dict[str, Any],
     keywords: list[str] | None,
@@ -238,6 +282,7 @@ class BilibiliToolAPI:
         self._last_fetch_stats: dict[str, Any] = {}
         self._space_fetch_stats_cache: dict[str, dict[str, Any]] = {}
         self._targeted_shared_stop_state: dict[str, Any] | None = None
+        self._fetch_reference_time: datetime | None = None
 
     def _build_headers(self, referer: str = "https://t.bilibili.com/") -> dict[str, str]:
         return {
@@ -290,6 +335,17 @@ class BilibiliToolAPI:
         if page_limit is None:
             return MAX_FOLLOWED_DYNAMIC_PAGE_LIMIT
         return self._normalize_page_limit(page_limit, MAX_FOLLOWED_DYNAMIC_PAGE_LIMIT)
+
+    def _resolve_collect_limit(
+        self,
+        *,
+        page_limit: int | None,
+        page_size: int,
+        author_count: int = 1,
+    ) -> int:
+        page_budget = self._resolve_runtime_page_budget(page_limit)
+        estimated = max(1, page_budget) * max(1, page_size) * max(1, author_count)
+        return max(page_size, min(estimated, MAX_FOLLOWED_DYNAMIC_COLLECT_LIMIT))
 
     def _resolve_global_scan_limit(
         self,
@@ -687,11 +743,13 @@ class BilibiliToolAPI:
         days_back: int,
         page_limit: int | None = None,
         scan_cutoff_days: int | None = None,
+        collect_all_until_cutoff: bool = False,
     ) -> list[BiliDynamic]:
         clean_author_id = str(author_id or "").strip()
         if not clean_author_id:
             return []
 
+        reference_time = self._fetch_reference_time or datetime.now()
         effective_days_back = max(1, int(days_back or 1))
         effective_scan_days_back = self._resolve_scan_days_back(
             days_back=effective_days_back,
@@ -699,16 +757,31 @@ class BilibiliToolAPI:
             tag_filters=tag_filters,
             scan_cutoff_days=scan_cutoff_days,
         )
-        result_cutoff = datetime.now() - timedelta(days=effective_days_back)
-        scan_cutoff = datetime.now() - timedelta(days=effective_scan_days_back)
+        result_cutoff = reference_time - timedelta(days=effective_days_back)
+        scan_cutoff = reference_time - timedelta(days=effective_scan_days_back)
         results: list[BiliDynamic] = []
         seen_ids: set[str] = set()
         offset: str | None = None
-        effective_scan_limit = self._normalize_keep_limit(scan_result_limit)
-        effective_stop_limit = min(
-            effective_scan_limit,
-            self._normalize_keep_limit(stop_result_limit, effective_scan_limit),
-        ) if stop_result_limit is not None else effective_scan_limit
+        effective_scan_limit = (
+            self._resolve_collect_limit(
+                page_limit=page_limit,
+                page_size=SPACE_DYNAMIC_PAGE_SIZE,
+            )
+            if collect_all_until_cutoff
+            else self._normalize_keep_limit(scan_result_limit)
+        )
+        effective_stop_limit = (
+            effective_scan_limit
+            if collect_all_until_cutoff
+            else (
+                min(
+                    effective_scan_limit,
+                    self._normalize_keep_limit(stop_result_limit, effective_scan_limit),
+                )
+                if stop_result_limit is not None
+                else effective_scan_limit
+            )
+        )
         pages_scanned = 0
         pages_with_recent_candidates = 0
         max_pages = self._resolve_runtime_page_budget(page_limit)
@@ -801,6 +874,7 @@ class BilibiliToolAPI:
             "scan_result_limit": effective_scan_limit,
             "stop_result_limit": effective_stop_limit,
             "scan_days_back": effective_scan_days_back,
+            "reference_time": reference_time.isoformat(),
             "partial_results": bool(partial_error),
             "partial_error": partial_error or "",
         }
@@ -819,6 +893,7 @@ class BilibiliToolAPI:
         monitor_label: str | None = None,
         monitor_subfolder: str | None = None,
         scan_cutoff_days: int | None = None,
+        collect_all_until_cutoff: bool = False,
     ) -> list[BiliDynamic]:
         clean_author_ids = [
             str(author_id).strip()
@@ -829,13 +904,32 @@ class BilibiliToolAPI:
             return []
 
         author_count = len(clean_author_ids)
-        effective_result_limit = self._normalize_keep_limit(result_limit)
-        per_author_scan_limit = self._resolve_targeted_author_scan_limit(
-            author_count=author_count,
-            result_limit=effective_result_limit,
-            days_back=days_back,
+        effective_result_limit = (
+            self._resolve_collect_limit(
+                page_limit=page_limit,
+                page_size=SPACE_DYNAMIC_PAGE_SIZE,
+                author_count=author_count,
+            )
+            if collect_all_until_cutoff
+            else self._normalize_keep_limit(result_limit)
         )
-        per_author_stop_limit = min(per_author_scan_limit, effective_result_limit)
+        per_author_scan_limit = (
+            self._resolve_collect_limit(
+                page_limit=page_limit,
+                page_size=SPACE_DYNAMIC_PAGE_SIZE,
+            )
+            if collect_all_until_cutoff
+            else self._resolve_targeted_author_scan_limit(
+                author_count=author_count,
+                result_limit=effective_result_limit,
+                days_back=days_back,
+            )
+        )
+        per_author_stop_limit = (
+            per_author_scan_limit
+            if collect_all_until_cutoff
+            else min(per_author_scan_limit, effective_result_limit)
+        )
         concurrency = min(4, max(1, author_count))
         semaphore = asyncio.Semaphore(concurrency)
         errors: list[tuple[str, Exception]] = []
@@ -844,7 +938,7 @@ class BilibiliToolAPI:
                 "stop_limit": effective_result_limit,
                 "matched_count": 0,
             }
-            if author_count > 1
+            if author_count > 1 and not collect_all_until_cutoff
             else None
         )
 
@@ -862,6 +956,7 @@ class BilibiliToolAPI:
                             days_back=days_back,
                             page_limit=page_limit,
                             scan_cutoff_days=scan_cutoff_days,
+                            collect_all_until_cutoff=collect_all_until_cutoff,
                         )
                     except Exception as exc:
                         errors.append((author_id, exc))
@@ -892,7 +987,18 @@ class BilibiliToolAPI:
 
         all_dynamics: list[BiliDynamic] = []
         seen_ids: set[str] = set()
-        if author_count > 1 and normalized_batches:
+        if collect_all_until_cutoff:
+            for batch in normalized_batches:
+                for dynamic in batch:
+                    if dynamic.dynamic_id in seen_ids:
+                        continue
+                    seen_ids.add(dynamic.dynamic_id)
+                    all_dynamics.append(dynamic)
+                    if len(all_dynamics) >= effective_result_limit:
+                        break
+                if len(all_dynamics) >= effective_result_limit:
+                    break
+        elif author_count > 1 and normalized_batches:
             batch_indexes = [0 for _ in normalized_batches]
             while len(all_dynamics) < effective_result_limit:
                 progressed = False
@@ -924,8 +1030,13 @@ class BilibiliToolAPI:
 
         for dynamic in all_dynamics:
             dynamic.monitor_label = str(monitor_label or "").strip()
-            dynamic.monitor_subfolder = str(monitor_subfolder or "").strip()
             dynamic.crawl_source = "daily-monitor" if dynamic.monitor_label else ""
+            dynamic.monitor_subfolder = resolve_bilibili_dynamic_monitor_subfolder(
+                author=dynamic.author,
+                monitor_subfolder=monitor_subfolder,
+                monitor_label=dynamic.monitor_label,
+                crawl_source=dynamic.crawl_source,
+            )
             dynamic.crawl_source_label = dynamic.monitor_label
 
         all_dynamics.sort(key=lambda x: x.published_at or datetime.min, reverse=True)
@@ -960,13 +1071,18 @@ class BilibiliToolAPI:
                 tag_filters=tag_filters,
                 scan_cutoff_days=scan_cutoff_days,
             ),
+            "reference_time": (
+                str((aggregated_space_stats[0] or {}).get("reference_time") or "").strip()
+                if aggregated_space_stats
+                else ""
+            ),
             "partial_results": len(partial_errors) > 0,
             "partial_error": " | ".join(partial_errors[:3]),
         }
         print(
             f"[bilibili-tool] Targeted author-space total: {len(all_dynamics)} dynamics "
             f"from {author_count} authors, per_author_scan_limit={per_author_scan_limit}, "
-            f"keep_limit={effective_result_limit}, errors={len(errors)}"
+            f"keep_limit={effective_result_limit}, collect_all={collect_all_until_cutoff}, errors={len(errors)}"
         )
         return all_dynamics[:effective_result_limit]
 
@@ -976,12 +1092,13 @@ class BilibiliToolAPI:
         keywords: list[str] = None,
         tag_filters: list[str] | None = None,
         author_ids: list[str] | None = None,
-        limit: int = 20,
+        limit: int | None = 20,
         days_back: int = 7,
         page_limit: int | None = None,
         monitor_label: str | None = None,
         monitor_subfolder: str | None = None,
         scan_cutoff_days: int | None = None,
+        collect_all_until_cutoff: bool = False,
     ) -> list[BiliDynamic]:
         """获取关注列表的动态。"""
         if not self.sessdata:
@@ -1002,7 +1119,6 @@ class BilibiliToolAPI:
             64: "article",
         }
 
-        effective_limit = self._normalize_keep_limit(limit)
         effective_days_back = max(1, int(days_back or 1))
         effective_scan_days_back = self._resolve_scan_days_back(
             days_back=effective_days_back,
@@ -1010,14 +1126,33 @@ class BilibiliToolAPI:
             tag_filters=tag_filters,
             scan_cutoff_days=scan_cutoff_days,
         )
+        effective_limit = (
+            self._resolve_collect_limit(
+                page_limit=page_limit,
+                page_size=SPACE_DYNAMIC_PAGE_SIZE,
+                author_count=max(1, len(author_ids or [])),
+            )
+            if collect_all_until_cutoff and author_ids
+            else (
+                self._resolve_collect_limit(
+                    page_limit=page_limit,
+                    page_size=FOLLOWED_DYNAMIC_PAGE_SIZE,
+                )
+                if collect_all_until_cutoff
+                else self._normalize_keep_limit(limit)
+            )
+        )
         print(
             f"[bilibili-tool] Fetching types: {valid_types}, keep_limit={effective_limit}, "
             f"days_back={effective_days_back}, scan_days_back={effective_scan_days_back}, "
-            f"page_limit={page_limit}"
+            f"page_limit={page_limit}, collect_all={collect_all_until_cutoff}"
         )
 
         if not valid_types:
             return []
+
+        reference_time = datetime.now()
+        self._fetch_reference_time = reference_time
 
         type_map = {
             1: "DYNAMIC_TYPE_FORWARD",
@@ -1032,146 +1167,155 @@ class BilibiliToolAPI:
             for author_id in (author_ids or [])
             if str(author_id).strip()
         }
+        try:
+            if allowed_author_ids:
+                allowed_author_dynamic_types = {
+                    type_name_map[t]
+                    for t in valid_types
+                    if t in type_name_map and type_name_map[t] != "forward"
+                }
+                if not allowed_author_dynamic_types and 1 in valid_types:
+                    allowed_author_dynamic_types = {"video", "image", "text", "article"}
+                return await self._fetch_targeted_author_dynamics(
+                    author_ids=sorted(allowed_author_ids),
+                    allowed_dynamic_types=allowed_author_dynamic_types,
+                    keywords=keywords,
+                    tag_filters=tag_filters,
+                    result_limit=effective_limit,
+                    days_back=effective_days_back,
+                    page_limit=page_limit,
+                    monitor_label=monitor_label,
+                    monitor_subfolder=monitor_subfolder,
+                    scan_cutoff_days=scan_cutoff_days,
+                    collect_all_until_cutoff=collect_all_until_cutoff,
+                )
 
-        if allowed_author_ids:
-            allowed_author_dynamic_types = {
-                type_name_map[t]
-                for t in valid_types
-                if t in type_name_map and type_name_map[t] != "forward"
-            }
-            if not allowed_author_dynamic_types and 1 in valid_types:
-                allowed_author_dynamic_types = {"video", "image", "text", "article"}
-            return await self._fetch_targeted_author_dynamics(
-                author_ids=sorted(allowed_author_ids),
-                allowed_dynamic_types=allowed_author_dynamic_types,
-                keywords=keywords,
-                tag_filters=tag_filters,
+            result_cutoff = reference_time - timedelta(days=effective_days_back)
+            scan_cutoff = reference_time - timedelta(days=effective_scan_days_back)
+
+            all_dynamics: list[BiliDynamic] = []
+            seen_ids = set()
+            offset: str | None = None
+            effective_scan_limit = self._resolve_global_scan_limit(
                 result_limit=effective_limit,
-                days_back=effective_days_back,
-                page_limit=page_limit,
-                monitor_label=monitor_label,
-                monitor_subfolder=monitor_subfolder,
-                scan_cutoff_days=scan_cutoff_days,
+                days_back=effective_scan_days_back,
             )
+            effective_stop_limit = effective_limit
+            pages_scanned = 0
+            pages_with_recent_candidates = 0
+            max_pages = self._resolve_runtime_page_budget(page_limit)
+            partial_error: str | None = None
 
-        result_cutoff = datetime.now() - timedelta(days=effective_days_back)
-        scan_cutoff = datetime.now() - timedelta(days=effective_scan_days_back)
-
-        all_dynamics: list[BiliDynamic] = []
-        seen_ids = set()
-        offset: str | None = None
-        effective_scan_limit = self._resolve_global_scan_limit(
-            result_limit=effective_limit,
-            days_back=effective_scan_days_back,
-        )
-        effective_stop_limit = effective_limit
-        pages_scanned = 0
-        pages_with_recent_candidates = 0
-        max_pages = self._resolve_runtime_page_budget(page_limit)
-        partial_error: str | None = None
-
-        for page in range(1, max_pages + 1):
-            try:
-                page_data = await self._fetch_polymer_page(offset=offset)
-            except Exception as exc:
-                partial_error = f"page={page} error={exc}"
-                if all_dynamics:
-                    print(
-                        f"[bilibili-tool] Stop global-followed crawl early with partial results: "
-                        f"{partial_error}"
-                    )
+            for page in range(1, max_pages + 1):
+                try:
+                    page_data = await self._fetch_polymer_page(offset=offset)
+                except Exception as exc:
+                    partial_error = f"page={page} error={exc}"
+                    if all_dynamics:
+                        print(
+                            f"[bilibili-tool] Stop global-followed crawl early with partial results: "
+                            f"{partial_error}"
+                        )
+                        break
+                    raise
+                items = page_data.get("items", []) or []
+                if not items:
                     break
-                raise
-            items = page_data.get("items", []) or []
-            if not items:
-                break
-            pages_scanned += 1
+                pages_scanned += 1
 
-            page_new_count = 0
-            page_recent_count = 0
-            page_author_hit_count = 0
-            page_has_recent_candidates = False
-            page_type_counts: dict[str, int] = {}
+                page_new_count = 0
+                page_recent_count = 0
+                page_author_hit_count = 0
+                page_has_recent_candidates = False
+                page_type_counts: dict[str, int] = {}
 
-            for item in items:
-                item_type = item.get("type") or ""
-                page_type_counts[item_type] = page_type_counts.get(item_type, 0) + 1
-                if item_type not in allowed_type_names:
-                    continue
+                for item in items:
+                    item_type = item.get("type") or ""
+                    page_type_counts[item_type] = page_type_counts.get(item_type, 0) + 1
+                    if item_type not in allowed_type_names:
+                        continue
 
-                dynamic = self._parse_polymer_item(item)
-                if not dynamic:
-                    continue
-                if dynamic.published_at is None or dynamic.published_at >= scan_cutoff:
-                    page_has_recent_candidates = True
-                    page_recent_count += 1
-                if allowed_author_ids and str(dynamic.author_id or "").strip() not in allowed_author_ids:
-                    continue
-                if allowed_author_ids:
-                    page_author_hit_count += 1
-                if dynamic.dynamic_type == "video":
-                    dynamic = await self._enrich_video_dynamic(dynamic)
-                matched_keywords, matched_tags = self._resolve_match_metadata(dynamic, keywords, tag_filters)
-                if (keywords or tag_filters) and not (matched_keywords or matched_tags):
-                    continue
-                if dynamic.published_at and dynamic.published_at < result_cutoff:
-                    continue
+                    dynamic = self._parse_polymer_item(item)
+                    if not dynamic:
+                        continue
+                    if dynamic.published_at is None or dynamic.published_at >= scan_cutoff:
+                        page_has_recent_candidates = True
+                        page_recent_count += 1
+                    if allowed_author_ids and str(dynamic.author_id or "").strip() not in allowed_author_ids:
+                        continue
+                    if allowed_author_ids:
+                        page_author_hit_count += 1
+                    if dynamic.dynamic_type == "video":
+                        dynamic = await self._enrich_video_dynamic(dynamic)
+                    matched_keywords, matched_tags = self._resolve_match_metadata(dynamic, keywords, tag_filters)
+                    if (keywords or tag_filters) and not (matched_keywords or matched_tags):
+                        continue
+                    if dynamic.published_at and dynamic.published_at < result_cutoff:
+                        continue
 
-                dynamic.matched_keywords = matched_keywords
-                dynamic.matched_tags = matched_tags
-                dynamic.monitor_label = str(monitor_label or "").strip()
-                dynamic.monitor_subfolder = str(monitor_subfolder or "").strip()
-                dynamic.crawl_source = "daily-monitor" if dynamic.monitor_label else ""
-                dynamic.crawl_source_label = dynamic.monitor_label
+                    dynamic.matched_keywords = matched_keywords
+                    dynamic.matched_tags = matched_tags
+                    dynamic.monitor_label = str(monitor_label or "").strip()
+                    dynamic.crawl_source = "daily-monitor" if dynamic.monitor_label else ""
+                    dynamic.monitor_subfolder = resolve_bilibili_dynamic_monitor_subfolder(
+                        author=dynamic.author,
+                        monitor_subfolder=monitor_subfolder,
+                        monitor_label=dynamic.monitor_label,
+                        crawl_source=dynamic.crawl_source,
+                    )
+                    dynamic.crawl_source_label = dynamic.monitor_label
 
-                if dynamic.dynamic_id in seen_ids:
-                    continue
+                    if dynamic.dynamic_id in seen_ids:
+                        continue
 
-                seen_ids.add(dynamic.dynamic_id)
-                all_dynamics.append(dynamic)
-                page_new_count += 1
+                    seen_ids.add(dynamic.dynamic_id)
+                    all_dynamics.append(dynamic)
+                    page_new_count += 1
+
+                    if len(all_dynamics) >= effective_stop_limit:
+                        break
+
+                print(
+                    f"[bilibili-tool] Polymer page {page}: total_items={len(items)}, "
+                    f"recent_candidates={page_recent_count}, author_hits={page_author_hit_count}, "
+                    f"matched={page_new_count}, offset={page_data.get('offset')}, "
+                    f"types={page_type_counts}"
+                )
+                if page_has_recent_candidates:
+                    pages_with_recent_candidates += 1
 
                 if len(all_dynamics) >= effective_stop_limit:
                     break
 
-            print(
-                f"[bilibili-tool] Polymer page {page}: total_items={len(items)}, "
-                f"recent_candidates={page_recent_count}, author_hits={page_author_hit_count}, "
-                f"matched={page_new_count}, offset={page_data.get('offset')}, "
-                f"types={page_type_counts}"
-            )
-            if page_has_recent_candidates:
-                pages_with_recent_candidates += 1
+                offset = page_data.get("offset")
+                if not page_data.get("has_more") or not offset:
+                    break
+                if not page_has_recent_candidates:
+                    break
 
-            if len(all_dynamics) >= effective_stop_limit:
-                break
+                await asyncio.sleep(0.3)
 
-            offset = page_data.get("offset")
-            if not page_data.get("has_more") or not offset:
-                break
-            if not page_has_recent_candidates:
-                break
-
-            await asyncio.sleep(0.3)
-
-        all_dynamics.sort(key=lambda x: x.published_at or datetime.min, reverse=True)
-        print(f"[bilibili-tool] Total: {len(all_dynamics)} dynamics (after pagination)")
-        self._last_fetch_stats = {
-            "source": "global-followed",
-            "pages_scanned": pages_scanned,
-            "pages_with_recent_candidates": pages_with_recent_candidates,
-            "matched_count_before_keep": len(all_dynamics),
-            "kept_count": min(len(all_dynamics), effective_limit),
-            "keep_limit": effective_limit,
-            "scan_result_limit": effective_scan_limit,
-            "stop_result_limit": effective_stop_limit,
-            "scanned_author_count": 0,
-            "authors_with_hits": 0,
-            "scan_days_back": effective_scan_days_back,
-            "partial_results": bool(partial_error),
-            "partial_error": partial_error or "",
-        }
-        return all_dynamics[:effective_limit]
+            all_dynamics.sort(key=lambda x: x.published_at or datetime.min, reverse=True)
+            print(f"[bilibili-tool] Total: {len(all_dynamics)} dynamics (after pagination)")
+            self._last_fetch_stats = {
+                "source": "global-followed",
+                "pages_scanned": pages_scanned,
+                "pages_with_recent_candidates": pages_with_recent_candidates,
+                "matched_count_before_keep": len(all_dynamics),
+                "kept_count": min(len(all_dynamics), effective_limit),
+                "keep_limit": effective_limit,
+                "scan_result_limit": effective_scan_limit,
+                "stop_result_limit": effective_stop_limit,
+                "scanned_author_count": 0,
+                "authors_with_hits": 0,
+                "scan_days_back": effective_scan_days_back,
+                "reference_time": reference_time.isoformat(),
+                "partial_results": bool(partial_error),
+                "partial_error": partial_error or "",
+            }
+            return all_dynamics[:effective_limit]
+        finally:
+            self._fetch_reference_time = None
 
     async def _enrich_video_dynamic(self, dynamic: BiliDynamic) -> BiliDynamic:
         bvid = dynamic.bvid or extract_bvid(dynamic.url)
@@ -1666,69 +1810,82 @@ async def bilibili_fetch_followed(
     tag_filters: list[str] | None = None,
     dynamic_types: list[int] = None,
     author_ids: list[str] | None = None,
-    limit: int = 20,
+    limit: int | None = 20,
     days_back: int = 7,
     page_limit: int | None = None,
     monitor_label: str | None = None,
     monitor_subfolder: str | None = None,
     scan_cutoff_days: int | None = None,
+    collect_all_until_cutoff: bool = False,
 ) -> dict:
     """
     获取关注列表的动态（带关键词过滤）
     """
-    effective_limit = max(1, min(int(limit or 20), MAX_FOLLOWED_DYNAMIC_KEEP_LIMIT))
+    effective_limit = (
+        max(1, int(limit or 1))
+        if collect_all_until_cutoff
+        else max(1, min(int(limit or 20), MAX_FOLLOWED_DYNAMIC_KEEP_LIMIT))
+    )
     print(
         f"[bilibili-tool] Fetch request: keywords={keywords}, tag_filters={tag_filters}, "
         f"author_ids={author_ids}, types={dynamic_types}, keep_limit={effective_limit}, "
-        f"days={days_back}, page_limit={page_limit}, scan_cutoff_days={scan_cutoff_days}"
+        f"days={days_back}, page_limit={page_limit}, scan_cutoff_days={scan_cutoff_days}, "
+        f"collect_all={collect_all_until_cutoff}"
     )
-    api = BilibiliToolAPI(sessdata=sessdata)
-    try:
-        dynamics = await api.fetch_followed_dynamics(
-            dynamic_types=dynamic_types,
-            keywords=keywords,
-            tag_filters=tag_filters,
-            author_ids=author_ids,
-            limit=effective_limit,
-            days_back=days_back,
-            page_limit=page_limit,
-            monitor_label=monitor_label,
-            monitor_subfolder=monitor_subfolder,
-            scan_cutoff_days=scan_cutoff_days,
-        )
-        fetch_stats = dict(api._last_fetch_stats or {})
-        total_found = int(fetch_stats.get("matched_count_before_keep") or len(dynamics))
+    async def _fetch_followed_once() -> dict:
+        api = BilibiliToolAPI(sessdata=sessdata)
+        try:
+            dynamics = await api.fetch_followed_dynamics(
+                dynamic_types=dynamic_types,
+                keywords=keywords,
+                tag_filters=tag_filters,
+                author_ids=author_ids,
+                limit=effective_limit,
+                days_back=days_back,
+                page_limit=page_limit,
+                monitor_label=monitor_label,
+                monitor_subfolder=monitor_subfolder,
+                scan_cutoff_days=scan_cutoff_days,
+                collect_all_until_cutoff=collect_all_until_cutoff,
+            )
+            fetch_stats = dict(api._last_fetch_stats or {})
+            total_found = int(fetch_stats.get("matched_count_before_keep") or len(dynamics))
 
-        return {
-            "total_found": total_found,
-            "fetch_stats": fetch_stats,
-            "dynamics": [
-                {
-                    "id": d.id,
-                    "dynamic_id": d.dynamic_id,
-                    "title": d.title,
-                    "content": d.content or "",
-                    "author": d.author,
-                    "author_id": d.author_id,
-                    "url": d.url,
-                    "published_at": d.published_at.isoformat() if d.published_at else None,
-                    "dynamic_type": d.dynamic_type,
-                    "pic": d.pic,
-                    "images": d.images,
-                    "bvid": d.bvid,
-                    "tags": d.tags,
-                    "matched_keywords": d.matched_keywords,
-                    "matched_tags": d.matched_tags,
-                    "monitor_label": d.monitor_label,
-                    "monitor_subfolder": d.monitor_subfolder,
-                    "crawl_source": d.crawl_source,
-                    "crawl_source_label": d.crawl_source_label,
-                }
-                for d in dynamics
-            ],
-        }
-    finally:
-        await api.close()
+            return {
+                "total_found": total_found,
+                "fetch_stats": fetch_stats,
+                "dynamics": [
+                    {
+                        "id": d.id,
+                        "dynamic_id": d.dynamic_id,
+                        "title": d.title,
+                        "content": d.content or "",
+                        "author": d.author,
+                        "author_id": d.author_id,
+                        "url": d.url,
+                        "published_at": d.published_at.isoformat() if d.published_at else None,
+                        "dynamic_type": d.dynamic_type,
+                        "pic": d.pic,
+                        "images": d.images,
+                        "bvid": d.bvid,
+                        "tags": d.tags,
+                        "matched_keywords": d.matched_keywords,
+                        "matched_tags": d.matched_tags,
+                        "monitor_label": d.monitor_label,
+                        "monitor_subfolder": d.monitor_subfolder,
+                        "crawl_source": d.crawl_source,
+                        "crawl_source_label": d.crawl_source_label,
+                    }
+                    for d in dynamics
+                ],
+            }
+        finally:
+            await api.close()
+
+    return await run_social_runtime_with_retry(
+        "bilibili followed dynamics",
+        _fetch_followed_once,
+    )
 
 
 async def bilibili_verify_sessdata(sessdata: str) -> dict:
@@ -1773,6 +1930,7 @@ def bilibili_filter_prefetched_dynamics(
     tag_filters: list[str] | None = None,
     limit: int = 20,
     days_back: int = 7,
+    reference_time: Any | None = None,
     monitor_label: str | None = None,
     monitor_subfolder: str | None = None,
     crawl_source: str | None = "daily-monitor",
@@ -1785,7 +1943,8 @@ def bilibili_filter_prefetched_dynamics(
     monitors locally instead of re-crawling once per keyword definition.
     """
     effective_limit = max(1, min(int(limit or 20), MAX_FOLLOWED_DYNAMIC_KEEP_LIMIT))
-    cutoff = datetime.now() - timedelta(days=max(1, int(days_back or 1)))
+    cutoff_reference_time = _parse_reference_time(reference_time) or datetime.now()
+    cutoff = cutoff_reference_time - timedelta(days=max(1, int(days_back or 1)))
     filtered: list[dict[str, Any]] = []
 
     for dynamic in dynamics or []:
@@ -1807,10 +1966,13 @@ def bilibili_filter_prefetched_dynamics(
         normalized["matched_keywords"] = matched_keywords
         normalized["matched_tags"] = matched_tags
         normalized["monitor_label"] = str(monitor_label or normalized.get("monitor_label") or "").strip()
-        normalized["monitor_subfolder"] = str(
-            monitor_subfolder or normalized.get("monitor_subfolder") or ""
-        ).strip()
         normalized["crawl_source"] = str(crawl_source or normalized.get("crawl_source") or "").strip()
+        normalized["monitor_subfolder"] = resolve_bilibili_dynamic_monitor_subfolder(
+            author=normalized.get("author"),
+            monitor_subfolder=monitor_subfolder or normalized.get("monitor_subfolder") or "",
+            monitor_label=normalized["monitor_label"],
+            crawl_source=normalized["crawl_source"],
+        )
         normalized["crawl_source_label"] = str(
             crawl_source_label
             or normalized.get("crawl_source_label")
@@ -1831,6 +1993,7 @@ def bilibili_filter_prefetched_dynamics(
             "kept_count": len(kept),
             "keep_limit": effective_limit,
             "days_back": max(1, int(days_back or 1)),
+            "reference_time": cutoff_reference_time.isoformat(),
         },
         "dynamics": kept,
     }

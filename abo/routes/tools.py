@@ -14,7 +14,6 @@ from pydantic import BaseModel
 from typing import Optional
 
 from abo.tools.xiaohongshu import (
-    xiaohongshu_search,
     xiaohongshu_analyze_trends,
     xiaohongshu_fetch_comments,
     xiaohongshu_verify_cookie,
@@ -27,6 +26,7 @@ from abo.tools.xhs_crawler import (
     save_xhs_seed_note_to_vault,
 )
 from abo.tools.xhs_runtime import (
+    fetch_xhs_keyword_search_result,
     fetch_xhs_creator_recent_result,
     fetch_xhs_following_feed_result,
 )
@@ -3580,7 +3580,7 @@ async def api_xiaohongshu_search(req: SearchRequest):
     from fastapi import HTTPException
     from abo.config import load as load_config
     try:
-        result = await xiaohongshu_search(
+        result = await fetch_xhs_keyword_search_result(
             keyword=req.keyword,
             max_results=req.max_results,
             min_likes=req.min_likes,
@@ -3589,8 +3589,8 @@ async def api_xiaohongshu_search(req: SearchRequest):
             cookie=req.cookie or load_config().get("xiaohongshu_cookie"),
             use_extension=req.use_extension,
             extension_port=req.extension_port,
-                dedicated_window_mode=req.dedicated_window_mode,
-            )
+            dedicated_window_mode=req.dedicated_window_mode,
+        )
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -4418,7 +4418,7 @@ async def api_xiaohongshu_search_start(req: SearchRequest):
         try:
             async with xhs_serial_task("关键词搜索", lambda stage: _update_xhs_task(task_id, stage=stage)):
                 _update_xhs_task(task_id, stage="搜索小红书笔记")
-                result = await xiaohongshu_search(
+                result = await fetch_xhs_keyword_search_result(
                     keyword=req.keyword,
                     max_results=req.max_results,
                     min_likes=req.min_likes,
@@ -5552,8 +5552,6 @@ async def api_arxiv_search(req: ArxivAPISearchRequest):
             sort_by=req.sort_by,
             sort_order=req.sort_order,
         )
-        for paper in papers:
-            _paper_store.upsert_from_payload(paper, source_module="arxiv-api")
         search_time_ms = (time.time() - start_time) * 1000
         return {
             "total": len(papers),
@@ -5587,11 +5585,6 @@ async def api_arxiv_figures(req: ArxivFiguresRequest):
     tool = ArxivAPITool()
     try:
         figures = await tool.fetch_figures(req.arxiv_id)
-        _paper_store.record_figures(
-            req.arxiv_id,
-            figures,
-            html_url=f"https://arxiv.org/html/{req.arxiv_id}",
-        )
         return {"figures": figures}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch figures: {str(e)}")

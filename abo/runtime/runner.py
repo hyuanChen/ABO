@@ -6,6 +6,7 @@ from ..preferences.engine import PreferenceEngine
 from ..store.cards import CardStore
 from ..store.papers import PaperStore
 from .broadcaster import Broadcaster
+from .feed_visibility import clear_temporarily_hidden_cards_for_module
 from .. import config as cfg
 from ..vault.unified_entry import UnifiedVaultEntry, entry_type_from_metadata, first_non_empty, normalize_string_list
 from ..vault.writer import write_unified_note
@@ -22,6 +23,7 @@ class ModuleRunner:
         self._paper_store = paper_store
 
     async def run(self, module: Module) -> int:
+        clear_temporarily_hidden_cards_for_module(module.id)
         prefs = self._prefs.get_prefs_for_module(module.id)
 
         items = await module.fetch()
@@ -31,6 +33,9 @@ class ModuleRunner:
         cards = [c for c in cards if c.score >= threshold]
 
         max_n = self._prefs.max_cards(module.id)
+        runtime_max_n = getattr(module, "_runtime_max_cards", None)
+        if isinstance(runtime_max_n, int) and runtime_max_n > 0:
+            max_n = max(max_n, runtime_max_n)
         cards = sorted(cards, key=lambda c: c.score, reverse=True)[:max_n]
 
         count = 0
@@ -42,8 +47,6 @@ class ModuleRunner:
                 card = await self._write_vault(card)
 
             self._store.save(card)
-            if self._paper_store:
-                self._paper_store.upsert_from_card(card)
 
             if "ui" in output and self._store.is_unread(card.id):
                 await self._broadcaster.send_card(card)
@@ -53,7 +56,12 @@ class ModuleRunner:
         return count
 
     def _should_skip_vault_write(self, card: Card) -> bool:
-        return self._is_paper_tracking_card(card)
+        if self._is_paper_tracking_card(card):
+            return True
+        return card.module_id in {
+            "xiaohongshu-tracker",
+            "bilibili-tracker",
+        }
 
     async def _write_vault(self, card: Card) -> Card:
         self._write_generic_vault(card)
