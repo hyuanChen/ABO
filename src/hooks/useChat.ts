@@ -10,6 +10,7 @@ import {
   stopConversation as stopConversationApi,
   warmupConversation,
 } from '../api/chat';
+import { buildWsUrl } from '../core/api';
 import { useStore } from '../core/store';
 
 interface CloseConversationOptions {
@@ -284,7 +285,7 @@ export function useChat(): UseChatReturn {
         wsRef.current = null;
       }
 
-      const wsUrl = `ws://127.0.0.1:8765/api/chat/ws/${cliType}/${sessionId}`;
+      const wsUrl = buildWsUrl(`/api/chat/ws/${cliType}/${sessionId}`);
       console.log('[WebSocket] Connecting to:', wsUrl);
 
       try {

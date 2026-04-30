@@ -1,9 +1,11 @@
 import json
 import sqlite3
 from pathlib import Path
+
+from ..storage_paths import resolve_app_db_path
 from ..sdk.types import Card
 
-_DB_PATH = Path.home() / ".abo" / "data" / "cards.db"
+_DB_PATH = Path(resolve_app_db_path("cards.db"))
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS cards (

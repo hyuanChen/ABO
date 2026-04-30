@@ -33,6 +33,7 @@ from abo.tools.xhs_runtime import (
 from abo.tools.xhs_task_queue import xhs_serial_task
 from abo.tools.bilibili import (
     BilibiliToolAPI,
+    bilibili_fetch_dynamics_by_urls,
     bilibili_fetch_followed,
     bilibili_fetch_followed_ups,
     bilibili_verify_sessdata,
@@ -3894,7 +3895,7 @@ async def api_xiaohongshu_comments(req: CommentsRequest):
     return result
 @router.post("/xiaohongshu/crawl-note")
 async def api_xiaohongshu_crawl_note(req: XHSCrawlNoteRequest):
-    """抓取单条小红书笔记并保存到情报库 xhs 文件夹。"""
+    """抓取单条小红书笔记并保存到情报库 xhs/主动保存 文件夹。"""
     from fastapi import HTTPException
     from abo.config import get_vault_path, load as load_config
 
@@ -3925,7 +3926,7 @@ async def api_xiaohongshu_crawl_note(req: XHSCrawlNoteRequest):
 
 @router.post("/xiaohongshu/crawl-batch")
 async def api_xiaohongshu_crawl_batch(req: XHSCrawlBatchRequest):
-    """批量抓取小红书笔记并保存到情报库 xhs 文件夹。"""
+    """批量抓取小红书笔记并保存到情报库 xhs/主动保存 文件夹。"""
     from abo.config import get_vault_path, load as load_config
 
     config = load_config()
@@ -4052,7 +4053,7 @@ def _should_download_preview_images(
 
 @router.post("/xiaohongshu/save-previews")
 async def api_xiaohongshu_save_previews(req: XHSSavePreviewsRequest):
-    """把搜索/关注结果按统一入库格式保存到情报库 xhs。"""
+    """把搜索/关注结果按统一入库格式保存到情报库 xhs/主动保存。"""
     from abo.config import get_vault_path, load as load_config
 
     vault_path = Path(req.vault_path).expanduser() if req.vault_path else get_vault_path()
@@ -4062,10 +4063,11 @@ async def api_xiaohongshu_save_previews(req: XHSSavePreviewsRequest):
     config = load_config()
     cookie = req.cookie or config.get("xiaohongshu_cookie")
     xhs_dir = vault_path / "xhs"
-    xhs_dir.mkdir(parents=True, exist_ok=True)
+    active_save_dir = xhs_dir / "主动保存"
+    active_save_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
-    target_dir = str((xhs_dir / req.subfolder).resolve()) if req.subfolder else str(xhs_dir.resolve())
+    target_dir = str((active_save_dir / req.subfolder).resolve()) if req.subfolder else str(active_save_dir.resolve())
     for index, note in enumerate(req.notes, 1):
         note_payload = note.model_dump()
         include_images = _should_download_preview_images(
@@ -4548,7 +4550,7 @@ async def api_xiaohongshu_crawl_note_start(req: XHSCrawlNoteRequest):
     async def runner():
         try:
             async with xhs_serial_task("单条入库", lambda stage: _update_xhs_task(task_id, stage=stage)):
-                _update_xhs_task(task_id, stage="保存单条笔记到 xhs")
+                _update_xhs_task(task_id, stage="保存单条笔记到 xhs/主动保存")
                 result = await crawl_xhs_note_to_vault(
                     req.url,
                     cookie=cookie,
@@ -4733,6 +4735,11 @@ class BilibiliFollowedRequest(BaseModel):
     monitor_subfolder: str = ""
 
 
+class BilibiliDirectLinksRequest(BaseModel):
+    sessdata: str
+    urls: list[str] = []
+
+
 class BilibiliFollowedUpsRequest(BaseModel):
     sessdata: str
     max_count: int = 5000
@@ -4836,6 +4843,16 @@ async def api_bilibili_followed(req: BilibiliFollowedRequest):
         scan_cutoff_days=req.scan_cutoff_days,
         monitor_label=req.monitor_label or None,
         monitor_subfolder=req.monitor_subfolder or None,
+    )
+    return result
+
+
+@router.post("/bilibili/links")
+async def api_bilibili_links(req: BilibiliDirectLinksRequest):
+    """按给定 Bilibili 链接解析动态/视频/专栏预览，供前端复用统一卡片与入库链路。"""
+    result = await bilibili_fetch_dynamics_by_urls(
+        sessdata=req.sessdata,
+        urls=req.urls,
     )
     return result
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EXT_PATH="$ROOT/extension"
-PROFILE_DIR="${ABO_XHS_PROFILE_DIR:-$HOME/.abo/xhs-browser-profile}"
+PROFILE_DIR="${ABO_XHS_PROFILE_DIR:-$HOME/Library/Application Support/ABO/xhs-browser-profile}"
 CDP_PORT="${ABO_XHS_CDP_PORT:-9222}"
 START_URL="${1:-https://www.xiaohongshu.com/}"
 WINDOW_MODE="${ABO_XHS_WINDOW_MODE:-shared}"

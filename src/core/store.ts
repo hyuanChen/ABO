@@ -35,6 +35,8 @@ export interface AppConfig {
   vault_path: string;
   literature_path?: string;
   version: string;
+  ai_provider?: "codex" | "claude";
+  claude_code_compat_enabled?: boolean;
   paper_ai_scoring_enabled?: boolean;
   intelligence_delivery_enabled?: boolean;
   intelligence_delivery_time?: string;
@@ -139,8 +141,7 @@ export interface ArxivPaper {
 export type AiProvider = "codex" | "claude";
 
 function normalizeAiProvider(value: unknown): AiProvider {
-  // Claude is intentionally disabled in the UI for now; clamp legacy persisted values.
-  return value === "codex" ? "codex" : "codex";
+  return value === "claude" ? "claude" : "codex";
 }
 
 // ── Store ─────────────────────────────────────────────────────────

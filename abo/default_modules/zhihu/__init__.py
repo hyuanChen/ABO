@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 
 from abo.sdk import Module, Item, Card, agent_json
+from abo.storage_paths import get_preferences_path
 
 
 class ZhihuTracker(Module):
@@ -49,13 +50,13 @@ class ZhihuTracker(Module):
         """
         items = []
 
-        prefs_path = Path.home() / ".abo" / "preferences.json"
+        prefs_path = get_preferences_path()
         config_keywords = []
         config_topics = []
         config_users = []
 
         if prefs_path.exists():
-            data = json.loads(prefs_path.read_text())
+            data = json.loads(prefs_path.read_text(encoding="utf-8"))
             zhihu_config = data.get("modules", {}).get("zhihu-tracker", {})
             config_keywords = zhihu_config.get("keywords", [])
             config_topics = zhihu_config.get("topics", [])

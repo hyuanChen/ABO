@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from abo.sdk import Module, Item, Card, agent_json
+from abo.storage_paths import get_preferences_path, resolve_app_data_file
 
 
 class FolderMonitor(Module):
@@ -13,7 +14,7 @@ class FolderMonitor(Module):
     icon     = "folder-open"
     output   = ["obsidian", "ui"]
 
-    _STATE_PATH = Path.home() / ".abo" / "data" / "folder_monitor_seen.json"
+    _STATE_PATH = resolve_app_data_file("folder_monitor_seen.json")
 
     def _load_seen(self) -> set[str]:
         if self._STATE_PATH.exists():
@@ -25,10 +26,10 @@ class FolderMonitor(Module):
         self._STATE_PATH.write_text(json.dumps(list(seen)))
 
     async def fetch(self) -> list[Item]:
-        prefs_path = Path.home() / ".abo" / "preferences.json"
+        prefs_path = get_preferences_path()
         watch_dirs: list[str] = [str(Path.home() / "Downloads")]
         if prefs_path.exists():
-            data = json.loads(prefs_path.read_text())
+            data = json.loads(prefs_path.read_text(encoding="utf-8"))
             watch_dirs = data.get("modules", {}).get("folder-monitor", {}).get(
                 "watch_dirs", watch_dirs
             )

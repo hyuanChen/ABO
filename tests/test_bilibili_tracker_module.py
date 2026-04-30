@@ -8,7 +8,12 @@ from abo.default_modules.bilibili import BilibiliTracker
 from abo.sdk.types import Card
 from abo.sdk.types import Item
 from abo.store.cards import CardStore
-from abo.tools.bilibili import BiliDynamic, BilibiliToolAPI, bilibili_filter_prefetched_dynamics
+from abo.tools.bilibili import (
+    BiliDynamic,
+    BilibiliToolAPI,
+    bilibili_fetch_dynamics_by_urls,
+    bilibili_filter_prefetched_dynamics,
+)
 
 
 pytestmark = pytest.mark.anyio
@@ -263,6 +268,163 @@ async def test_bilibili_save_selected_dynamics_respects_monitor_subfolder(monkey
     assert result["output_dir"] == str(expected_dir)
     assert len(dynamic_files) == 1
     assert expected_dir == Path(dynamic_files[0]).parent
+
+
+def test_build_bilibili_dynamic_obsidian_path_routes_manual_links_to_active_save():
+    import abo.tools.bilibili_crawler as crawler
+
+    path = crawler.build_bilibili_dynamic_obsidian_path(
+        {
+            "dynamic_id": "9001",
+            "title": "链接抓取结果",
+            "content": "完整内容",
+            "author": "测试UP",
+            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+            "dynamic_type": "video",
+            "monitor_subfolder": "主动链接导入",
+            "crawl_source": "manual-link",
+            "crawl_source_label": "指定链接",
+        },
+        vault_path="/tmp/test-vault",
+    )
+
+    assert path.startswith("bilibili/主动保存/")
+    assert "/dynamic/" not in path
+
+
+async def test_bilibili_save_selected_dynamics_routes_manual_link_to_active_save(monkeypatch, tmp_path):
+    import abo.tools.bilibili_crawler as crawler
+
+    async def fake_enrich_video_notes(notes, *, client, cookie_header=""):
+        return None
+
+    monkeypatch.setattr(crawler, "_enrich_video_notes", fake_enrich_video_notes)
+
+    result = await crawler.save_selected_dynamics_to_vault(
+        [
+            {
+                "id": "bili-dyn-link-save-1",
+                "dynamic_id": "9001",
+                "title": "链接抓取结果",
+                "content": "应该保存到 bilibili/主动保存，而不是 dynamic 目录。",
+                "author": "测试UP",
+                "author_id": "1001",
+                "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+                "published_at": "2026-04-28T10:00:00+08:00",
+                "dynamic_type": "video",
+                "bvid": "BV1xx411c7mD",
+                "tags": ["测试"],
+                "monitor_subfolder": "主动链接导入",
+                "crawl_source": "manual-link",
+                "crawl_source_label": "指定链接",
+            }
+        ],
+        vault_path=tmp_path,
+    )
+
+    expected_dir = tmp_path / "bilibili" / "主动保存"
+    dynamic_files = [
+        path for path in result["written_files"]
+        if "Bilibili 爬取汇总.md" not in path
+    ]
+    summary_files = [
+        path for path in result["written_files"]
+        if "Bilibili 爬取汇总.md" in path
+    ]
+
+    assert result["output_dir"] == str(expected_dir)
+    assert len(dynamic_files) == 1
+    assert Path(dynamic_files[0]).parent == expected_dir
+    assert len(summary_files) == 1
+    assert Path(summary_files[0]).parent == expected_dir
+
+
+async def test_bilibili_fetch_dynamics_by_urls_reuses_manual_link_metadata(monkeypatch):
+    api = BilibiliToolAPI(sessdata="fake-sessdata")
+    try:
+        async def fake_fetch_dynamic_by_url(self, url: str):
+            if url.endswith("/bad"):
+                raise ValueError("bad link")
+            suffix = url.rstrip("/").rsplit("/", 1)[-1]
+            return BiliDynamic(
+                id="",
+                dynamic_id=suffix,
+                title=f"title-{suffix}",
+                content="",
+                author="测试UP",
+                author_id="1001",
+                url=url,
+                dynamic_type="video",
+                bvid="BV1xx411c7mD",
+            )
+
+        monkeypatch.setattr(BilibiliToolAPI, "fetch_dynamic_by_url", fake_fetch_dynamic_by_url)
+
+        dynamics, failures, skipped_count = await api.fetch_dynamics_by_urls(
+            [
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+                "https://t.bilibili.com/9001",
+                "",
+                "https://www.bilibili.com/opus/bad",
+            ]
+        )
+
+        assert [dynamic.url for dynamic in dynamics] == [
+            "https://www.bilibili.com/video/BV1xx411c7mD",
+            "https://t.bilibili.com/9001",
+        ]
+        assert skipped_count == 2
+        assert len(failures) == 1
+        assert failures[0].startswith("https://www.bilibili.com/opus/bad")
+        assert all(dynamic.monitor_subfolder == "主动链接导入" for dynamic in dynamics)
+        assert all(dynamic.crawl_source == "manual-link" for dynamic in dynamics)
+        assert all(dynamic.crawl_source_label == "指定链接" for dynamic in dynamics)
+        assert all(dynamic.id for dynamic in dynamics)
+    finally:
+        await api.close()
+
+
+async def test_bilibili_fetch_dynamics_by_urls_serializes_preview_payload(monkeypatch):
+    async def fake_fetch(self, urls, *, monitor_subfolder="主动链接导入", crawl_source="manual-link", crawl_source_label="指定链接"):
+        assert urls == ["https://www.bilibili.com/video/BV1xx411c7mD"]
+        assert monitor_subfolder == "主动链接导入"
+        assert crawl_source == "manual-link"
+        assert crawl_source_label == "指定链接"
+        return (
+            [
+                BiliDynamic(
+                    id="bili-dyn-link-1",
+                    dynamic_id="9001",
+                    title="链接抓取结果",
+                    content="完整内容",
+                    author="测试UP",
+                    author_id="1001",
+                    url="https://www.bilibili.com/video/BV1xx411c7mD",
+                    dynamic_type="video",
+                    bvid="BV1xx411c7mD",
+                    monitor_subfolder=monitor_subfolder,
+                    crawl_source=crawl_source,
+                    crawl_source_label=crawl_source_label,
+                )
+            ],
+            ["https://www.bilibili.com/opus/bad: bad link"],
+            0,
+        )
+
+    monkeypatch.setattr(BilibiliToolAPI, "fetch_dynamics_by_urls", fake_fetch)
+
+    result = await bilibili_fetch_dynamics_by_urls(
+        "fake-sessdata",
+        ["https://www.bilibili.com/video/BV1xx411c7mD"],
+    )
+
+    assert result["total_found"] == 1
+    assert result["fetch_stats"]["source"] == "direct-links"
+    assert result["fetch_stats"]["input_count"] == 1
+    assert result["fetch_stats"]["failed_count"] == 1
+    assert result["dynamics"][0]["monitor_subfolder"] == "主动链接导入"
+    assert result["dynamics"][0]["crawl_source"] == "manual-link"
 
 
 async def test_bilibili_fetch_skips_previously_seen_dynamics(monkeypatch, tmp_path):

@@ -171,6 +171,30 @@ function getTrackedCardSubfolder(card: FeedCard, rootFolder: "xhs" | "bilibili")
   return parts.join("/");
 }
 
+function getTrackedXhsSaveSubfolder(card: FeedCard): string {
+  const baseSubfolder = getTrackedCardSubfolder(card, "xhs");
+  const crawlSource = cardMetadataString(card, "crawl_source");
+  const authorId = cardMetadataString(card, "author_id") || cardMetadataString(card, "user_id");
+  const authorLabel = getFeedCardAuthorLabel(card).trim().replace(/[\\/]+/g, "-");
+  if (!authorLabel || !["user_id", "creator-recent"].includes(crawlSource)) {
+    return baseSubfolder;
+  }
+  if (!authorId || authorLabel === authorId) {
+    return baseSubfolder;
+  }
+
+  const parts = baseSubfolder.split("/").filter(Boolean);
+  if (parts.length >= 2 && parts[parts.length - 2] === "指定用户扫描") {
+    parts[parts.length - 1] = authorLabel;
+    return parts.join("/");
+  }
+  if (parts.includes("指定用户扫描")) {
+    const creatorIndex = parts.lastIndexOf("指定用户扫描");
+    return [...parts.slice(0, creatorIndex + 1), authorLabel].join("/");
+  }
+  return ["主动保存", "指定用户扫描", authorLabel].join("/");
+}
+
 function canSaveFeedCard(card: FeedCard): boolean {
   const platform = getCardPlatform(card);
   return isPaperTrackingCard(card) || platform.id === "xiaohongshu" || platform.id === "bilibili";
@@ -1166,7 +1190,7 @@ export default function Feed() {
 
     try {
       if (platform === "xiaohongshu") {
-        const subfolder = getTrackedCardSubfolder(card, "xhs");
+        const subfolder = getTrackedXhsSaveSubfolder(card);
         const result = await xiaohongshuSavePreviews({
           notes: [
             {

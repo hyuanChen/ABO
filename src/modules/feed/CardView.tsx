@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { xiaohongshuSyncAuthorsToTracker } from "../../api/xiaohongshu";
 import { useToast } from "../../components/Toast";
-import { api } from "../../core/api";
+import { api, API_BASE_URL, buildImageProxyUrl } from "../../core/api";
 import { useStore, type FeedCard } from "../../core/store";
 import SharedPaperTrackingCard, { type PaperTrackingCardPaper } from "../arxiv/PaperTrackingCard";
 import BilibiliDynamicCard, { type BilibiliCardDynamic } from "../bilibili/BilibiliDynamicCard";
@@ -138,7 +138,7 @@ function metadataStringList(metadata: Record<string, unknown>, key: string): str
 
 function proxiedImage(url: string): string {
   if (!url) return "";
-  return `http://127.0.0.1:8765/api/proxy/image?url=${encodeURIComponent(url)}`;
+  return buildImageProxyUrl(url);
 }
 
 async function openExternalUrl(url: string) {
@@ -188,7 +188,7 @@ type PaperFigureAsset = {
   filename?: string;
 };
 
-const API_BASE = "http://127.0.0.1:8765";
+const API_BASE = API_BASE_URL;
 
 function normalizePaperFigures(figures: unknown): PaperFigureAsset[] {
   if (!Array.isArray(figures) || !figures.length) return [];

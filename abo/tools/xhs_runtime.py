@@ -241,6 +241,16 @@ async def fetch_xhs_creator_recent_result(
             raise
 
         filtered_notes = filter_xhs_notes_by_recent_days(notes, recent_days, sort_by="time")[: max(1, min(max_notes, 50))]
+        note_author = next(
+            (
+                str(getattr(note, "author", "") or "").strip()
+                for note in [*filtered_notes, *notes]
+                if str(getattr(note, "author", "") or "").strip()
+                and str(getattr(note, "author", "") or "").strip() != clean_user_id
+            ),
+            "",
+        )
+        display_author = note_author or resolved_author or clean_user_id
         if record_creator_metrics:
             record_creator_success(clean_user_id, note_ids=[str(getattr(note, "id", "")) for note in notes if getattr(note, "id", "")])
 
@@ -250,7 +260,7 @@ async def fetch_xhs_creator_recent_result(
                 update_creator_mapping(
                     [
                         {
-                            "author": resolved_author or clean_user_id,
+                            "author": display_author,
                             "author_id": clean_user_id,
                             "profile_url": profile_url,
                         }
@@ -261,7 +271,7 @@ async def fetch_xhs_creator_recent_result(
 
         return {
             "creator_query": normalized_query,
-            "resolved_author": resolved_author or clean_user_id,
+            "resolved_author": display_author,
             "resolved_user_id": clean_user_id,
             "profile_url": profile_url,
             "recent_days": normalize_xhs_recent_days(recent_days),

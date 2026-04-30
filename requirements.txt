@@ -1,5 +1,6 @@
 fastapi>=0.115
 uvicorn[standard]>=0.34
+apscheduler>=3.10
 python-frontmatter>=1.1
 pypdf>=5.0
 pdfminer.six>=20231228
@@ -9,3 +10,5 @@ watchdog>=6.0
 pyyaml>=6.0
 pdf2image>=1.17
 arxiv>=2.0.0
+browser-cookie3>=0.20
+psutil>=5.9

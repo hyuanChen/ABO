@@ -24,12 +24,20 @@ import {
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState } from "../../components/Layout";
-import { api } from "../../core/api";
+import { api, buildImageProxyUrl } from "../../core/api";
 import { isActionEnterKey } from "../../core/keyboard";
 import { dirnamePath, formatLibraryLocation, withLocationSuffix } from "../../core/pathDisplay";
+import {
+  readJsonStorage,
+  readStringStorage,
+  removeStorageKey,
+  writeJsonStorage,
+  writeStringStorage,
+} from "../../core/storage";
 import { useStore } from "../../core/store";
 import { useToast } from "../../components/Toast";
 import { CookieGuide } from "../../components/ConfigHelp";
+import { PaginationControls } from "../../components/PaginationControls";
 import {
   type CrawlNoteResponse,
   type CrawlBatchResponse,
@@ -121,6 +129,7 @@ type BrowserChoice = "default" | "edge" | "chrome" | "brave" | "safari" | "firef
 type NoteResultLayout = "horizontal" | "vertical";
 const XIAOHONGSHU_TOOL_TAB_KEY = "xiaohongshu_tool_tab";
 const CREATOR_BATCH_DELAY_SECONDS_RANGE = [20, 30] as const;
+const FREQUENT_AUTHOR_PAGE_SIZE = 12;
 const XHS_CREATOR_RISK_MARKERS = [
   "访问频繁",
   "安全验证",
@@ -203,6 +212,71 @@ interface XHSAlbumCrawlResponse {
   }>;
 }
 
+const IMAGE_PROXY_PREFIX = buildImageProxyUrl("");
+
+function proxiedImage(url: string): string {
+  const cleanUrl = String(url || "").trim();
+  if (!cleanUrl) return "";
+  if (cleanUrl.startsWith("data:image/")) return cleanUrl;
+  if (cleanUrl.startsWith(IMAGE_PROXY_PREFIX)) return cleanUrl;
+  return buildImageProxyUrl(cleanUrl);
+}
+
+function normalizeAlbumPreviewImage(value?: string | null): string {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "?" || raw === "#" || raw === "about:blank") return "";
+  if (raw.startsWith("data:image/")) return raw;
+  try {
+    const parsed = new URL(raw, window.location.href);
+    if (!/^https?:$/.test(parsed.protocol)) return "";
+    if ((parsed.hostname || "").toLowerCase().endsWith(".xhscdn.com") && parsed.protocol === "http:") {
+      parsed.protocol = "https:";
+    }
+    const href = parsed.toString();
+    if ((parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost") && !href.startsWith(IMAGE_PROXY_PREFIX)) {
+      return "";
+    }
+    if (
+      /(?:xiaohongshu\.com|xhscdn\.com)$/i.test(parsed.hostname)
+      && /\/(?:explore|board|user\/profile)(?:\/|$)/.test(parsed.pathname)
+    ) {
+      return "";
+    }
+    return href;
+  } catch {
+    return "";
+  }
+}
+
+function normalizeAlbumPreview(album: XHSAlbumPreview): XHSAlbumPreview {
+  return {
+    ...album,
+    preview_image: normalizeAlbumPreviewImage(album.preview_image),
+  };
+}
+
+function normalizeAlbumPreviews(albums: XHSAlbumPreview[]): XHSAlbumPreview[] {
+  return Array.isArray(albums) ? albums.map(normalizeAlbumPreview) : [];
+}
+
+type AlbumPreviewFallbackMode = "proxy" | "none";
+
+function shouldProxyAlbumPreview(url: string): boolean {
+  if (!url || url.startsWith("data:image/")) return false;
+  try {
+    const parsed = new URL(url, window.location.href);
+    const hostname = (parsed.hostname || "").toLowerCase();
+    return (
+      hostname === "xiaohongshu.com"
+      || hostname.endsWith(".xiaohongshu.com")
+      || hostname === "xhscdn.com"
+      || hostname.endsWith(".xhscdn.com")
+    );
+  } catch {
+    return false;
+  }
+}
+
 interface XHSCreatorProfile {
   author?: string;
   author_id?: string;
@@ -254,7 +328,7 @@ interface CreatorBatchResultItem {
 
 export function XiaohongshuTool() {
   const [activeTab, setActiveTab] = useState<TabType>(() => {
-    const saved = localStorage.getItem(XIAOHONGSHU_TOOL_TAB_KEY);
+    const saved = readStringStorage(XIAOHONGSHU_TOOL_TAB_KEY, "");
     if (saved === "following" || saved === "search") return saved;
     return "collections";
   });
@@ -262,9 +336,9 @@ export function XiaohongshuTool() {
   const config = useStore((state) => state.config);
 
   // Cookie config state
-  const [webSession, setWebSession] = useState(() => localStorage.getItem("xiaohongshu_websession") || "");
-  const [idToken, setIdToken] = useState(() => localStorage.getItem("xiaohongshu_idtoken") || "");
-  const [fullCookie, setFullCookie] = useState(() => localStorage.getItem("xiaohongshu_full_cookie") || "");
+  const [webSession, setWebSession] = useState(() => readStringStorage("xiaohongshu_websession", ""));
+  const [idToken, setIdToken] = useState(() => readStringStorage("xiaohongshu_idtoken", ""));
+  const [fullCookie, setFullCookie] = useState(() => readStringStorage("xiaohongshu_full_cookie", ""));
   const [cookieVerified, setCookieVerified] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [gettingCookie, setGettingCookie] = useState(false);
@@ -334,21 +408,22 @@ export function XiaohongshuTool() {
   // Album collection state
   const [albums, setAlbums] = useState<XHSAlbumPreview[]>(() => {
     try {
-      const saved = localStorage.getItem("xiaohongshu_album_cache");
-      return saved ? JSON.parse(saved) : [];
+      const saved = readJsonStorage("xiaohongshu_album_cache", [] as XHSAlbumPreview[]);
+      return normalizeAlbumPreviews(saved);
     } catch {
       return [];
     }
   });
   const [selectedAlbumIds, setSelectedAlbumIds] = useState<Set<string>>(() => {
     try {
-      const saved = localStorage.getItem("xiaohongshu_album_cache");
-      const parsed = saved ? JSON.parse(saved) : [];
+      const saved = readJsonStorage("xiaohongshu_album_cache", [] as XHSAlbumPreview[]);
+      const parsed = normalizeAlbumPreviews(saved);
       return new Set(Array.isArray(parsed) ? parsed.map((album: XHSAlbumPreview) => album.board_id).filter(Boolean) : []);
     } catch {
       return new Set();
     }
   });
+  const [albumPreviewFallbacks, setAlbumPreviewFallbacks] = useState<Record<string, AlbumPreviewFallbackMode>>({});
   const [albumCrawlMode, setAlbumCrawlMode] = useState<AlbumCrawlMode>("full");
   const [albumResult, setAlbumResult] = useState<XHSAlbumCrawlResponse | null>(null);
   const [albumRecentDaysInput, setAlbumRecentDaysInput] = useState("");
@@ -409,8 +484,8 @@ export function XiaohongshuTool() {
   const [expandedSharedManagerMembers, setExpandedSharedManagerMembers] = useState<Set<string>>(new Set());
   const [authorCandidates, setAuthorCandidates] = useState<XHSAuthorCandidate[]>([]);
   const [authorCandidateMeta, setAuthorCandidateMeta] = useState<{ totalNotes: number; message: string } | null>(null);
-  const [showAllFrequentAuthors, setShowAllFrequentAuthors] = useState(false);
   const [frequentAuthorGroupFilter, setFrequentAuthorGroupFilter] = useState<string>("all");
+  const [frequentAuthorPage, setFrequentAuthorPage] = useState(1);
   const [creatorMonitorGroupFilter, setCreatorMonitorGroupFilter] = useState<string>("all");
   const [creatorMonitorPage, setCreatorMonitorPage] = useState(0);
   const [showCreatorImportPanel, setShowCreatorImportPanel] = useState(false);
@@ -959,37 +1034,43 @@ export function XiaohongshuTool() {
 
   // Persist cookies
   useEffect(() => {
-    localStorage.setItem(XIAOHONGSHU_TOOL_TAB_KEY, activeTab);
+    writeStringStorage(XIAOHONGSHU_TOOL_TAB_KEY, activeTab);
   }, [activeTab]);
 
   useEffect(() => {
     if (webSession) {
-      localStorage.setItem("xiaohongshu_websession", webSession);
+      writeStringStorage("xiaohongshu_websession", webSession);
     } else {
-      localStorage.removeItem("xiaohongshu_websession");
+      removeStorageKey("xiaohongshu_websession");
     }
   }, [webSession]);
 
   useEffect(() => {
     if (idToken) {
-      localStorage.setItem("xiaohongshu_idtoken", idToken);
+      writeStringStorage("xiaohongshu_idtoken", idToken);
     } else {
-      localStorage.removeItem("xiaohongshu_idtoken");
+      removeStorageKey("xiaohongshu_idtoken");
     }
   }, [idToken]);
 
   useEffect(() => {
     if (fullCookie) {
-      localStorage.setItem("xiaohongshu_full_cookie", fullCookie);
+      writeStringStorage("xiaohongshu_full_cookie", fullCookie);
     } else {
-      localStorage.removeItem("xiaohongshu_full_cookie");
+      removeStorageKey("xiaohongshu_full_cookie");
     }
   }, [fullCookie]);
 
   useEffect(() => {
     if (albums.length > 0) {
-      localStorage.setItem("xiaohongshu_album_cache", JSON.stringify(albums));
+      writeJsonStorage("xiaohongshu_album_cache", albums);
+    } else {
+      removeStorageKey("xiaohongshu_album_cache");
     }
+  }, [albums]);
+
+  useEffect(() => {
+    setAlbumPreviewFallbacks({});
   }, [albums]);
 
   useEffect(() => {
@@ -1222,10 +1303,10 @@ export function XiaohongshuTool() {
   };
 
   const handleClearXhsLocalCache = () => {
-    localStorage.removeItem("xiaohongshu_album_cache");
-    localStorage.removeItem("xiaohongshu_websession");
-    localStorage.removeItem("xiaohongshu_idtoken");
-    localStorage.removeItem("xiaohongshu_full_cookie");
+    removeStorageKey("xiaohongshu_album_cache");
+    removeStorageKey("xiaohongshu_websession");
+    removeStorageKey("xiaohongshu_idtoken");
+    removeStorageKey("xiaohongshu_full_cookie");
     setAlbums([]);
     setSelectedAlbumIds(new Set());
     setAlbumResult(null);
@@ -1425,11 +1506,16 @@ export function XiaohongshuTool() {
               result.notes,
               result.resolved_author || result.creator_query,
               "博主最近动态已入库",
+              result.resolved_user_id,
             );
           }
         },
         (result) => ({
-          title: `${result.resolved_author || result.resolved_user_id} 最近 ${result.recent_days} 天 ${result.total_found} 条`,
+          title: `${resolveCreatorDisplayLabel(
+            result.resolved_author || result.creator_query,
+            result.notes,
+            result.resolved_user_id,
+          )} 最近 ${result.recent_days} 天 ${result.total_found} 条`,
         }),
         (taskId) => setCreatorRecentTaskId(taskId),
       );
@@ -1522,7 +1608,7 @@ export function XiaohongshuTool() {
         }),
         (result) => setCrawlResult(result),
         (result) => ({
-          title: "已保存到 xhs",
+          title: "已保存到 xhs/主动保存",
           description: formatLibraryLocation(result.markdown_path, "vault", config),
         }),
       );
@@ -1589,8 +1675,12 @@ export function XiaohongshuTool() {
     "关注流扫描/未命名关键词",
   );
 
-  const buildCreatorSaveSubfolder = (rawLabel: string) => buildSaveSubfolderName(
-    `指定用户扫描/${rawLabel}`,
+  const buildCreatorSaveSubfolder = (
+    rawLabel: string,
+    notes: XHSNote[] = [],
+    explicitAuthorId?: string | null,
+  ) => buildSaveSubfolderName(
+    `指定用户扫描/${resolveCreatorDisplayLabel(rawLabel, notes, explicitAuthorId)}`,
     "指定用户扫描/未命名用户",
   );
 
@@ -1641,7 +1731,7 @@ export function XiaohongshuTool() {
       });
       const status: XHSTaskStatus["status"] = result.failed > 0 ? "failed" : "completed";
       toast.success(
-        options.successTitle || "已保存到 xhs",
+        options.successTitle || "已保存到 xhs/主动保存",
         withLocationSuffix(`成功 ${result.saved} 条，失败 ${result.failed} 条`, result.xhs_dir, "vault", config),
       );
       setTaskHistory((prev) => [
@@ -1668,9 +1758,10 @@ export function XiaohongshuTool() {
     notes: XHSNote[],
     rawSubfolder: string,
     successTitle: string,
+    explicitAuthorId?: string | null,
   ) => {
     await handleSavePreviewNotesWithOptions(notes, {
-      subfolder: buildCreatorSaveSubfolder(rawSubfolder),
+      subfolder: buildCreatorSaveSubfolder(rawSubfolder, notes, explicitAuthorId),
       successTitle,
       emptyMessage: "没有可入库的博主动态",
     });
@@ -1733,10 +1824,11 @@ export function XiaohongshuTool() {
             window.clearInterval(timer);
             albumListTimerRef.current = null;
             const result = progress.result as XHSAlbumListResponse;
-            setAlbums(result.albums);
-            setSelectedAlbumIds(new Set(result.albums.map((album) => album.board_id)));
+            const normalizedAlbums = normalizeAlbumPreviews(result.albums);
+            setAlbums(normalizedAlbums);
+            setSelectedAlbumIds(new Set(normalizedAlbums.map((album) => album.board_id)));
             setAlbumListTaskId(null);
-            if (result.albums.length > 0) toast.success(`找到 ${result.albums.length} 个专辑`);
+            if (normalizedAlbums.length > 0) toast.success(`找到 ${normalizedAlbums.length} 个专辑`);
             else toast.info("未发现专辑", result.message);
           } else if (progress.status === "cancelled") {
             window.clearInterval(timer);
@@ -2101,7 +2193,7 @@ export function XiaohongshuTool() {
             message: result.xhs_candidate_message || result.message,
           });
           setFrequentAuthorGroupFilter("all");
-          setShowAllFrequentAuthors(false);
+          setFrequentAuthorPage(1);
           void refreshTrackerConfig();
           setExpandedPushes((prev) => new Set(prev).add("creator"));
         },
@@ -2126,11 +2218,12 @@ export function XiaohongshuTool() {
   };
 
   const handleAddFrequentAuthorToCreatorMonitor = async (candidate: XHSAuthorCandidate) => {
-    if (!candidate.author_id) {
+    const candidateAuthorId = normalizeXhsProfileUserId(candidate.author_id || resolveKnownAuthorId(candidate.author));
+    if (!candidateAuthorId) {
       toast.error("这个博主还没解析出 user_id", "先重新执行一次“共享智能分组”。");
       return;
     }
-    if (trackerCreatorMonitors.some((monitor) => monitor.user_id === candidate.author_id)) {
+    if (creatorMonitorByUserId.has(candidateAuthorId)) {
       setExpandedPushes((prev) => new Set(prev).add("creator"));
       toast.info("这个博主已经在指定关注里");
       return;
@@ -2139,7 +2232,7 @@ export function XiaohongshuTool() {
       const result = await xiaohongshuSyncAuthorsToTracker([
         {
           author: candidate.author,
-          author_id: candidate.author_id,
+          author_id: candidateAuthorId,
           latest_title: candidate.latest_title,
           sample_titles: candidate.sample_titles,
           sample_albums: candidate.sample_albums || [],
@@ -2533,10 +2626,10 @@ export function XiaohongshuTool() {
 
   const renderManualCrawlTools = () => (
     <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
-      <Card title="保存笔记到 xhs" icon={<FolderDown style={{ width: "18px", height: "18px" }} />}>
+      <Card title="保存笔记到 xhs/主动保存" icon={<FolderDown style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
           <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", margin: 0 }}>
-            粘贴小红书详情链接，ABO 会抓取正文、远程图片链接和本地资源，保存到情报库的 xhs 文件夹。
+            粘贴小红书详情链接，ABO 会抓取正文、远程图片链接和本地资源，保存到情报库的 xhs/主动保存/ 文件夹。
           </p>
 
           <div style={{ display: "flex", gap: "12px", alignItems: "stretch" }}>
@@ -3172,47 +3265,69 @@ export function XiaohongshuTool() {
               </div>
 
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "12px" }}>
-                {albums.map((album) => (
-                  <button
-                    key={album.board_id}
-                    onClick={() => toggleAlbumSelection(album.board_id)}
-                    style={{
-                      textAlign: "left",
-                      padding: "0",
-                      borderRadius: "var(--radius-md)",
-                      border: selectedAlbumIds.has(album.board_id) ? "2px solid var(--color-primary)" : "1px solid var(--border-light)",
-                      background: "var(--bg-card)",
-                      color: "var(--text-main)",
-                      overflow: "hidden",
-                      cursor: "pointer",
-                    }}
-                  >
-                    <div style={{ aspectRatio: "4 / 3", background: "var(--bg-hover)" }}>
-                      {album.preview_image ? (
-                        <img
-                          src={album.preview_image}
-                          alt={album.name}
-                          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                        />
-                      ) : (
-                        <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)" }}>
-                          无预览图
-                        </div>
-                      )}
-                    </div>
-                    <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "6px" }}>
-                      <div style={{ fontWeight: 600, fontSize: "0.9375rem", lineHeight: 1.4 }}>{album.name}</div>
-                      <div style={{ color: "var(--text-muted)", fontSize: "0.8125rem" }}>
-                        {album.count ?? "未知"} 条 · 已抓 {album.seen_count || 0} 条
+                {albums.map((album) => {
+                  const previewImage = normalizeAlbumPreviewImage(album.preview_image);
+                  const fallbackMode = albumPreviewFallbacks[album.board_id];
+                  const preferProxy = shouldProxyAlbumPreview(previewImage);
+                  const displayImage = !previewImage || fallbackMode === "none"
+                    ? ""
+                    : fallbackMode === "proxy"
+                      ? proxiedImage(previewImage)
+                      : preferProxy
+                        ? proxiedImage(previewImage)
+                        : previewImage;
+                  return (
+                    <button
+                      key={album.board_id}
+                      onClick={() => toggleAlbumSelection(album.board_id)}
+                      style={{
+                        textAlign: "left",
+                        padding: "0",
+                        borderRadius: "var(--radius-md)",
+                        border: selectedAlbumIds.has(album.board_id) ? "2px solid var(--color-primary)" : "1px solid var(--border-light)",
+                        background: "var(--bg-card)",
+                        color: "var(--text-main)",
+                        overflow: "hidden",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <div style={{ aspectRatio: "4 / 3", background: "var(--bg-hover)" }}>
+                        {displayImage ? (
+                          <img
+                            src={displayImage}
+                            alt={album.name}
+                            loading="lazy"
+                            referrerPolicy="no-referrer"
+                            onError={() => {
+                              setAlbumPreviewFallbacks((prev) => ({
+                                ...prev,
+                                [album.board_id]: displayImage.startsWith(IMAGE_PROXY_PREFIX) || previewImage.startsWith("data:image/")
+                                  ? "none"
+                                  : "proxy",
+                              }));
+                            }}
+                            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                          />
+                        ) : (
+                          <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)" }}>
+                            无预览图
+                          </div>
+                        )}
                       </div>
-                      {album.latest_title && (
-                        <div style={{ color: "var(--text-secondary)", fontSize: "0.8125rem", lineHeight: 1.5 }}>
-                          最新：{album.latest_title}
+                      <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "6px" }}>
+                        <div style={{ fontWeight: 600, fontSize: "0.9375rem", lineHeight: 1.4 }}>{album.name}</div>
+                        <div style={{ color: "var(--text-muted)", fontSize: "0.8125rem" }}>
+                          {album.count ?? "未知"} 条 · 已抓 {album.seen_count || 0} 条
                         </div>
-                      )}
-                    </div>
-                  </button>
-                ))}
+                        {album.latest_title && (
+                          <div style={{ color: "var(--text-secondary)", fontSize: "0.8125rem", lineHeight: 1.5 }}>
+                            最新：{album.latest_title}
+                          </div>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -3360,7 +3475,7 @@ export function XiaohongshuTool() {
       }));
   const creatorMonitorByUserId = new Map<string, XHSTrackerCreatorMonitor>();
   creatorEntries.forEach((creatorMonitor) => {
-    const userId = String(creatorMonitor.user_id || "").trim();
+    const userId = normalizeXhsProfileUserId(creatorMonitor.user_id);
     if (!userId || creatorMonitorByUserId.has(userId)) return;
     creatorMonitorByUserId.set(userId, creatorMonitor);
   });
@@ -3407,7 +3522,7 @@ export function XiaohongshuTool() {
     return String(mappedEntry?.profile_url || "").trim();
   };
   const trackedCreatorUserIds = new Set(
-    creatorEntries.map((monitor) => String(monitor.user_id || "").trim()).filter(Boolean),
+    creatorEntries.map((monitor) => normalizeXhsProfileUserId(monitor.user_id)).filter(Boolean),
   );
   const getMonitorGroupValues = (monitor: XHSTrackerCreatorMonitor): string[] => {
     const userId = String(monitor.user_id || "").trim();
@@ -3519,21 +3634,67 @@ export function XiaohongshuTool() {
     .map((profileId) => creatorBatchTargetByProfileId.get(profileId))
     .filter((target): target is CreatorBatchTarget => Boolean(target?.query));
   const knownAuthorIdByName = new Map<string, string>();
+  const knownAuthorNameById = new Map<string, string>();
+  const rememberKnownAuthor = (authorId?: string | null, author?: string | null) => {
+    const normalizedAuthorId = normalizeXhsProfileUserId(authorId);
+    const cleanAuthor = String(author || "").trim();
+    if (normalizedAuthorId && cleanAuthor) {
+      knownAuthorNameById.set(normalizedAuthorId, cleanAuthor);
+    }
+  };
   authorCandidates.forEach((candidate) => {
     const authorKey = normalizeAuthorKey(candidate.author);
     if (authorKey && candidate.author_id) knownAuthorIdByName.set(authorKey, candidate.author_id);
+    rememberKnownAuthor(candidate.author_id, candidate.author);
   });
   Object.values(trackerCreatorNameMap).forEach((entry) => {
     const authorKey = normalizeAuthorKey(entry.author);
     const authorId = String(entry.author_id || "").trim();
     if (authorKey && authorId) knownAuthorIdByName.set(authorKey, authorId);
+    rememberKnownAuthor(authorId, entry.author);
   });
   Object.entries(trackerCreatorProfiles).forEach(([profileId, profile]) => {
     const authorKey = normalizeAuthorKey(profile.author);
     const profileAuthorId = String(profile.author_id || profileId || "").trim();
     if (authorKey && profileAuthorId) knownAuthorIdByName.set(authorKey, profileAuthorId);
+    rememberKnownAuthor(profileAuthorId, profile.author);
+  });
+  creatorEntries.forEach((monitor) => {
+    rememberKnownAuthor(monitor.user_id, monitor.author || monitor.label);
   });
   const resolveKnownAuthorId = (author?: string | null) => knownAuthorIdByName.get(normalizeAuthorKey(author)) || "";
+  const resolveCreatorDisplayLabel = (
+    rawLabel: string,
+    notes: XHSNote[] = [],
+    explicitAuthorId?: string | null,
+  ) => {
+    const cleanRawLabel = String(rawLabel || "").trim();
+    const normalizedExplicitAuthorId = normalizeXhsProfileUserId(explicitAuthorId);
+    const normalizedRawAuthorId = cleanRawLabel ? normalizeXhsProfileUserId(cleanRawLabel) : "";
+    const noteAuthors = Array.from(new Set(
+      notes
+        .map((note) => String(note.author || "").trim())
+        .filter(Boolean),
+    ));
+    const noteAuthorIds = Array.from(new Set(
+      notes
+        .map((note) => normalizeXhsProfileUserId(note.author_id || resolveKnownAuthorId(note.author)))
+        .filter(Boolean),
+    ));
+    const singleNoteAuthor = noteAuthors.length === 1 ? noteAuthors[0] : "";
+    const singleNoteAuthorId = noteAuthorIds.length === 1 ? noteAuthorIds[0] : "";
+    const targetAuthorId = normalizedExplicitAuthorId || singleNoteAuthorId || normalizedRawAuthorId;
+    const mappedAuthor = targetAuthorId ? String(knownAuthorNameById.get(targetAuthorId) || "").trim() : "";
+    const rawLabelLooksLikeAuthorId = Boolean(normalizedRawAuthorId && cleanRawLabel === normalizedRawAuthorId);
+    const shouldPreferMappedAuthor = Boolean(
+      normalizedExplicitAuthorId
+      || singleNoteAuthorId
+      || rawLabelLooksLikeAuthorId,
+    );
+    if (singleNoteAuthor && shouldPreferMappedAuthor) return singleNoteAuthor;
+    if (mappedAuthor && shouldPreferMappedAuthor) return mappedAuthor;
+    return cleanRawLabel || mappedAuthor || singleNoteAuthor || "未命名用户";
+  };
   const frequentAuthorCandidates = [...authorCandidates].sort((a, b) => {
     if (b.note_count !== a.note_count) return b.note_count - a.note_count;
     if (b.total_collects !== a.total_collects) return b.total_collects - a.total_collects;
@@ -3541,12 +3702,14 @@ export function XiaohongshuTool() {
     return b.score - a.score;
   });
   const getCandidateGroupLabels = (candidate: XHSAuthorCandidate): string[] => {
-    const profile = candidate.author_id ? trackerCreatorProfiles[candidate.author_id] : undefined;
+    const candidateAuthorId = normalizeXhsProfileUserId(candidate.author_id || resolveKnownAuthorId(candidate.author));
+    const profile = candidateAuthorId ? trackerCreatorProfiles[candidateAuthorId] : undefined;
     return getCreatorGroupLabels(profile);
   };
   const frequentAuthorGroupCounts = creatorGroupDisplayOptions.reduce<Record<string, number>>((acc, option) => {
     acc[option.value] = frequentAuthorCandidates.filter((candidate) => {
-      const profile = candidate.author_id ? trackerCreatorProfiles[candidate.author_id] : undefined;
+      const candidateAuthorId = normalizeXhsProfileUserId(candidate.author_id || resolveKnownAuthorId(candidate.author));
+      const profile = candidateAuthorId ? trackerCreatorProfiles[candidateAuthorId] : undefined;
       return (profile?.smart_groups || []).includes(option.value);
     }).length;
     return acc;
@@ -3556,12 +3719,26 @@ export function XiaohongshuTool() {
   );
   const filteredFrequentAuthorCandidates = frequentAuthorCandidates.filter((candidate) => {
     if (frequentAuthorGroupFilter === "all") return true;
-    const profile = candidate.author_id ? trackerCreatorProfiles[candidate.author_id] : undefined;
+    const candidateAuthorId = normalizeXhsProfileUserId(candidate.author_id || resolveKnownAuthorId(candidate.author));
+    const profile = candidateAuthorId ? trackerCreatorProfiles[candidateAuthorId] : undefined;
     return (profile?.smart_groups || []).includes(frequentAuthorGroupFilter);
   });
-  const visibleFrequentAuthorCandidates = showAllFrequentAuthors
-    ? filteredFrequentAuthorCandidates
-    : filteredFrequentAuthorCandidates.slice(0, 10);
+  const frequentAuthorTotalPages = Math.max(1, Math.ceil(filteredFrequentAuthorCandidates.length / FREQUENT_AUTHOR_PAGE_SIZE));
+  const safeFrequentAuthorPage = Math.min(frequentAuthorPage, frequentAuthorTotalPages);
+  const visibleFrequentAuthorCandidates = filteredFrequentAuthorCandidates.slice(
+    (safeFrequentAuthorPage - 1) * FREQUENT_AUTHOR_PAGE_SIZE,
+    safeFrequentAuthorPage * FREQUENT_AUTHOR_PAGE_SIZE,
+  );
+
+  useEffect(() => {
+    setFrequentAuthorPage(1);
+  }, [frequentAuthorGroupFilter]);
+
+  useEffect(() => {
+    if (frequentAuthorPage > frequentAuthorTotalPages) {
+      setFrequentAuthorPage(frequentAuthorTotalPages);
+    }
+  }, [frequentAuthorPage, frequentAuthorTotalPages]);
 
   const persistTrackerDefinitions = async (successTitle: string, successDescription?: string) => {
     try {
@@ -4862,7 +5039,7 @@ export function XiaohongshuTool() {
               高频博主快捷添加
             </div>
             <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6, marginTop: "4px" }}>
-              共享智能分组完成后，会按本地内容里作者出现次数整理高频博主，默认展示前 10 个，点圆形头像就能直接加入“指定关注爬取”。
+              共享智能分组完成后，会按本地内容里作者出现次数整理高频博主；<span style={{ fontWeight: 800, color: "var(--color-primary)" }}>点击头像加入</span>，也可以直接用卡片里的按钮添加到“指定关注爬取”。
             </div>
           </div>
           <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
@@ -4895,7 +5072,7 @@ export function XiaohongshuTool() {
               高频博主快捷添加
             </div>
             <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", lineHeight: 1.6, marginTop: "4px" }}>
-              按收藏里出现次数排序。默认只显示前 10 个，点头像就直接加入指定关注爬取。
+              按收藏里出现次数排序，每页 12 个；<span style={{ fontWeight: 800, color: "var(--color-primary)" }}>点击头像加入</span>，也可以直接用卡片按钮添加或删除。
             </div>
           </div>
           <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
@@ -4935,11 +5112,22 @@ export function XiaohongshuTool() {
         </div>
 
         {filteredFrequentAuthorCandidates.length > 0 ? (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "10px" }}>
+          <>
+            <PaginationControls
+              totalCount={filteredFrequentAuthorCandidates.length}
+              page={safeFrequentAuthorPage}
+              pageSize={FREQUENT_AUTHOR_PAGE_SIZE}
+              itemLabel="个博主"
+              onPageChange={setFrequentAuthorPage}
+              emptyText="当前筛选条件下没有匹配到博主"
+            />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "10px" }}>
             {visibleFrequentAuthorCandidates.map((candidate, index) => {
-              const alreadyTracked = Boolean(candidate.author_id) && trackerCreatorMonitors.some((monitor) => monitor.user_id === candidate.author_id);
+              const candidateAuthorId = normalizeXhsProfileUserId(candidate.author_id || resolveKnownAuthorId(candidate.author));
+              const alreadyTracked = Boolean(candidateAuthorId) && creatorMonitorByUserId.has(candidateAuthorId);
               const groupLabels = getCandidateGroupLabels(candidate);
               const avatarText = (candidate.author || "?").trim().slice(0, 2) || "?";
+              const rank = ((safeFrequentAuthorPage - 1) * FREQUENT_AUTHOR_PAGE_SIZE) + index + 1;
               return (
                 <div
                   key={`${candidate.author}-${candidate.author_id || index}`}
@@ -4956,8 +5144,8 @@ export function XiaohongshuTool() {
                   <button
                     type="button"
                     onClick={() => void handleAddFrequentAuthorToCreatorMonitor(candidate)}
-                    disabled={!candidate.author_id}
-                    title={candidate.author_id ? "点头像直接加入指定关注爬取" : "这个作者还没有解析出 user_id"}
+                    disabled={!candidateAuthorId}
+                    title={candidateAuthorId ? "点头像直接加入指定关注爬取" : "这个作者还没有解析出 user_id"}
                     style={{
                       width: "44px",
                       height: "44px",
@@ -4969,8 +5157,8 @@ export function XiaohongshuTool() {
                       color: alreadyTracked ? "white" : "var(--color-primary)",
                       fontSize: "0.875rem",
                       fontWeight: 800,
-                      cursor: candidate.author_id ? "pointer" : "not-allowed",
-                      opacity: candidate.author_id ? 1 : 0.45,
+                      cursor: candidateAuthorId ? "pointer" : "not-allowed",
+                      opacity: candidateAuthorId ? 1 : 0.45,
                       flexShrink: 0,
                     }}
                   >
@@ -4983,7 +5171,7 @@ export function XiaohongshuTool() {
                         {candidate.author}
                       </span>
                       <span style={{ fontSize: "0.6875rem", color: alreadyTracked ? "var(--color-primary)" : "var(--text-muted)", whiteSpace: "nowrap" }}>
-                        {alreadyTracked ? "已加入" : `TOP ${index + 1}`}
+                        {alreadyTracked ? "已加入" : `TOP ${rank}`}
                       </span>
                     </div>
                     <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", lineHeight: 1.5 }}>
@@ -5011,30 +5199,63 @@ export function XiaohongshuTool() {
                         ))}
                       </div>
                     ) : null}
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "2px" }}>
+                      {alreadyTracked ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleRemoveCreatorUser(candidateAuthorId)}
+                          style={{
+                            padding: "7px 10px",
+                            borderRadius: "var(--radius-sm)",
+                            border: "1px solid rgba(239, 68, 68, 0.22)",
+                            background: "rgba(239, 68, 68, 0.08)",
+                            color: "#DC2626",
+                            fontSize: "0.75rem",
+                            fontWeight: 700,
+                            cursor: "pointer",
+                          }}
+                        >
+                          删除
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void handleAddFrequentAuthorToCreatorMonitor(candidate)}
+                          disabled={!candidateAuthorId}
+                          style={{
+                            padding: "7px 10px",
+                            borderRadius: "var(--radius-sm)",
+                            border: "1px solid rgba(255, 36, 66, 0.22)",
+                            background: candidateAuthorId ? "rgba(255, 36, 66, 0.10)" : "var(--bg-hover)",
+                            color: candidateAuthorId ? "var(--color-primary)" : "var(--text-muted)",
+                            fontSize: "0.75rem",
+                            fontWeight: 700,
+                            cursor: candidateAuthorId ? "pointer" : "not-allowed",
+                          }}
+                        >
+                          {candidateAuthorId ? "一键添加" : "待解析 user_id"}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               );
             })}
-          </div>
+            </div>
+            <PaginationControls
+              totalCount={filteredFrequentAuthorCandidates.length}
+              page={safeFrequentAuthorPage}
+              pageSize={FREQUENT_AUTHOR_PAGE_SIZE}
+              itemLabel="个博主"
+              onPageChange={setFrequentAuthorPage}
+              emptyText="当前筛选条件下没有匹配到博主"
+            />
+          </>
         ) : (
           <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
             当前筛选条件下还没有匹配到博主。可以切回“全部”，或者先重新执行一次智能分组。
           </div>
         )}
-
-        {filteredFrequentAuthorCandidates.length > 10 ? (
-          <div style={{ display: "flex", justifyContent: "center" }}>
-            <button
-              type="button"
-              onClick={() => setShowAllFrequentAuthors((value) => !value)}
-              style={segmentedButtonStyle(false)}
-            >
-              {showAllFrequentAuthors
-                ? "收起高频博主"
-                : `展开剩余 ${filteredFrequentAuthorCandidates.length - 10} 个高频博主`}
-            </button>
-          </div>
-        ) : null}
       </div>
     );
   };
@@ -5244,7 +5465,11 @@ export function XiaohongshuTool() {
                 <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)" }}>
-                      {item.result?.resolved_author || item.target.author}
+                      {resolveCreatorDisplayLabel(
+                        item.result?.resolved_author || item.target.author,
+                        item.result?.notes || [],
+                        item.result?.resolved_user_id || item.target.authorId,
+                      )}
                     </div>
                   <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginTop: "4px", lineHeight: 1.6 }}>
                     {item.target.groupLabel ? `${item.target.groupLabel} · ` : ""}
@@ -5259,8 +5484,17 @@ export function XiaohongshuTool() {
                       type="button"
                       onClick={() => void handleSaveCreatorRecentNotes(
                         item.result?.notes || [],
-                        item.result?.resolved_author || item.target.author,
-                        `${item.result?.resolved_author || item.target.author}动态已入库`,
+                        resolveCreatorDisplayLabel(
+                          item.result?.resolved_author || item.target.author,
+                          item.result?.notes || [],
+                          item.result?.resolved_user_id || item.target.authorId,
+                        ),
+                        `${resolveCreatorDisplayLabel(
+                          item.result?.resolved_author || item.target.author,
+                          item.result?.notes || [],
+                          item.result?.resolved_user_id || item.target.authorId,
+                        )}动态已入库`,
+                        item.result?.resolved_user_id || item.target.authorId,
                       )}
                       disabled={previewSaveRunning || item.result.notes.length === 0}
                       style={{
@@ -5278,7 +5512,11 @@ export function XiaohongshuTool() {
                       type="button"
                       onClick={() => void openExternalUrl(
                         item.result?.profile_url || buildXhsProfileUrl(item.target.authorId),
-                        `${item.result?.resolved_author || item.target.author}主页`,
+                        `${resolveCreatorDisplayLabel(
+                          item.result?.resolved_author || item.target.author,
+                          item.result?.notes || [],
+                          item.result?.resolved_user_id || item.target.authorId,
+                        )}主页`,
                       )}
                       style={segmentedButtonStyle(false)}
                     >
@@ -5302,8 +5540,16 @@ export function XiaohongshuTool() {
                       else next.add(noteId);
                       return next;
                     }),
-                    sourceLabel: item.result.resolved_author || item.target.author,
-                    saveAllTitle: `${item.result.resolved_author || item.target.author}动态已入库`,
+                    sourceLabel: resolveCreatorDisplayLabel(
+                      item.result.resolved_author || item.target.author,
+                      item.result.notes,
+                      item.result.resolved_user_id || item.target.authorId,
+                    ),
+                    saveAllTitle: `${resolveCreatorDisplayLabel(
+                      item.result.resolved_author || item.target.author,
+                      item.result.notes,
+                      item.result.resolved_user_id || item.target.authorId,
+                    )}动态已入库`,
                   })
                 ) : (
                   <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
@@ -5318,9 +5564,9 @@ export function XiaohongshuTool() {
 
       {creatorRecentResult ? (
         <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
             <div style={{ fontSize: "0.875rem", color: "var(--text-main)", fontWeight: 700 }}>
-              {creatorRecentResult.resolved_author} · 最近 {creatorRecentResult.recent_days} 天 {creatorRecentResult.total_found} 条
+              {creatorRecentDisplayLabel} · 最近 {creatorRecentResult.recent_days} 天 {creatorRecentResult.total_found} 条
             </div>
             <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", alignItems: "center" }}>
               <button
@@ -5329,6 +5575,7 @@ export function XiaohongshuTool() {
                   creatorRecentResult.notes,
                   creatorRecentResult.resolved_author || creatorRecentResult.creator_query,
                   "博主最近动态已入库",
+                  creatorRecentResult.resolved_user_id,
                 )}
                 disabled={previewSaveRunning || creatorRecentResult.notes.length === 0}
                 style={{
@@ -5356,7 +5603,7 @@ export function XiaohongshuTool() {
               <button
                 type="button"
                 onClick={() => void handleAddFrequentAuthorToCreatorMonitor({
-                  author: creatorRecentResult.resolved_author,
+                  author: creatorRecentDisplayLabel,
                   author_id: creatorRecentResult.resolved_user_id,
                   note_count: creatorRecentResult.total_found,
                   total_likes: creatorRecentResult.notes.reduce((sum, item) => sum + (item.likes || 0), 0),
@@ -5383,7 +5630,7 @@ export function XiaohongshuTool() {
                 type="button"
                 onClick={() => void openExternalUrl(
                   creatorRecentResult.profile_url || buildXhsProfileUrl(creatorRecentResult.resolved_user_id),
-                  `${creatorRecentResult.resolved_author}主页`,
+                  `${creatorRecentDisplayLabel}主页`,
                 )}
                 style={{
                   display: "inline-flex",
@@ -5416,7 +5663,7 @@ export function XiaohongshuTool() {
               else next.add(noteId);
               return next;
             }),
-            sourceLabel: creatorRecentResult.resolved_author || creatorRecentResult.creator_query,
+            sourceLabel: creatorRecentDisplayLabel,
             saveAllTitle: "博主最近动态已入库",
           }) : (
             <div style={{ fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
@@ -7487,13 +7734,20 @@ export function XiaohongshuTool() {
     normalizedTaskHistoryPage * taskHistoryPageSize + taskHistoryPageSize,
   );
   const selectedTask = taskHistory.find((task) => task.task_id === selectedTaskId) || null;
+  const creatorRecentDisplayLabel = creatorRecentResult
+    ? resolveCreatorDisplayLabel(
+        creatorRecentResult.resolved_author || creatorRecentResult.creator_query,
+        creatorRecentResult.notes,
+        creatorRecentResult.resolved_user_id,
+      )
+    : "";
 
   return (
     <PageContainer>
       {renderCookieConfigModal()}
       <PageHeader
         title="小红书分析工具"
-        subtitle="收藏专辑抓取、主动爬取、关注监控，一键获取 Cookie 并保存到情报库 xhs"
+        subtitle="收藏专辑抓取、主动爬取、关注监控，一键获取 Cookie 并保存到情报库 xhs/主动保存 与 xhs/专辑"
         icon={Search}
         actions={
           <button

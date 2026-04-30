@@ -79,7 +79,7 @@ const DEFAULT_KEYWORDS: Record<string, string[]> = {
 
 const AI_PROVIDER_OPTIONS = [
   { id: "codex" as const, label: "Codex", supported: true, hint: "默认可用" },
-  { id: "claude" as const, label: "Claude", supported: false, hint: "暂不支持（易封号）" },
+  { id: "claude" as const, label: "Claude Code", supported: false, hint: "兼容默认关闭，可在设置里手动开启" },
 ];
 
 export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps) {
@@ -211,7 +211,7 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
   const loadGlobalConfig = async () => {
     try {
       const config = await api.get<Record<string, unknown>>("/api/config");
-      setAiProvider(config.ai_provider === "codex" ? "codex" : "codex");
+      setAiProvider(config.ai_provider === "claude" && Boolean(config.claude_code_compat_enabled) ? "claude" : "codex");
       setPaperAiScoringEnabled(Boolean(config.paper_ai_scoring_enabled));
       setIntelligenceDeliveryEnabled(config.intelligence_delivery_enabled !== false);
       setIntelligenceDeliveryTime(String(config.intelligence_delivery_time || "09:00"));
@@ -901,7 +901,7 @@ export default function QuickConfigStep({ onNext, onBack }: QuickConfigStepProps
               marginBottom: "12px",
             }}
           >
-            当前默认使用 Codex。Claude 暂不支持，易封号。
+            当前默认使用 Codex。Claude Code 兼容默认关闭；如确有需要，可在设置里手动开启。
           </div>
           <button
             onClick={() => setPaperAiScoringEnabled((current) => !current)}

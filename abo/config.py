@@ -1,13 +1,13 @@
 """
 全局配置：Vault 路径 + 应用配置。
-持久化到 ~/.abo-config.json（与旧版兼容）。
+持久化到应用数据目录，并自动兼容旧版 ~/.abo-config.json。
 """
 import json
 import re
 from pathlib import Path
 
-_CONFIG_PATH = Path.home() / ".abo-config.json"
-_ABO_DIR = Path.home() / ".abo"
+from .storage_paths import get_app_storage_root, get_config_path
+
 _DEFAULT_INTELLIGENCE_DELIVERY_TIME = "09:00"
 
 
@@ -50,9 +50,10 @@ def load() -> dict:
         "onboarding_step": 0,
         "feed_preferences": _default_feed_preferences(),
     }
-    if _CONFIG_PATH.exists():
+    config_path = get_config_path()
+    if config_path.exists():
         try:
-            saved = json.loads(_CONFIG_PATH.read_text())
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
             merged = {**defaults, **saved}
             if isinstance(saved.get("feed_preferences"), dict):
                 merged["feed_preferences"] = {
@@ -92,7 +93,9 @@ def save(data: dict) -> None:
         # Only overwrite if new value is non-empty, or existing was already empty
         elif v or not existing.get(k):
             merged[k] = v
-    _CONFIG_PATH.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
+    config_path = get_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def get_vault_path() -> Path | None:
@@ -121,8 +124,7 @@ def is_paper_ai_scoring_enabled() -> bool:
 
 
 def get_abo_dir() -> Path:
-    _ABO_DIR.mkdir(parents=True, exist_ok=True)
-    return _ABO_DIR
+    return get_app_storage_root()
 
 
 def get_semantic_scholar_api_key() -> str:

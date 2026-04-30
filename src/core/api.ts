@@ -1,7 +1,28 @@
-/** Typed HTTP client → http://127.0.0.1:8765 */
+/** Typed HTTP client with build-specific local backend origin. */
 
-export const API_BASE_URL = "http://127.0.0.1:8765";
+const API_HOST = import.meta.env.VITE_ABO_API_HOST || "127.0.0.1";
+const API_PORT = import.meta.env.VITE_ABO_API_PORT || "8765";
+
+export const API_BASE_URL = `http://${API_HOST}:${API_PORT}`;
+export const WS_BASE_URL = `ws://${API_HOST}:${API_PORT}`;
 const BASE = API_BASE_URL;
+
+export function buildApiUrl(path: string): string {
+  return `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+export function buildWsUrl(path: string): string {
+  return `${WS_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+export function buildImageProxyUrl(url: string): string {
+  return buildApiUrl(`/api/proxy/image?url=${encodeURIComponent(url)}`);
+}
+
+interface WaitForReadyOptions {
+  timeoutMs?: number;
+  intervalMs?: number;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, {
@@ -13,6 +34,29 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`API ${res.status}: ${detail}`);
   }
   return res.json() as Promise<T>;
+}
+
+async function waitForReady(options: WaitForReadyOptions = {}): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 20000;
+  const intervalMs = options.intervalMs ?? 400;
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "后端尚未启动";
+
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`${BASE}/api/health`);
+      if (res.ok) {
+        return;
+      }
+      lastError = `API ${res.status}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "后端连接失败";
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+  }
+
+  throw new Error(`等待后端启动超时：${lastError}`);
 }
 
 export const api = {
@@ -28,4 +72,5 @@ export const api = {
       method: "DELETE",
       body: body ? JSON.stringify(body) : undefined,
     }),
+  waitForReady,
 };

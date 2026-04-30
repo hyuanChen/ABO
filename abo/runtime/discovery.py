@@ -1,51 +1,69 @@
+import importlib
 import importlib.util
-from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 from ..sdk.base import Module
+from ..storage_paths import get_user_modules_dir
 
 
 class ModuleRegistry:
-    _SKIPPED_BUILTIN_PACKAGES = {"semantic_scholar"}
+    _BUILTIN_MODULE_IMPORTS = [
+        "abo.default_modules.arxiv",
+        "abo.default_modules.semantic_scholar_tracker",
+        "abo.default_modules.xiaohongshu",
+        "abo.default_modules.bilibili",
+        "abo.default_modules.xiaoyuzhou",
+        "abo.default_modules.zhihu",
+        "abo.default_modules.folder_monitor",
+    ]
 
     def __init__(self):
         self._modules: dict[str, Module] = {}
 
     def load_all(self) -> None:
-        # 内置模块
-        builtin_dir = Path(__file__).parent.parent / "default_modules"
-        if builtin_dir.exists():
-            for pkg in sorted(builtin_dir.iterdir(), key=lambda item: item.name):
-                if pkg.name in self._SKIPPED_BUILTIN_PACKAGES:
-                    continue
-                if pkg.is_dir() and (pkg / "__init__.py").exists():
-                    self._load_pkg(pkg)
+        self._modules = {}
+        self._load_builtin_modules()
 
         # 用户自定义模块
-        user_dir = Path.home() / ".abo" / "modules"
+        user_dir = get_user_modules_dir()
         user_dir.mkdir(parents=True, exist_ok=True)
         for pkg in sorted(user_dir.iterdir(), key=lambda item: item.name):
             if pkg.is_dir() and (pkg / "__init__.py").exists():
                 self._load_pkg(pkg)
+
+    def _load_builtin_modules(self) -> None:
+        for module_path in self._BUILTIN_MODULE_IMPORTS:
+            try:
+                mod = importlib.import_module(module_path)
+                self._register_module_types(mod)
+            except Exception as e:
+                print(f"[discovery] Failed to load builtin module {module_path}: {e}")
 
     def _load_pkg(self, pkg_dir: Path):
         try:
             spec = importlib.util.spec_from_file_location(
                 f"abo_module_{pkg_dir.name}", pkg_dir / "__init__.py"
             )
+            if spec is None or spec.loader is None:
+                raise RuntimeError("无法创建模块 spec")
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            for attr in vars(mod).values():
-                if (isinstance(attr, type)
-                        and issubclass(attr, Module)
-                        and attr is not Module
-                        and getattr(attr, "id", "")):
-                    instance = attr()
-                    self._modules[instance.id] = instance
-                    print(f"[discovery] Loaded: {instance.name} ({instance.id})")
+            self._register_module_types(mod)
         except Exception as e:
             print(f"[discovery] Failed to load {pkg_dir.name}: {e}")
+
+    def _register_module_types(self, mod) -> None:
+        for attr in vars(mod).values():
+            if (
+                isinstance(attr, type)
+                and issubclass(attr, Module)
+                and attr is not Module
+                and getattr(attr, "id", "")
+            ):
+                instance = attr()
+                self._modules[instance.id] = instance
+                print(f"[discovery] Loaded: {instance.name} ({instance.id})")
 
     # Desired module order
     MODULE_ORDER = [
@@ -79,7 +97,7 @@ def start_watcher(registry: ModuleRegistry, on_change):
                 on_change(registry)
                 print("[discovery] Hot-reloaded after new module detected")
 
-    user_dir = Path.home() / ".abo" / "modules"
+    user_dir = get_user_modules_dir()
     observer = Observer()
     observer.schedule(_Handler(), str(user_dir), recursive=True)
     observer.daemon = True

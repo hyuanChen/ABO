@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+from ..storage_paths import resolve_app_db_path
+
 
 @dataclass
 class AssistantSession:
@@ -51,11 +53,11 @@ class AssistantSessionStore:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, db_path: str = "~/.abo/data/assistant_sessions.db"):
+    def __init__(self, db_path: str | None = None):
         if hasattr(self, "_initialized"):
             return
 
-        self.db_path = os.path.expanduser(db_path)
+        self.db_path = os.path.expanduser(db_path or resolve_app_db_path("assistant_sessions.db"))
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._init_db()
         self._initialized = True

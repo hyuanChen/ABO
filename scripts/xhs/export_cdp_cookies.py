@@ -15,6 +15,8 @@ from pathlib import Path
 import httpx
 import websockets
 
+from abo.storage_paths import get_config_path
+
 
 async def export_cookies(port: int, output: Path) -> dict:
     async with httpx.AsyncClient(timeout=5) as client:
@@ -47,7 +49,7 @@ async def export_cookies(port: int, output: Path) -> dict:
     cookie_json = json.dumps(xhs_cookies, ensure_ascii=False, indent=2)
     output.write_text(cookie_json, encoding="utf-8")
 
-    config_path = Path.home() / ".abo-config.json"
+    config_path = get_config_path()
     config = {}
     if config_path.exists():
         try:

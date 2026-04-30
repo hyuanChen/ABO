@@ -62,6 +62,7 @@ SMART_GROUP_GENERIC_SIGNAL_KEYS = {
     re.sub(r"[()（）\[\]【】]+", "", re.sub(r"[\s\-_·•・]+", "", str(item).strip().lower()))
     for item in SMART_GROUP_GENERIC_SIGNALS
 }
+BILIBILI_ACTIVE_SAVE_DIRNAME = "主动保存"
 
 
 @dataclass
@@ -2271,6 +2272,8 @@ async def analyze_saved_bilibili_favorites(
 def _note_path(base: Path, note: BilibiliNote) -> Path:
     date = _today()
     if note.source_type == "dynamic":
+        if _is_manual_link_dynamic(note):
+            return (base / BILIBILI_ACTIVE_SAVE_DIRNAME) / f"{date} 动态 {_safe_filename(note.title)}.md"
         folder_path = base / "dynamic"
         for part in [segment for segment in str(note.folder_name or "").split("/") if str(segment or "").strip()]:
             folder_path = folder_path / _safe_filename(part, "监控")
@@ -2295,6 +2298,19 @@ def _resolve_output_dir(base: Path, notes: list[BilibiliNote]) -> Path:
     except ValueError:
         return base
     return common_dir
+
+
+def _is_manual_link_dynamic(note: BilibiliNote) -> bool:
+    return (
+        note.source_type == "dynamic"
+        and str((note.metadata or {}).get("crawl_source") or "").strip() == "manual-link"
+    )
+
+
+def _resolve_summary_dir(base: Path, notes: list[BilibiliNote]) -> Path:
+    if notes and all(_is_manual_link_dynamic(note) for note in notes):
+        return base / BILIBILI_ACTIVE_SAVE_DIRNAME
+    return base
 
 
 def _build_bilibili_unified_entry(
@@ -2424,11 +2440,13 @@ def write_notes_to_vault(
         renamed_by_source = dict(zip(rename_result["renamed_sources"], rename_result["renamed_files"]))
         written = [renamed_by_source.get(str(Path(path).resolve()), path) for path in written]
 
-    index_path = base / f"{_today()} Bilibili 爬取汇总.md"
-    grouped = {
-        "dynamic": [p for p in written if "/dynamic/" in p],
-        "favorite": [p for p in written if "/favorites/" in p],
-        "watch_later": [p for p in written if "/watch_later/" in p],
+    summary_dir = _resolve_summary_dir(base, notes)
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    index_path = summary_dir / f"{_today()} Bilibili 爬取汇总.md"
+    grouped_counts = {
+        "dynamic": sum(1 for note in notes if note.source_type == "dynamic"),
+        "favorite": sum(1 for note in notes if note.source_type == "favorite"),
+        "watch_later": sum(1 for note in notes if note.source_type == "watch_later"),
     }
     links = "\n".join(
         f"- [[{Path(p).resolve().relative_to(base.resolve()).with_suffix('').as_posix()}]]"
@@ -2445,11 +2463,11 @@ def write_notes_to_vault(
 > [!info]- 测试结果
 > - **登录用户**: {summary.get("uname", "")}
 > - **MID**: {summary.get("mid", "")}
-> - **动态样本**: {len(grouped["dynamic"])} 条
+> - **动态样本**: {grouped_counts["dynamic"]} 条
 > - **收藏夹总数**: {summary.get("favorite_folder_count", 0)} 个
-> - **收藏样本**: {len(grouped["favorite"])} 条
+> - **收藏样本**: {grouped_counts["favorite"]} 条
 > - **稍后再看总数**: {summary.get("watch_later_total", 0)} 条
-> - **稍后再看样本**: {len(grouped["watch_later"])} 条
+> - **稍后再看样本**: {grouped_counts["watch_later"]} 条
 
 ## 本次写入
 

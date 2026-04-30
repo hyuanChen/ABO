@@ -591,7 +591,17 @@ class WikiBuilder:
             elif len(rel.parts) >= 2 and rel.parts[0] == "bilibili" and rel.parts[1] == "watch_later":
                 folder_rel = Path(*rel.parts[:2])
                 label = "Bilibili / 稍后再看"
-            elif rel.parts[0] in {"xhs", "专辑"}:
+            elif rel.parts[0] == "xhs":
+                if len(rel.parts) >= 3 and rel.parts[1] == "专辑" and not rel.parts[2].endswith(".md"):
+                    folder_rel = Path(*rel.parts[:3])
+                    label = f"小红书 / {rel.parts[2]}"
+                elif len(rel.parts) >= 2 and not rel.parts[1].endswith(".md"):
+                    folder_rel = Path(*rel.parts[:2])
+                    label = f"小红书 / {rel.parts[1]}"
+                else:
+                    folder_rel = Path(rel.parts[0])
+                    label = "小红书"
+            elif rel.parts[0] == "专辑":
                 if len(rel.parts) >= 2 and not rel.parts[1].endswith(".md"):
                     folder_rel = Path(*rel.parts[:2])
                     label = f"小红书 / {rel.parts[1]}"
@@ -1086,6 +1096,8 @@ class WikiBuilder:
             rel = path.relative_to(root)
             if len(rel.parts) >= 3 and rel.parts[0] == "bilibili" and rel.parts[1] == "favorites":
                 return f"Bilibili / {rel.parts[2]}"
+            if len(rel.parts) >= 3 and rel.parts[0] == "xhs" and rel.parts[1] == "专辑":
+                return f"小红书 / {rel.parts[2]}"
             if len(rel.parts) >= 2 and rel.parts[0] in {"xhs", "专辑"}:
                 return f"小红书 / {rel.parts[1]}"
             return rel.parts[0]
@@ -1119,6 +1131,9 @@ class WikiBuilder:
                 wiki_vault,
                 intel_root / "xhs" / "学术"
                 if intel_root and (intel_root / "xhs" / "学术").exists()
+                else None,
+                intel_root / "xhs" / "专辑" / "学术"
+                if intel_root and (intel_root / "xhs" / "专辑" / "学术").exists()
                 else None,
                 intel_root / "专辑" / "学术"
                 if intel_root and (intel_root / "专辑" / "学术").exists()

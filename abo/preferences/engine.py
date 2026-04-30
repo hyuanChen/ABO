@@ -2,12 +2,9 @@ import json
 import os
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, List, Optional
 
-_PREFS_PATH = Path.home() / ".abo" / "preferences.json"
-_LIKED_DIR = Path.home() / ".abo" / "liked"
-_KEYWORDS_PATH = Path.home() / ".abo" / "keyword_preferences.json"
+from ..storage_paths import get_keyword_preferences_path, get_liked_dir, get_preferences_path
 
 
 @dataclass
@@ -61,16 +58,18 @@ class PreferenceEngine:
         self._data: dict | None = None
 
     def _load(self) -> dict:
-        if _PREFS_PATH.exists():
-            stored = json.loads(_PREFS_PATH.read_text())
+        prefs_path = get_preferences_path()
+        if prefs_path.exists():
+            stored = json.loads(prefs_path.read_text(encoding="utf-8"))
             return {**_DEFAULTS, **stored}
         return {k: (v.copy() if isinstance(v, dict) else list(v) if isinstance(v, list) else v)
                 for k, v in _DEFAULTS.items()}
 
     def _save(self):
         data = self._ensure_data()
-        _PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _PREFS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        prefs_path = get_preferences_path()
+        prefs_path.parent.mkdir(parents=True, exist_ok=True)
+        prefs_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _ensure_data(self) -> dict:
         if self._data is None:
@@ -112,7 +111,7 @@ class PreferenceEngine:
         self._save()
 
     def save_liked_to_markdown(self, card: dict) -> Path | None:
-        """Save a liked card to category-specific markdown file in ~/.abo/liked/.
+        """Save a liked card to category-specific markdown file in the app data dir.
 
         Args:
             card: Dictionary with keys: title, summary, source_url, module_id, category, tags
@@ -133,9 +132,10 @@ class PreferenceEngine:
         filename = category_map.get(category, "ideas.md")
 
         # Ensure liked directory exists
-        _LIKED_DIR.mkdir(parents=True, exist_ok=True)
+        liked_dir = get_liked_dir()
+        liked_dir.mkdir(parents=True, exist_ok=True)
 
-        file_path = _LIKED_DIR / filename
+        file_path = liked_dir / filename
 
         # Build frontmatter
         title = card.get("title", "Untitled")
@@ -202,8 +202,9 @@ class PreferenceEngine:
 
     def _load_keyword_prefs(self) -> dict[str, KeywordPreference]:
         """Load keyword preferences from disk."""
-        if _KEYWORDS_PATH.exists():
-            data = json.loads(_KEYWORDS_PATH.read_text(encoding="utf-8"))
+        keywords_path = get_keyword_preferences_path()
+        if keywords_path.exists():
+            data = json.loads(keywords_path.read_text(encoding="utf-8"))
             prefs: dict[str, KeywordPreference] = {}
             for key, value in data.items():
                 payload = dict(value or {})
@@ -214,9 +215,10 @@ class PreferenceEngine:
 
     def _save_keyword_prefs(self, prefs: dict[str, KeywordPreference]):
         """Save keyword preferences to disk."""
-        _KEYWORDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        keywords_path = get_keyword_preferences_path()
+        keywords_path.parent.mkdir(parents=True, exist_ok=True)
         data = {k: v.to_dict() for k, v in prefs.items()}
-        _KEYWORDS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        keywords_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def update_from_feedback(self, card_tags: list[str], action: str, card_module: str = ""):
         """Update keyword preferences based on user feedback.

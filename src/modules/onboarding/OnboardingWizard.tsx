@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { api } from "../../core/api";
 import { useStore } from "../../core/store";
+import WindowDragHandle from "../../components/WindowDragHandle";
 import ProgressIndicator from "./ProgressIndicator";
 import WelcomeStep from "./steps/WelcomeStep";
 import VaultSetupStep from "./steps/VaultSetupStep";
@@ -143,6 +144,7 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
           zIndex: 100,
         }}
       >
+        <WindowDragHandle />
         <div
           style={{
             display: "flex",
@@ -206,6 +208,7 @@ export default function OnboardingWizard({ onComplete }: OnboardingWizardProps) 
         fontFamily: "'Nunito', 'M PLUS Rounded 1c', sans-serif",
       }}
     >
+      <WindowDragHandle />
       {/* Progress Header */}
       <ProgressIndicator
         currentStep={currentStep}

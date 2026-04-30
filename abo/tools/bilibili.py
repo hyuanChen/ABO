@@ -39,6 +39,7 @@ GLOBAL_FOLLOWED_OVERSCAN_MULTIPLIER = 4
 GLOBAL_FOLLOWED_MIN_SCAN_PAGES_SHORT = 9
 GLOBAL_FOLLOWED_MIN_SCAN_PAGES_MID = 18
 GLOBAL_FOLLOWED_MIN_SCAN_PAGES_LONG = 30
+MANUAL_LINK_IMPORT_SUBFOLDER = "主动链接导入"
 
 
 def _normalize_text_list(values: list[str] | None) -> list[str]:
@@ -265,7 +266,9 @@ class BilibiliToolAPI:
     API_BASE = "https://api.bilibili.com"
     DYNAMIC_API = "https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/dynamic_new"
     POLYMER_DYNAMIC_API = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all"
+    DYNAMIC_DETAIL_API = "https://api.bilibili.com/x/polymer/web-dynamic/v1/detail"
     SPACE_DYNAMIC_API = "https://api.bilibili.com/x/polymer/web-dynamic/desktop/v1/feed/space"
+    ARTICLE_VIEWINFO_API = "https://api.bilibili.com/x/article/viewinfo"
     POLYMER_DYNAMIC_FEATURES = (
         "itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote,"
         "decorationCard,forwardListHidden,ugcDelete,onlyfansQaCard"
@@ -299,6 +302,41 @@ class BilibiliToolAPI:
         if url.startswith("http://"):
             return f"https://{url[7:]}"
         return url
+
+    def _normalize_input_url(self, url: str) -> str:
+        raw = str(url or "").strip()
+        if not raw:
+            return ""
+        if raw.startswith("BV"):
+            raw = f"https://www.bilibili.com/video/{raw}"
+        elif raw.startswith("cv") and raw[2:].isdigit():
+            raw = f"https://www.bilibili.com/read/{raw}"
+        elif raw.isdigit():
+            raw = f"https://www.bilibili.com/opus/{raw}"
+        elif not re.match(r"^https?://", raw, flags=re.IGNORECASE):
+            raw = f"https://{raw.lstrip('/')}"
+        normalized = self._normalize_url(raw)
+        return normalized.split("#", 1)[0].strip()
+
+    def _extract_dynamic_id_from_url(self, url: str) -> str:
+        text = self._normalize_input_url(url)
+        if not text:
+            return ""
+        for pattern in (
+            r"(?:t|h)\.bilibili\.com/(\d+)",
+            r"bilibili\.com/opus/(\d+)",
+        ):
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        return ""
+
+    def _extract_cvid(self, url: str) -> str:
+        text = self._normalize_input_url(url)
+        if not text:
+            return ""
+        match = re.search(r"/read/cv(\d+)", text)
+        return match.group(1) if match else ""
 
     def _normalize_keep_limit(self, value: Any, fallback: int = 20) -> int:
         try:
@@ -488,6 +526,240 @@ class BilibiliToolAPI:
         if last_error:
             raise last_error
         raise ValueError("获取动态失败")
+
+    async def _fetch_dynamic_detail(self, dynamic_id: str, *, source_url: str = "") -> BiliDynamic:
+        clean_dynamic_id = str(dynamic_id or "").strip()
+        if not clean_dynamic_id:
+            raise ValueError("缺少动态 ID")
+
+        referer = source_url or f"https://www.bilibili.com/opus/{clean_dynamic_id}"
+        resp = await self.client.get(
+            self.DYNAMIC_DETAIL_API,
+            params={"id": clean_dynamic_id},
+            headers=self._build_headers(referer=referer),
+        )
+        if resp.status_code != 200:
+            raise ValueError(f"动态详情请求失败: HTTP {resp.status_code}")
+
+        data = resp.json()
+        if data.get("code") != 0:
+            raise ValueError(data.get("message") or "动态详情获取失败")
+
+        payload = (
+            ((data.get("data") or {}).get("item"))
+            or (((data.get("data") or {}).get("items") or [None])[0])
+            or {}
+        )
+        if not isinstance(payload, dict):
+            raise ValueError("动态详情返回为空")
+
+        dynamic = self._parse_polymer_item(payload)
+        if dynamic is None:
+            dynamic = self._parse_space_dynamic_item(
+                payload,
+                override_dynamic_id=clean_dynamic_id,
+                override_url=source_url or None,
+            )
+        if dynamic is None:
+            raise ValueError("无法解析这条动态详情")
+
+        dynamic.dynamic_id = dynamic.dynamic_id or clean_dynamic_id
+        dynamic.id = dynamic.id or f"bili-dyn-{dynamic.dynamic_id}"
+        if dynamic.dynamic_type == "video":
+            dynamic = await self._enrich_video_dynamic(dynamic)
+        if not str(dynamic.url or "").strip():
+            dynamic.url = source_url or f"https://www.bilibili.com/opus/{clean_dynamic_id}"
+        return dynamic
+
+    async def _fetch_article_detail(self, cvid: str, *, source_url: str = "") -> BiliDynamic:
+        clean_cvid = str(cvid or "").strip()
+        if not clean_cvid:
+            raise ValueError("缺少专栏 ID")
+
+        referer = source_url or f"https://www.bilibili.com/read/cv{clean_cvid}"
+        resp = await self.client.get(
+            self.ARTICLE_VIEWINFO_API,
+            params={"id": clean_cvid, "mobi_app": "pc", "from": "web"},
+            headers=self._build_headers(referer=referer),
+        )
+        if resp.status_code != 200:
+            raise ValueError(f"专栏详情请求失败: HTTP {resp.status_code}")
+
+        data = resp.json()
+        if data.get("code") != 0:
+            raise ValueError(data.get("message") or "专栏详情获取失败")
+
+        payload = data.get("data") or {}
+        if not isinstance(payload, dict):
+            raise ValueError("专栏详情返回为空")
+
+        title = str(payload.get("title") or "").strip() or f"B站专栏 cv{clean_cvid}"
+        summary = str(
+            payload.get("summary")
+            or payload.get("desc")
+            or payload.get("subtitle")
+            or ""
+        ).strip()
+        author_payload = payload.get("author") or {}
+        author = str(
+            payload.get("author_name")
+            or author_payload.get("name")
+            or "UP主"
+        ).strip() or "UP主"
+        author_id = str(
+            payload.get("mid")
+            or payload.get("author_mid")
+            or author_payload.get("mid")
+            or ""
+        ).strip()
+        banner = self._normalize_url(
+            payload.get("banner_url")
+            or payload.get("image_url")
+            or ""
+        )
+        raw_images = []
+        for key in ("origin_image_urls", "image_urls"):
+            values = payload.get(key) or []
+            if isinstance(values, list):
+                raw_images.extend(values)
+        images = [
+            self._normalize_url(image)
+            for image in raw_images
+            if self._normalize_url(image)
+        ]
+        if banner and banner not in images:
+            images = [banner, *images]
+
+        published_at = None
+        for key in ("publish_time", "ctime", "ptime"):
+            value = payload.get(key)
+            if not value:
+                continue
+            try:
+                published_at = datetime.fromtimestamp(int(value))
+                break
+            except Exception:
+                continue
+
+        return BiliDynamic(
+            id=f"bili-dyn-cv{clean_cvid}",
+            dynamic_id=f"cv{clean_cvid}",
+            title=title,
+            content=summary,
+            author=author,
+            author_id=author_id,
+            url=referer,
+            published_at=published_at,
+            dynamic_type="article",
+            images=images,
+            pic=images[0] if images else "",
+            tags=self._extract_inline_tags(title, summary),
+        )
+
+    async def _fetch_video_dynamic_by_bvid(self, bvid: str, *, source_url: str = "") -> BiliDynamic:
+        clean_bvid = extract_bvid(bvid)
+        if not clean_bvid:
+            raise ValueError("缺少视频 BV 号")
+
+        referer = source_url or f"https://www.bilibili.com/video/{clean_bvid}"
+        metadata = await fetch_bilibili_video_metadata(
+            self.client,
+            bvid=clean_bvid,
+            headers=self._build_headers(referer=referer),
+            referer=referer,
+        )
+        if not metadata:
+            raise ValueError("视频详情获取失败")
+
+        published_at = None
+        published_at_ts = metadata.get("published_at_ts")
+        if published_at_ts:
+            try:
+                published_at = datetime.fromtimestamp(int(published_at_ts))
+            except Exception:
+                published_at = None
+
+        title = str(metadata.get("title") or "").strip() or f"B站视频 {clean_bvid}"
+        content = str(metadata.get("description") or "").strip()
+        tags = merge_tags(
+            self._extract_inline_tags(title, content),
+            metadata.get("tags") or [],
+        )
+
+        return BiliDynamic(
+            id=f"bili-dyn-{clean_bvid}",
+            dynamic_id=clean_bvid,
+            title=title,
+            content=content,
+            author=str(metadata.get("author") or "UP主").strip() or "UP主",
+            author_id=str(metadata.get("author_id") or "").strip(),
+            url=str(metadata.get("url") or referer).strip() or referer,
+            published_at=published_at,
+            dynamic_type="video",
+            pic=str(metadata.get("cover") or "").strip(),
+            bvid=clean_bvid,
+            tags=tags,
+        )
+
+    async def fetch_dynamic_by_url(self, url: str) -> BiliDynamic:
+        clean_url = self._normalize_input_url(url)
+        if not clean_url:
+            raise ValueError("链接为空")
+
+        bvid = extract_bvid(clean_url)
+        if bvid:
+            return await self._fetch_video_dynamic_by_bvid(bvid, source_url=clean_url)
+
+        dynamic_id = self._extract_dynamic_id_from_url(clean_url)
+        if dynamic_id:
+            return await self._fetch_dynamic_detail(dynamic_id, source_url=clean_url)
+
+        cvid = self._extract_cvid(clean_url)
+        if cvid:
+            return await self._fetch_article_detail(cvid, source_url=clean_url)
+
+        raise ValueError("暂不支持这个链接格式，请输入视频、动态、opus 或专栏链接")
+
+    async def fetch_dynamics_by_urls(
+        self,
+        urls: list[str],
+        *,
+        monitor_subfolder: str = MANUAL_LINK_IMPORT_SUBFOLDER,
+        crawl_source: str = "manual-link",
+        crawl_source_label: str = "指定链接",
+    ) -> tuple[list[BiliDynamic], list[str], int]:
+        normalized_urls: list[str] = []
+        seen_urls: set[str] = set()
+        skipped_count = 0
+
+        for raw_url in urls or []:
+            clean_url = self._normalize_input_url(raw_url)
+            if not clean_url:
+                skipped_count += 1
+                continue
+            key = clean_url.casefold()
+            if key in seen_urls:
+                skipped_count += 1
+                continue
+            seen_urls.add(key)
+            normalized_urls.append(clean_url)
+
+        results: list[BiliDynamic] = []
+        failures: list[str] = []
+        for clean_url in normalized_urls:
+            try:
+                dynamic = await self.fetch_dynamic_by_url(clean_url)
+                dynamic.id = dynamic.id or f"bili-dyn-{dynamic.dynamic_id or extract_bvid(dynamic.url) or hashlib.md5(clean_url.encode('utf-8')).hexdigest()[:12]}"
+                dynamic.title = str(dynamic.title or "").strip() or "B站动态"
+                dynamic.url = str(dynamic.url or clean_url).strip() or clean_url
+                dynamic.monitor_subfolder = str(monitor_subfolder or dynamic.monitor_subfolder or "").strip()
+                dynamic.crawl_source = str(crawl_source or dynamic.crawl_source or "").strip()
+                dynamic.crawl_source_label = str(crawl_source_label or dynamic.crawl_source_label or "").strip()
+                results.append(dynamic)
+            except Exception as exc:
+                failures.append(f"{clean_url}: {exc}")
+
+        return results, failures, skipped_count
 
     async def _fetch_space_dynamic_page(self, author_id: str, offset: str | None = None) -> dict:
         params = {
@@ -1801,6 +2073,33 @@ class BilibiliToolAPI:
         await self.client.aclose()
 
 
+def _serialize_dynamics(dynamics: list[BiliDynamic]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": d.id,
+            "dynamic_id": d.dynamic_id,
+            "title": d.title,
+            "content": d.content or "",
+            "author": d.author,
+            "author_id": d.author_id,
+            "url": d.url,
+            "published_at": d.published_at.isoformat() if d.published_at else None,
+            "dynamic_type": d.dynamic_type,
+            "pic": d.pic,
+            "images": d.images,
+            "bvid": d.bvid,
+            "tags": d.tags,
+            "matched_keywords": d.matched_keywords,
+            "matched_tags": d.matched_tags,
+            "monitor_label": d.monitor_label,
+            "monitor_subfolder": d.monitor_subfolder,
+            "crawl_source": d.crawl_source,
+            "crawl_source_label": d.crawl_source_label,
+        }
+        for d in dynamics
+    ]
+
+
 # === 公开工具函数 ===
 
 
@@ -1854,30 +2153,7 @@ async def bilibili_fetch_followed(
             return {
                 "total_found": total_found,
                 "fetch_stats": fetch_stats,
-                "dynamics": [
-                    {
-                        "id": d.id,
-                        "dynamic_id": d.dynamic_id,
-                        "title": d.title,
-                        "content": d.content or "",
-                        "author": d.author,
-                        "author_id": d.author_id,
-                        "url": d.url,
-                        "published_at": d.published_at.isoformat() if d.published_at else None,
-                        "dynamic_type": d.dynamic_type,
-                        "pic": d.pic,
-                        "images": d.images,
-                        "bvid": d.bvid,
-                        "tags": d.tags,
-                        "matched_keywords": d.matched_keywords,
-                        "matched_tags": d.matched_tags,
-                        "monitor_label": d.monitor_label,
-                        "monitor_subfolder": d.monitor_subfolder,
-                        "crawl_source": d.crawl_source,
-                        "crawl_source_label": d.crawl_source_label,
-                    }
-                    for d in dynamics
-                ],
+                "dynamics": _serialize_dynamics(dynamics),
             }
         finally:
             await api.close()
@@ -1885,6 +2161,47 @@ async def bilibili_fetch_followed(
     return await run_social_runtime_with_retry(
         "bilibili followed dynamics",
         _fetch_followed_once,
+    )
+
+
+async def bilibili_fetch_dynamics_by_urls(
+    sessdata: str,
+    urls: list[str],
+) -> dict:
+    clean_urls = [str(url or "").strip() for url in (urls or []) if str(url or "").strip()]
+    if not clean_urls:
+        raise ValueError("请至少提供一个 Bilibili 链接")
+
+    async def _fetch_links_once() -> dict:
+        api = BilibiliToolAPI(sessdata=sessdata)
+        try:
+            dynamics, failures, skipped_count = await api.fetch_dynamics_by_urls(clean_urls)
+            if not dynamics and failures:
+                raise ValueError(failures[0])
+
+            fetch_stats: dict[str, Any] = {
+                "source": "direct-links",
+                "matched_count_before_keep": len(dynamics),
+                "kept_count": len(dynamics),
+                "keep_limit": len(dynamics),
+                "input_count": len(clean_urls),
+                "failed_count": len(failures),
+                "skipped_count": skipped_count,
+            }
+            if failures:
+                fetch_stats["warnings"] = failures[:5]
+
+            return {
+                "total_found": len(dynamics),
+                "fetch_stats": fetch_stats,
+                "dynamics": _serialize_dynamics(dynamics),
+            }
+        finally:
+            await api.close()
+
+    return await run_social_runtime_with_retry(
+        "bilibili direct link fetch",
+        _fetch_links_once,
     )
 
 

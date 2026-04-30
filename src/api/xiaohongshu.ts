@@ -1,3 +1,5 @@
+import { API_BASE_URL } from "../core/api";
+
 export interface SearchRequest {
   keyword: string;
   max_results?: number;
@@ -387,7 +389,7 @@ export interface XHSTaskStatus<T = any> {
   updated_at?: string;
 }
 
-const API_BASE = 'http://127.0.0.1:8765/api/tools';
+const API_BASE = `${API_BASE_URL}/api/tools`;
 
 export async function xiaohongshuSearch(req: SearchRequest): Promise<SearchResponse> {
   const res = await fetch(`${API_BASE}/xiaohongshu/search`, {

@@ -10,8 +10,8 @@ import { GlobalSearch } from "./components/Search";
 import WindowDragHandle from "./components/WindowDragHandle";
 import HealthReminderDaemon from "./components/HealthReminderDaemon";
 import { useStore, FeedCard, FeedModule } from "./core/store";
-import { api } from "./core/api";
-import { bilibiliCancelAllKnownTasks, bilibiliCancelAllKnownTasksSilently } from "./api/bilibili";
+import { api, buildWsUrl } from "./core/api";
+import { bilibiliCancelAllKnownTasksSilently } from "./api/bilibili";
 import AppErrorBoundary from "./components/AppErrorBoundary";
 import { FEED_WS_MESSAGE_EVENT } from "./core/feedRealtime";
 
@@ -24,6 +24,8 @@ interface AppConfig {
   vault_path: string;
   literature_path?: string;
   version: string;
+  ai_provider?: "codex" | "claude";
+  claude_code_compat_enabled?: boolean;
   paper_ai_scoring_enabled?: boolean;
   intelligence_delivery_enabled?: boolean;
   intelligence_delivery_time?: string;
@@ -38,6 +40,8 @@ interface AppConfig {
 
 export default function App() {
   const setConfig = useStore((s) => s.setConfig);
+  const setAiProvider = useStore((s) => s.setAiProvider);
+  const addToast = useStore((s) => s.addToast);
   const setFeedModules = useStore((s) => s.setFeedModules);
   const setFeedCards = useStore((s) => s.setFeedCards);
   const prependCard = useStore((s) => s.prependCard);
@@ -47,6 +51,7 @@ export default function App() {
   const activeTab = useStore((s) => s.activeTab);
   const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [bootError, setBootError] = useState("");
 
   // Sync showcase class on mount and changes
   useEffect(() => {
@@ -56,17 +61,26 @@ export default function App() {
   // Check onboarding status on mount.
   // First-run users should see the wizard unless config explicitly marks it completed.
   useEffect(() => {
-    const loadAppConfig = () => api.get<AppConfig>("/api/config")
-      .then((config) => {
+    const loadAppConfig = async () => {
+      try {
+        setBootError("");
+        await api.waitForReady();
+        const config = await api.get<AppConfig>("/api/config");
         setConfig(config);
+        setAiProvider(
+          config.ai_provider === "claude" && config.claude_code_compat_enabled
+            ? "claude"
+            : "codex",
+        );
         setOnboardingCompleted(config.onboarding_completed ?? false);
-      })
-      .catch(() => {
-        setOnboardingCompleted(false);
-      })
-      .finally(() => {
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "后端启动失败";
+        setBootError(message);
+        setOnboardingCompleted(null);
+      } finally {
         setIsLoading(false);
-      });
+      }
+    };
 
     void loadAppConfig();
 
@@ -78,7 +92,7 @@ export default function App() {
     return () => {
       window.removeEventListener("abo:onboarding-status-updated", handleOnboardingConfigChange);
     };
-  }, [setConfig]);
+  }, [setAiProvider, setConfig]);
 
   // Load modules on app start so FeedSidebar shows all modules
   useEffect(() => {
@@ -177,7 +191,7 @@ export default function App() {
       if (disposed) return;
       clearHeartbeat();
       setFeedRealtimeStatus(reconnectTimer === null ? "connecting" : "reconnecting");
-      ws = new WebSocket("ws://127.0.0.1:8765/ws/feed");
+      ws = new WebSocket(buildWsUrl("/ws/feed"));
 
       ws.onopen = () => {
         setFeedRealtimeStatus("connected");
@@ -315,27 +329,13 @@ export default function App() {
 
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    let closing = false;
     const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
     if (isTauriRuntime) {
       void getCurrentWindow()
-        .onCloseRequested(async (event) => {
-          if (closing) {
-            return;
-          }
-          closing = true;
-          event.preventDefault();
-          try {
-            await Promise.race([
-              bilibiliCancelAllKnownTasks(),
-              new Promise((resolve) => window.setTimeout(resolve, 1200)),
-            ]);
-          } catch {
-            bilibiliCancelAllKnownTasksSilently();
-          } finally {
-            await getCurrentWindow().destroy().catch(() => {});
-          }
+        .onCloseRequested(() => {
+          // Do not block native close. Page-leave-safe cancellation already uses sendBeacon/keepalive.
+          bilibiliCancelAllKnownTasksSilently();
         })
         .then((cleanup) => {
           if (disposed) {
@@ -356,8 +356,19 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!bootError) {
+      return;
+    }
+    addToast({
+      kind: "error",
+      title: "ABO 后端未就绪",
+      message: bootError,
+    });
+  }, [addToast, bootError]);
+
   // Show loading state while checking onboarding status
-  if (isLoading || onboardingCompleted === null) {
+  if (isLoading) {
     return (
       <div
         style={{
@@ -369,6 +380,7 @@ export default function App() {
           background: "var(--bg-app)",
         }}
       >
+        <WindowDragHandle />
         <div
           style={{
             display: "flex",
@@ -395,6 +407,78 @@ export default function App() {
             to { transform: rotate(360deg); }
           }
         `}</style>
+      </div>
+    );
+  }
+
+  if (bootError) {
+    return (
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "var(--bg-app)",
+          padding: "24px",
+        }}
+      >
+        <WindowDragHandle />
+        <div
+          style={{
+            maxWidth: "520px",
+            width: "100%",
+            padding: "28px",
+            borderRadius: "24px",
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-light)",
+            boxShadow: "var(--shadow-soft)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "14px",
+          }}
+        >
+          <h1 style={{ margin: 0, fontSize: "1.3rem", color: "var(--text-main)" }}>ABO 启动失败</h1>
+          <p style={{ margin: 0, fontSize: "0.92rem", lineHeight: 1.7, color: "var(--text-secondary)" }}>
+            桌面壳已经打开，但本地后端服务还没准备好。打包版现在会自动拉起后端；如果这里仍然报错，通常是后端 sidecar 丢失或 macOS 拦截了执行。
+          </p>
+          <code
+            style={{
+              padding: "12px 14px",
+              borderRadius: "14px",
+              background: "var(--bg-hover)",
+              color: "var(--text-main)",
+              fontSize: "0.82rem",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+            }}
+          >
+            {bootError}
+          </code>
+          <button
+            type="button"
+            onClick={() => {
+              setIsLoading(true);
+              setBootError("");
+              setOnboardingCompleted(null);
+              window.dispatchEvent(new Event("abo:onboarding-status-updated"));
+            }}
+            style={{
+              alignSelf: "flex-start",
+              padding: "10px 16px",
+              borderRadius: "999px",
+              border: "none",
+              background: "linear-gradient(135deg, var(--color-primary), var(--color-primary-dark))",
+              color: "white",
+              fontSize: "0.875rem",
+              fontWeight: 800,
+              cursor: "pointer",
+            }}
+          >
+            重试启动
+          </button>
+        </div>
       </div>
     );
   }

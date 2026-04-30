@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ABO 论文篇 - 小红书宣发海报</title>
+  <title>ABO 成长篇 - 小红书宣发海报</title>
   
   <!-- 引入站酷快乐体，作为阿布IP的专属可爱字体 -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -27,9 +27,6 @@
       --rose-soft: #faedf0;
       --blue: #407296;
       --blue-soft: #eff5fa;
-      /* 为论文篇定制的紫色系 */
-      --violet: #6b528b;
-      --violet-soft: #f4f0fa;
       
       /* 小红书风格的柔和多层阴影 */
       --shadow: 0 20px 40px -10px rgba(85, 75, 65, 0.08), 0 0 1px rgba(85, 75, 65, 0.2);
@@ -59,7 +56,7 @@
     }
 
     .canvas {
-      width: min(720px, 100vw);
+      width: min(760px, 100vw); /* 稍微加宽一点，让三列排版更舒展 */
       padding: 24px 16px;
     }
 
@@ -145,7 +142,7 @@
       z-index: 1;
     }
 
-    /* 马克笔高亮 - 论文篇偏向沉稳的蓝色系搭配 */
+    /* 马克笔高亮 */
     .highlight::after {
       content: '';
       position: absolute;
@@ -153,7 +150,7 @@
       left: -2%;
       width: 104%;
       height: 10px;
-      background: var(--blue-soft);
+      background: var(--gold-soft);
       z-index: -1;
       border-radius: 4px;
       transform: rotate(-0.5deg);
@@ -163,7 +160,7 @@
       margin: 0 0 20px;
       color: var(--muted);
       font-size: 15px;
-      line-height: 1.7;
+      line-height: 1.6;
       position: relative;
       z-index: 2;
     }
@@ -185,22 +182,22 @@
       font-weight: normal;
     }
 
-    /* 呼叫框：左侧带强调线的渐变便签风 */
+    /* 呼叫框：左侧带金色强调线的渐变便签风 */
     .who {
       display: inline-flex;
       align-items: flex-start;
       border-radius: 0 12px 12px 0;
-      background: linear-gradient(to right, rgba(239, 245, 250, 0.8), rgba(255, 255, 255, 0.5));
-      border-left: 4px solid var(--blue);
+      background: linear-gradient(to right, rgba(252, 244, 230, 0.8), rgba(255, 255, 255, 0.5));
+      border-left: 4px solid var(--gold);
       padding: 12px 16px;
       color: var(--ink);
       font-size: 14px;
       font-weight: 600;
-      line-height: 1.6;
+      line-height: 1.5;
       position: relative;
       backdrop-filter: blur(4px);
       z-index: 2;
-      box-shadow: 2px 4px 12px rgba(64, 114, 150, 0.05);
+      box-shadow: 2px 4px 12px rgba(158, 113, 53, 0.05);
     }
 
     .section {
@@ -239,6 +236,7 @@
       color: var(--line);
     }
 
+    /* 这里是三个栏目的左右排版控制 */
     .grid {
       display: grid;
       gap: 14px;
@@ -318,7 +316,7 @@
       left: 16px;
       font-family: "Songti SC", serif;
       font-size: 80px;
-      color: var(--violet);
+      color: var(--green); /* 引言使用绿色装饰 */
       opacity: 0.15;
       line-height: 1;
     }
@@ -341,13 +339,15 @@
       line-height: 1.7;
       position: relative;
       z-index: 2;
+      text-align: justify;
+      text-align-last: center;
     }
 
+    /* 颜色类定义 */
     .accent-green { background: linear-gradient(180deg, var(--green-soft) 0%, rgba(234, 245, 240, 0.3) 100%); color: var(--green); }
     .accent-gold { background: linear-gradient(180deg, var(--gold-soft) 0%, rgba(252, 244, 230, 0.3) 100%); color: var(--gold); }
     .accent-rose { background: linear-gradient(180deg, var(--rose-soft) 0%, rgba(250, 237, 240, 0.3) 100%); color: var(--rose); }
     .accent-blue { background: linear-gradient(180deg, var(--blue-soft) 0%, rgba(239, 245, 250, 0.3) 100%); color: var(--blue); }
-    .accent-violet { background: linear-gradient(180deg, var(--violet-soft) 0%, rgba(244, 240, 250, 0.3) 100%); color: var(--violet); }
 
     .footer {
       margin-top: 32px;
@@ -379,18 +379,18 @@
     }
 
     .footer-flow .arrow {
-      color: var(--violet);
+      color: var(--gold);
       font-size: 14px;
       margin: 0 4px;
       opacity: 0.8;
     }
 
-    /* 移动端适配 */
+    /* 移动端适配：小于 650px 时依然尽量保持优雅布局，如果实在太挤则自动折叠为单列 */
     @media (max-width: 650px) {
       .canvas { padding: 12px; width: 100vw; }
       .poster { padding: 24px 20px; border-radius: 16px; }
       h1 { font-size: 28px; }
-      .grid.three { grid-template-columns: 1fr; }
+      .grid.three { grid-template-columns: 1fr; } /* 移动设备上自动改为上下排列，防止字看不清 */
       .quote { padding: 16px; }
       .quote strong { font-size: 18px; }
       .footer-flow { border-radius: 16px; padding: 12px; }
@@ -402,55 +402,54 @@
     <article class="poster">
       
       <div class="topbar">
-        <span class="pill">ABO 论文篇</span>
-        <span>拯救吃灰文献库计划 🚀</span>
+        <span class="pill">ABO 成长篇</span>
+        <span>一天里的状态复盘流 📈</span>
       </div>
       
-      <h1>拒绝无脑囤积！<br>把论文变成<span class="highlight">研究地图</span></h1>
+      <h1>每天不是盲目打卡！<br><span class="highlight">而是留下成长的依据</span></h1>
       
-      <p class="lead">真正消耗你的，从来不是读文献，而是无休止地寻找、筛选和遗忘。<br>
-        <span class="ip-name">阿布</span> 帮你打通「追踪-判断-沉淀」全链路。不为囤积，只为让每一篇你看过的论文，都能无缝衔接进下一步的综述与选题中。
-      </p>
+      <p class="lead"><span class="ip-name">阿布</span>的目的不是让你更用力打卡，而是把每天散落的任务、输入和状态记录下来；回看趋势、自动总结、找到原因、规划下一步。复盘时不再只靠感觉，而是看到真实的记录和趋势。</p>
       
       <div class="who">
-        💡 献给「下载从未停止，打开从未开始」的你：<br>
-        少做无意义的重复搜索，多攒点真正能复用的学术资产。
+        🌱 给长期学习的人：看清状态，比逼自己更有用。<br>
+       少一点自责，多一点看得见的依据；真正看清自己的当下状态。
       </div>
 
       <section class="section">
         <div class="section-title">
-          <h2>如何搭建专属学术流水线？</h2>
-          <small>三步告别信息过载</small>
+          <h2>一天可以这样用</h2>
+          <small>从记录到下一步</small>
         </div>
         
+        <!-- 这里控制三个栏目的排版 -->
         <div class="grid three">
-          <!-- 卡片 1 -->
+          <!-- 卡片 1 (蓝色) -->
           <div class="fit accent-blue">
-            <strong>📡 主动追踪 (Feed)</strong>
-            <p>告别每天狂刷网页。定制 arXiv 关键词，精准捕获同领域 Follow Up 新作，前沿动态自动端上桌。</p>
+            <strong>📝 行动留下记录</strong>
+            <p>任务、论文、情报和健康状态，写进角色主页，通过长期的磨合和记录，为你盘算好下一步。</p>
             <div class="chips">
-              <span class="chip">📌 前沿快讯</span>
-              <span class="chip">📺 自动捕获</span>
+              <span class="chip">🎯 任务追踪</span>
+              <span class="chip">💓 状态记录</span>
             </div>
           </div>
           
-          <!-- 卡片 2 -->
+          <!-- 卡片 2 (金色) -->
           <div class="fit accent-gold">
-            <strong>🧽 一分钟判断 (Filter)</strong>
-            <p>别一上来就啃全英文！借助精华卡片秒抓：摘要、问题、方法和贡献。1分钟决定是否精读，高效过滤学术噪音。</p>
+            <strong>📊 看懂自己的「能量条」</strong>
+            <p>精力、SAN值、近期状态放在一起，负荷与节奏一目了然，让你更懂得自己当下的状态。</p>
             <div class="chips">
-              <span class="chip">✨ 核心速览</span>
-              <span class="chip">🎯 极速筛选</span>
+              <span class="chip">🔋 能量波动</span>
+              <span class="chip">⏱️ 节奏洞察</span>
             </div>
           </div>
           
-          <!-- 卡片 3 -->
-          <div class="fit accent-violet">
-            <strong>🗂️ 入库与沉淀 (Archive)</strong>
-            <p>高价值文献一键送入专属文献库与 Wiki。联动阿布助手深度提炼 Insights，自动串联零散知识点。</p>
+          <!-- 卡片 3 (玫瑰色 - 替换了原本的绿色) -->
+          <div class="fit accent-rose">
+            <strong>🎯 主动做出调整</strong>
+            <p>哪些任务总拖延？哪些输入分散注意力？让阿布把过去整理成今天、下周以及下一阶段的安排。</p>
             <div class="chips">
-              <span class="chip">🧠 学术大脑</span>
-              <span class="chip">🤖 灵感提炼</span>
+              <span class="chip">☕️ 休息指南</span>
+              <span class="chip">🚀 策略调整</span>
             </div>
           </div>
         </div>
@@ -458,27 +457,27 @@
 
       <section class="section">
         <div class="section-title">
-          <h2>最终你能收获什么？</h2>
-          <small>从「我看过」到「我用上」</small>
+          <h2>它达成的目的</h2>
+          <small>重新找回掌控感</small>
         </div>
-        
-        <div class="quote accent-violet">
-          <strong>“你负责探索前沿，<span class="ip-name">阿布</span> 帮你沉淀灵感。<br>让看过的文献，都成为推进下一步的底气。”</strong>
-          <p>告别文献焦虑与数字囤积。让每一次点击和阅读，都在悄悄搭建你坚不可摧的学术地基。</p>
+        <!-- 底部引言搭配绿色背景也很舒适 -->
+        <div class="quote accent-green">
+          <strong>“<span class="ip-name">阿布</span>不是催你自律，而是帮你看清当下。<br>成长不再只靠感觉，而是有一份能长期回看的轨迹。”</strong>
+          <p>告别自我苛责。让每一次记录和磨合，都成为看见当下、规划下一步的真正依据。</p>
         </div>
       </section>
 
       <footer class="footer">
         <div class="footer-flow">
-          <span>前沿追踪</span>
+          <span>记录碎片</span>
           <span class="arrow">➔</span>
-          <span>价值判断</span>
+          <span>时间线追踪</span>
           <span class="arrow">➔</span>
-          <span>文献入库</span>
+          <span>数据洞察</span>
           <span class="arrow">➔</span>
-          <span>灵感提炼</span>
+          <span>下一步方向</span>
           <span class="arrow">➔</span>
-          <span>ABO Research</span>
+          <span>ABO Growth</span>
         </div>
       </footer>
 

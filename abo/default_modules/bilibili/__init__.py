@@ -4,7 +4,7 @@
 追踪关注UP主的动态和新视频发布，支持多种动态类型过滤。
 适合跟踪技术教程、学术报告、科研分享类视频和动态。
 
-配置选项 (在 ~/.abo/preferences.json 中):
+配置选项 (在应用数据目录的 preferences.json 中):
 {
     "modules": {
         "bilibili-tracker": {
@@ -66,6 +66,7 @@ from abo.bilibili_tracker_config import (
 from abo.creator_smart_groups import match_smart_groups_from_content_tags, unique_strings
 from abo.tools.bilibili_crawler import build_bilibili_dynamic_obsidian_path
 from abo.sdk import Module, Item, Card, agent_json
+from abo.storage_paths import get_preferences_path, resolve_app_data_file
 from abo.default_modules.bilibili.wbi import enc_wbi, get_wbi_keys
 from abo.store.cards import CardStore
 
@@ -198,7 +199,7 @@ class BilibiliTracker(Module):
     # Legacy cross-run seen-file dedupe is intentionally disabled.
     # Feed dedupe should only follow explicit handled history in cards.db,
     # while per-run duplicates are still removed in memory.
-    _STATE_PATH = Path.home() / ".abo" / "data" / "bilibili_seen.json"
+    _STATE_PATH = resolve_app_data_file("bilibili_seen.json")
 
     def _load_seen(self) -> set[str]:
         return set()
@@ -291,12 +292,12 @@ class BilibiliTracker(Module):
         return cookie_value
 
     def _load_config(self) -> dict:
-        prefs_path = Path.home() / ".abo" / "preferences.json"
+        prefs_path = get_preferences_path()
         config = DEFAULT_CONFIG.copy()
 
         if prefs_path.exists():
             try:
-                data = json.loads(prefs_path.read_text())
+                data = json.loads(prefs_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 data = {}
             bilibili_config = dict((data.get("modules", {}) or {}).get(self.id, {}) or {})
@@ -1342,11 +1343,11 @@ class BilibiliTracker(Module):
 
     async def process(self, items: list[Item], prefs: dict) -> list[Card]:
         """Process Bilibili dynamics into cards."""
-        prefs_path = Path.home() / ".abo" / "preferences.json"
+        prefs_path = get_preferences_path()
         config = DEFAULT_CONFIG.copy()
         if prefs_path.exists():
             try:
-                data = json.loads(prefs_path.read_text())
+                data = json.loads(prefs_path.read_text(encoding="utf-8"))
                 bilibili_config = data.get("modules", {}).get("bilibili-tracker", {})
                 config.update(bilibili_config)
             except Exception:

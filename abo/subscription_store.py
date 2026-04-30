@@ -7,11 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .storage_paths import get_subscription_store_path
+
 
 class SubscriptionStore:
     """Store and manage subscription details with timestamps."""
 
-    _PATH = Path.home() / ".abo" / "subscriptions.json"
+    _PATH = get_subscription_store_path()
 
     def __init__(self, path: Optional[Path] = None):
         self._path = path or self._PATH

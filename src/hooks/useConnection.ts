@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { ConnectionState, StreamEvent } from '../types/chat';
+import { buildWsUrl } from '../core/api';
 
 interface UseConnectionOptions {
   cliType: string;
@@ -48,9 +49,7 @@ export function useConnection({
 
     updateState('connecting');
 
-    const ws = new WebSocket(
-      `ws://127.0.0.1:8765/api/chat/ws/${cliType}/${sessionId}`
-    );
+    const ws = new WebSocket(buildWsUrl(`/api/chat/ws/${cliType}/${sessionId}`));
 
     ws.onopen = () => {
       updateState('connected');

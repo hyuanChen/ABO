@@ -61,7 +61,7 @@ export const sidebarSections: GuideSection[] = [
     title: "主动工具",
     subtitle: "手动搜索、预览、调试和配置监控的地方；定时任务必须复用这些链路。",
     items: [
-      { label: "小红书工具", summary: "包含收藏专辑抓取、主动爬取、关注监控；右上角一键配置 Cookie，内容保存到情报库 xhs/专辑。" },
+      { label: "小红书工具", summary: "包含收藏专辑抓取、主动爬取、关注监控；右上角一键配置 Cookie，主动保存进情报库 xhs/主动保存，专辑保存进 xhs/专辑。" },
       { label: "哔哩哔哩工具", summary: "包含动态追踪、收藏整理、关注监控；右上角一键配置 Cookie，再按全关注流、智能分组或指定 UP 入库。" },
       { label: "论文追踪", summary: "包含后续论文、AI 领域论文、关注监控；用于 Follow Up、关键词监控和保存到文献库。" },
       { label: "arXiv API", summary: "即时搜索和浏览 arXiv 论文，适合临时检索、批量预览和保存。" },
@@ -124,7 +124,7 @@ export const configurationFlow = [
   },
   {
     title: "3. 配置学术与 AI",
-    body: "arXiv 不需要 API Key；Semantic Scholar 可以留空使用内置回退，也可以填自己的 Key。后台 Agent 默认使用 Codex，Claude 暂不支持。",
+    body: "arXiv 不需要 API Key；Semantic Scholar 可以留空使用内置回退，也可以填自己的 Key。后台 Agent 默认使用 Codex；Claude Code 兼容默认关闭，可在设置里手动开启。",
   },
   {
     title: "4. 设置每日情报",
@@ -145,7 +145,7 @@ export const coreUsageWorkflows: WorkflowGuide[] = [
       "选择情报库路径：小红书、B 站、收藏、网页和手记会保存到这里。",
       "选择文献库路径：arXiv、Semantic Scholar、Follow Up 论文会保存到这里；第一次可以和情报库共用。",
       "连接小红书和 B 站 Cookie：点击一键配置，确认浏览器已登录对应平台。",
-      "设置默认后台 Agent：当前只支持 Codex；Claude 暂不支持，会保持灰色不可选。",
+      "设置默认后台 Agent：默认只启用 Codex；Claude Code 兼容默认关闭，需要时可到设置里手动开启。",
       "设置每日情报时间：默认 09:00，小红书和 B 站会提前 30 分钟预抓取。",
     ],
     result: "侧边栏底部显示库已连接；Cookie 状态显示已连接；今日情报调度可以执行。",

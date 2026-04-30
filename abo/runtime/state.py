@@ -3,8 +3,9 @@ import os
 from pathlib import Path
 
 from abo.runtime.discovery import ModuleRegistry
+from abo.storage_paths import get_module_runtime_path
 
-_STATE_PATH = Path.home() / ".abo" / "module-runtime.json"
+_STATE_PATH = get_module_runtime_path()
 
 
 class ModuleStateStore:

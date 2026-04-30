@@ -1382,12 +1382,44 @@ def _vault_xhs_dir(vault_path: str | Path | None) -> Path:
     return _vault_root_dir(vault_path) / "xhs"
 
 
+def _vault_active_save_dir(vault_path: str | Path | None) -> Path:
+    return _vault_xhs_dir(vault_path) / "主动保存"
+
+
 def _vault_album_dir(vault_path: str | Path | None) -> Path:
+    return _vault_xhs_dir(vault_path) / "专辑"
+
+
+def _legacy_vault_album_dir(vault_path: str | Path | None) -> Path:
     return _vault_root_dir(vault_path) / "专辑"
 
 
 def _saved_xhs_source_dirs(vault_path: str | Path | None) -> list[Path]:
-    return [_vault_xhs_dir(vault_path), _vault_album_dir(vault_path)]
+    xhs_root = _vault_xhs_dir(vault_path)
+    legacy_album_root = _legacy_vault_album_dir(vault_path)
+    paths = [xhs_root]
+    if legacy_album_root != xhs_root:
+        paths.append(legacy_album_root)
+    return paths
+
+
+def _vault_relative_obsidian_path(path: Path, vault_path: str | Path | None) -> str:
+    vault_root = _vault_root_dir(vault_path)
+    try:
+        return path.relative_to(vault_root).as_posix()
+    except Exception:
+        return path.as_posix()
+
+
+def _read_json_from_paths(paths: list[Path]) -> Any:
+    for path in paths:
+        if not path.exists():
+            continue
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+    return None
 
 
 def _build_xhs_unified_entry(
@@ -1625,11 +1657,14 @@ async def analyze_saved_xhs_authors(
                 relative_parts = path.relative_to(source_dir).parts
             except Exception:
                 relative_parts = path.parts
-            if len(relative_parts) >= 2:
+            folder_album = ""
+            if len(relative_parts) >= 3 and str(relative_parts[0] or "").strip() == "专辑":
+                folder_album = str(relative_parts[1] or "").strip()
+            elif len(relative_parts) >= 2:
                 folder_album = str(relative_parts[0] or "").strip()
-                if folder_album and folder_album not in {"", ".", "xhs", "专辑"}:
-                    if folder_album not in candidate.sample_albums and len(candidate.sample_albums) < 4:
-                        candidate.sample_albums.append(folder_album)
+            if folder_album and folder_album not in {"", ".", "xhs", "专辑"}:
+                if folder_album not in candidate.sample_albums and len(candidate.sample_albums) < 4:
+                    candidate.sample_albums.append(folder_album)
             for album_name in note_albums_by_id.get(note_id, []):
                 if album_name and album_name not in candidate.sample_albums and len(candidate.sample_albums) < 4:
                     candidate.sample_albums.append(album_name)
@@ -2124,7 +2159,7 @@ async def crawl_xhs_note_to_vault(
             if _should_stop_xhs_task(exc):
                 raise RuntimeError(str(exc)) from exc
 
-    root_xhs_dir = Path(target_root_dir).expanduser() if target_root_dir else _vault_xhs_dir(vault_path)
+    root_xhs_dir = Path(target_root_dir).expanduser() if target_root_dir else _vault_active_save_dir(vault_path)
     xhs_dir = _resolve_xhs_target_dir(root_xhs_dir, subfolder, fallback="未命名专辑")
     xhs_dir.mkdir(parents=True, exist_ok=True)
     (xhs_dir / "img").mkdir(exist_ok=True)
@@ -2141,7 +2176,7 @@ async def crawl_xhs_note_to_vault(
     date = note.published_at.strftime("%Y-%m-%d") if note.published_at else datetime.now().strftime("%Y-%m-%d")
     md_name = f"{date} {_slug(note.title, note.id[:8])}.md"
     md_path = xhs_dir / md_name
-    obsidian_path = md_path.relative_to(root_xhs_dir.parent).as_posix()
+    obsidian_path = _vault_relative_obsidian_path(md_path, vault_path)
     write_unified_note(
         md_path,
         _build_xhs_unified_entry(note, obsidian_path=obsidian_path),
@@ -2199,7 +2234,7 @@ async def save_xhs_seed_note_to_vault(
     """使用已有搜索/关注卡片数据，按统一 Markdown 格式直接落盘。"""
     note = _note_from_seed_data(seed_data)
 
-    root_xhs_dir = _vault_xhs_dir(vault_path)
+    root_xhs_dir = _vault_active_save_dir(vault_path)
     xhs_dir = _resolve_xhs_target_dir(root_xhs_dir, subfolder, fallback="未命名专题")
     xhs_dir.mkdir(parents=True, exist_ok=True)
     (xhs_dir / "img").mkdir(exist_ok=True)
@@ -2216,7 +2251,7 @@ async def save_xhs_seed_note_to_vault(
     date = note.published_at.strftime("%Y-%m-%d") if note.published_at else datetime.now().strftime("%Y-%m-%d")
     md_name = f"{date} {_slug(note.title, note.id[:8])}.md"
     md_path = xhs_dir / md_name
-    obsidian_path = md_path.relative_to(root_xhs_dir.parent).as_posix()
+    obsidian_path = _vault_relative_obsidian_path(md_path, vault_path)
     write_unified_note(
         md_path,
         _build_xhs_unified_entry(note, obsidian_path=obsidian_path),
@@ -2270,31 +2305,45 @@ def build_xhs_seed_obsidian_path(
 ) -> str:
     """Return the same relative markdown path used by preview/manual XHS saves."""
     note = _note_from_seed_data(seed_data)
-    root_xhs_dir = _vault_xhs_dir(vault_path)
+    root_xhs_dir = _vault_active_save_dir(vault_path)
     xhs_dir = _resolve_xhs_target_dir(root_xhs_dir, subfolder, fallback="未命名专题")
     date = note.published_at.strftime("%Y-%m-%d") if note.published_at else datetime.now().strftime("%Y-%m-%d")
     md_name = f"{date} {_slug(note.title, note.id[:8])}.md"
-    return (xhs_dir / md_name).relative_to(root_xhs_dir.parent).as_posix()
+    return _vault_relative_obsidian_path(xhs_dir / md_name, vault_path)
 
 
 def _albums_progress_path(vault_path: str | Path | None) -> Path:
-    return _vault_album_dir(vault_path) / ".xhs-albums-progress.json"
+    return _vault_xhs_dir(vault_path) / ".xhs-albums-progress.json"
 
 
 def _albums_cache_path(vault_path: str | Path | None) -> Path:
+    return _vault_xhs_dir(vault_path) / ".xhs-albums-cache.json"
+
+
+def _legacy_albums_progress_path(vault_path: str | Path | None) -> Path:
+    return _legacy_vault_album_dir(vault_path) / ".xhs-albums-progress.json"
+
+
+def _legacy_albums_cache_path(vault_path: str | Path | None) -> Path:
+    return _legacy_vault_album_dir(vault_path) / ".xhs-albums-cache.json"
+
+
+def _nested_album_progress_path(vault_path: str | Path | None) -> Path:
+    return _vault_album_dir(vault_path) / ".xhs-albums-progress.json"
+
+
+def _nested_album_cache_path(vault_path: str | Path | None) -> Path:
     return _vault_album_dir(vault_path) / ".xhs-albums-cache.json"
 
 
 def _load_album_cache(vault_path: str | Path | None) -> list[dict[str, Any]]:
-    path = _albums_cache_path(vault_path)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        albums = data.get("albums") if isinstance(data, dict) else data
-        return albums if isinstance(albums, list) else []
-    except Exception:
-        return []
+    data = _read_json_from_paths([
+        _albums_cache_path(vault_path),
+        _nested_album_cache_path(vault_path),
+        _legacy_albums_cache_path(vault_path),
+    ])
+    albums = data.get("albums") if isinstance(data, dict) else data
+    return albums if isinstance(albums, list) else []
 
 
 def _save_album_cache(vault_path: str | Path | None, albums: list[dict[str, Any]]) -> None:
@@ -2311,17 +2360,15 @@ def _save_album_cache(vault_path: str | Path | None, albums: list[dict[str, Any]
 
 
 def _load_album_progress(vault_path: str | Path | None) -> dict[str, Any]:
-    path = _albums_progress_path(vault_path)
-    if not path.exists():
-        return {"last_run_at": "", "albums": {}, "notes": {}}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            data.setdefault("albums", {})
-            data.setdefault("notes", {})
-            return data
-    except Exception:
-        pass
+    data = _read_json_from_paths([
+        _albums_progress_path(vault_path),
+        _nested_album_progress_path(vault_path),
+        _legacy_albums_progress_path(vault_path),
+    ])
+    if isinstance(data, dict):
+        data.setdefault("albums", {})
+        data.setdefault("notes", {})
+        return data
     return {"last_run_at": "", "albums": {}, "notes": {}}
 
 
@@ -2359,6 +2406,61 @@ def _resolve_album_seen_ids(progress: dict[str, Any], album_state: dict[str, Any
 
 ALBUM_EXTRACT_JS = r"""
 () => {
+  const normalizePreviewImage = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw || raw === '?' || raw === '#' || raw === 'about:blank') return '';
+    if (raw.startsWith('data:image/')) return raw;
+    if (raw.startsWith('//')) return `https:${raw}`;
+    try {
+      const url = new URL(raw, location.href);
+      const href = url.toString();
+      const sameDocument = href === location.href || href === `${location.origin}${location.pathname}` || href === `${location.origin}${location.pathname}?`;
+      if (sameDocument) return '';
+      if (/xiaohongshu\.com$/.test(url.hostname) && /\/(?:explore|board|user\/profile)(?:\/|$)/.test(url.pathname)) return '';
+      if (!/^https?:$/.test(url.protocol)) return '';
+      return href;
+    } catch {
+      return '';
+    }
+  };
+
+  const firstSrcsetUrl = (value) => {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    const candidate = text.split(',').map((item) => item.trim().split(/\s+/)[0]).find(Boolean);
+    return candidate || '';
+  };
+
+  const backgroundImageUrl = (node) => {
+    if (!node) return '';
+    const style = window.getComputedStyle(node);
+    const value = style?.backgroundImage || '';
+    const match = value.match(/url\((['"]?)(.*?)\1\)/);
+    return match?.[2] || '';
+  };
+
+  const pickPreviewImage = (root) => {
+    const img = root.querySelector('img');
+    const candidates = [
+      img?.currentSrc,
+      img?.getAttribute('src'),
+      img?.src,
+      img?.getAttribute('data-src'),
+      img?.getAttribute('data-lazy-src'),
+      img?.getAttribute('data-original'),
+      img?.getAttribute('data-xhs-img'),
+      firstSrcsetUrl(img?.getAttribute('srcset')),
+      firstSrcsetUrl(img?.getAttribute('data-srcset')),
+      backgroundImageUrl(root),
+      backgroundImageUrl(img?.parentElement),
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizePreviewImage(candidate);
+      if (normalized) return normalized;
+    }
+    return '';
+  };
+
   const out = [];
   const seen = new Set();
   for (const a of document.querySelectorAll('a[href*="/board/"]')) {
@@ -2368,13 +2470,12 @@ ALBUM_EXTRACT_JS = r"""
     const lines = (a.innerText || '').trim().split(/\n+/).map(s => s.trim()).filter(Boolean);
     const countLine = lines.find(x => x.includes('笔记・') || x.includes('笔记·')) || '';
     const cm = countLine.match(/笔记[・·](\d+)/);
-    const img = a.querySelector('img');
     out.push({
       board_id: m[1],
       name: lines[0] || '未命名专辑',
       count: cm ? Number(cm[1]) : null,
       url: a.href,
-      preview_image: img?.src || '',
+      preview_image: pickPreviewImage(a),
       latest_title: lines.find(x => x && x !== lines[0] && !x.includes('笔记')) || ''
     });
   }
@@ -2584,30 +2685,7 @@ async def list_xhs_album_previews(
     dedicated_window_mode: bool = False,
 ) -> dict[str, Any]:
     """从已打开的小红书收藏/专辑页面提取专辑预览。"""
-    expression = r"""
-    (() => {
-      const out = [];
-      const seen = new Set();
-      for (const a of document.querySelectorAll('a[href*="/board/"]')) {
-        const m = a.href.match(/\/board\/([0-9a-f]{24})/);
-        if (!m || seen.has(m[1])) continue;
-        seen.add(m[1]);
-        const lines = (a.innerText || '').trim().split(/\n+/).map(s => s.trim()).filter(Boolean);
-        const countLine = lines.find(x => x.includes('笔记・') || x.includes('笔记·')) || '';
-        const cm = countLine.match(/笔记[・·](\d+)/);
-        const img = a.querySelector('img');
-        out.push({
-          board_id: m[1],
-          name: lines[0] || '未命名专辑',
-          count: cm ? Number(cm[1]) : null,
-          url: a.href,
-          preview_image: img?.src || '',
-          latest_title: lines.find(x => x && x !== lines[0] && !x.includes('笔记')) || ''
-        });
-      }
-      return JSON.stringify(out);
-    })()
-    """
+    expression = f"({ALBUM_EXTRACT_JS})()"
 
     def collect_albums(page_results: list[Any]) -> list[dict[str, Any]]:
         collected: list[dict[str, Any]] = []
@@ -2686,6 +2764,57 @@ async def list_xhs_album_previews(
         (async () => {
           const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
           const extract = () => {
+            const normalizePreviewImage = (value) => {
+              const raw = String(value || '').trim();
+              if (!raw || raw === '?' || raw === '#' || raw === 'about:blank') return '';
+              if (raw.startsWith('data:image/')) return raw;
+              if (raw.startsWith('//')) return `https:${raw}`;
+              try {
+                const url = new URL(raw, location.href);
+                const href = url.toString();
+                const sameDocument = href === location.href || href === `${location.origin}${location.pathname}` || href === `${location.origin}${location.pathname}?`;
+                if (sameDocument) return '';
+                if (/xiaohongshu\.com$/.test(url.hostname) && /\/(?:explore|board|user\/profile)(?:\/|$)/.test(url.pathname)) return '';
+                if (!/^https?:$/.test(url.protocol)) return '';
+                return href;
+              } catch {
+                return '';
+              }
+            };
+            const firstSrcsetUrl = (value) => {
+              const text = String(value || '').trim();
+              if (!text) return '';
+              const candidate = text.split(',').map((item) => item.trim().split(/\s+/)[0]).find(Boolean);
+              return candidate || '';
+            };
+            const backgroundImageUrl = (node) => {
+              if (!node) return '';
+              const style = window.getComputedStyle(node);
+              const value = style?.backgroundImage || '';
+              const match = value.match(/url\((['"]?)(.*?)\1\)/);
+              return match?.[2] || '';
+            };
+            const pickPreviewImage = (root) => {
+              const img = root.querySelector('img');
+              const candidates = [
+                img?.currentSrc,
+                img?.getAttribute('src'),
+                img?.src,
+                img?.getAttribute('data-src'),
+                img?.getAttribute('data-lazy-src'),
+                img?.getAttribute('data-original'),
+                img?.getAttribute('data-xhs-img'),
+                firstSrcsetUrl(img?.getAttribute('srcset')),
+                firstSrcsetUrl(img?.getAttribute('data-srcset')),
+                backgroundImageUrl(root),
+                backgroundImageUrl(img?.parentElement),
+              ];
+              for (const candidate of candidates) {
+                const normalized = normalizePreviewImage(candidate);
+                if (normalized) return normalized;
+              }
+              return '';
+            };
             const out = [];
             const seen = new Set();
             for (const a of document.querySelectorAll('a[href*="/board/"]')) {
@@ -2695,13 +2824,12 @@ async def list_xhs_album_previews(
               const lines = (a.innerText || '').trim().split(/\n+/).map(s => s.trim()).filter(Boolean);
               const countLine = lines.find(x => x.includes('笔记・') || x.includes('笔记·')) || '';
               const cm = countLine.match(/笔记[・·](\d+)/);
-              const img = a.querySelector('img');
               out.push({
                 board_id: m[1],
                 name: lines[0] || '未命名专辑',
                 count: cm ? Number(cm[1]) : null,
                 url: a.href,
-                preview_image: img?.src || '',
+                preview_image: pickPreviewImage(a),
                 latest_title: lines.find(x => x && x !== lines[0] && !x.includes('笔记')) || ''
               });
             }

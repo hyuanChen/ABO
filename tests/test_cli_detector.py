@@ -1,12 +1,11 @@
 """Tests for CLI detector module"""
 import pytest
 import json
-import os
 from datetime import datetime
 from unittest.mock import patch, MagicMock, mock_open
-from dataclasses import asdict
 
 from abo.cli.detector import CliInfo, CliDetector
+from abo.cli.env import reset_enhanced_cli_env_cache
 
 
 class TestCliInfo:
@@ -126,16 +125,13 @@ class TestCliDetector:
 class TestCliDetectorDetection:
     """Tests for CLI detection functionality"""
 
-    @patch('abo.cli.detector.shutil.which')
+    @patch.object(CliDetector, "_get_enhanced_env", return_value={"PATH": "/usr/bin"})
+    @patch('abo.cli.detector.resolve_cli_command')
     @patch('abo.cli.detector.subprocess.run')
-    def test_detect_single_mocked_available(self, mock_run, mock_which, tmp_path):
+    def test_detect_single_mocked_available(self, mock_run, mock_resolve, _mock_env, tmp_path):
         """Test detection with mocked subprocess - CLI available"""
-        mock_which.return_value = "/usr/bin/claude"
-        # First call is for _get_enhanced_env, second is for version check
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="PATH=/usr/bin\n", stderr=""),  # env call
-            MagicMock(returncode=0, stdout="claude version 1.2.3\n", stderr=""),  # version call
-        ]
+        mock_resolve.return_value = "/usr/bin/claude"
+        mock_run.return_value = MagicMock(returncode=0, stdout="claude version 1.2.3\n", stderr="")
 
         db_path = tmp_path / "cli_configs.json"
         detector = CliDetector(db_path=str(db_path))
@@ -146,13 +142,14 @@ class TestCliDetectorDetection:
         assert result.is_available is True
         assert result.version == "claude version 1.2.3"
         assert result.last_check > 0
-        mock_which.assert_called_once_with("claude")
-        assert mock_run.call_count == 2  # env call + version call
+        mock_resolve.assert_called_once()
+        assert mock_run.call_count == 1
 
-    @patch('abo.cli.detector.shutil.which')
-    def test_detect_single_not_in_path(self, mock_which, tmp_path):
-        """Test detection when CLI is not in PATH"""
-        mock_which.return_value = None
+    @patch.object(CliDetector, "_get_enhanced_env", return_value={"PATH": "/usr/bin"})
+    @patch('abo.cli.detector.resolve_cli_command')
+    def test_detect_single_not_in_path(self, mock_resolve, _mock_env, tmp_path):
+        """Test detection when CLI cannot be resolved"""
+        mock_resolve.return_value = None
 
         db_path = tmp_path / "cli_configs.json"
         detector = CliDetector(db_path=str(db_path))
@@ -162,13 +159,14 @@ class TestCliDetectorDetection:
 
         assert result.is_available is False
         assert result.version == ""
-        mock_which.assert_called_once_with("claude")
+        mock_resolve.assert_called_once()
 
-    @patch('abo.cli.detector.shutil.which')
+    @patch.object(CliDetector, "_get_enhanced_env", return_value={"PATH": "/usr/bin"})
+    @patch('abo.cli.detector.resolve_cli_command')
     @patch('abo.cli.detector.subprocess.run')
-    def test_detect_single_nonzero_exit(self, mock_run, mock_which, tmp_path):
+    def test_detect_single_nonzero_exit(self, mock_run, mock_resolve, _mock_env, tmp_path):
         """Test detection when CLI returns non-zero exit (still available)"""
-        mock_which.return_value = "/usr/bin/claude"
+        mock_resolve.return_value = "/usr/bin/claude"
         mock_run.return_value = MagicMock(
             returncode=1,
             stdout="",
@@ -185,12 +183,13 @@ class TestCliDetectorDetection:
         assert result.is_available is True
         assert result.version == "unknown"
 
-    @patch('abo.cli.detector.shutil.which')
+    @patch.object(CliDetector, "_get_enhanced_env", return_value={"PATH": "/usr/bin"})
+    @patch('abo.cli.detector.resolve_cli_command')
     @patch('abo.cli.detector.subprocess.run')
-    def test_detect_single_timeout(self, mock_run, mock_which, tmp_path):
+    def test_detect_single_timeout(self, mock_run, mock_resolve, _mock_env, tmp_path):
         """Test detection when CLI times out"""
         import subprocess
-        mock_which.return_value = "/usr/bin/claude"
+        mock_resolve.return_value = "/usr/bin/claude"
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude --version", timeout=10)
 
         db_path = tmp_path / "cli_configs.json"
@@ -202,11 +201,12 @@ class TestCliDetectorDetection:
         assert result.is_available is False
         assert result.version == "timeout"
 
-    @patch('abo.cli.detector.shutil.which')
+    @patch.object(CliDetector, "_get_enhanced_env", return_value={"PATH": "/usr/bin"})
+    @patch('abo.cli.detector.resolve_cli_command')
     @patch('abo.cli.detector.subprocess.run')
-    def test_detect_single_exception(self, mock_run, mock_which, tmp_path):
+    def test_detect_single_exception(self, mock_run, mock_resolve, _mock_env, tmp_path):
         """Test detection when subprocess raises exception"""
-        mock_which.return_value = "/usr/bin/claude"
+        mock_resolve.return_value = "/usr/bin/claude"
         mock_run.side_effect = Exception("Permission denied")
 
         db_path = tmp_path / "cli_configs.json"
@@ -317,11 +317,12 @@ class TestCliDetectorGetInfo:
 class TestCliDetectorAddCustom:
     """Tests for add_custom_cli method"""
 
-    @patch('abo.cli.detector.shutil.which')
+    @patch.object(CliDetector, "_get_enhanced_env", return_value={"PATH": "/usr/bin"})
+    @patch('abo.cli.detector.resolve_cli_command')
     @patch('abo.cli.detector.subprocess.run')
-    def test_add_custom_cli(self, mock_run, mock_which, tmp_path):
+    def test_add_custom_cli(self, mock_run, mock_resolve, _mock_env, tmp_path):
         """Test adding a custom CLI"""
-        mock_which.return_value = "/usr/bin/custom"
+        mock_resolve.return_value = "/usr/bin/custom"
         mock_run.return_value = MagicMock(returncode=0, stdout="1.0.0", stderr="")
 
         db_path = tmp_path / "cli_configs.json"
@@ -339,3 +340,37 @@ class TestCliDetectorAddCustom:
 
         assert "custom" in detector.REGISTRY
         assert "custom" in detector._cache
+
+
+class TestCliEnvHelpers:
+    """Tests for bundled-app CLI environment helpers."""
+
+    def teardown_method(self):
+        reset_enhanced_cli_env_cache()
+
+    @patch("abo.cli.env.subprocess.run")
+    def test_get_enhanced_cli_env_merges_shell_path(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="PATH=/opt/homebrew/bin:/usr/bin\nOPENAI_API_KEY=test-key\n",
+            stderr="",
+        )
+
+        with patch.dict("abo.cli.env.os.environ", {"HOME": "/Users/test", "SHELL": "/bin/zsh", "PATH": "/usr/bin:/bin"}, clear=True):
+            from abo.cli.env import get_enhanced_cli_env
+
+            env = get_enhanced_cli_env(force_refresh=True)
+
+        assert env["PATH"].startswith("/opt/homebrew/bin")
+        assert env["OPENAI_API_KEY"] == "test-key"
+        assert env["HOME"] == "/Users/test"
+
+    @patch("abo.cli.env.shutil.which")
+    def test_resolve_cli_command_uses_enhanced_path(self, mock_which):
+        from abo.cli.env import resolve_cli_command
+
+        mock_which.return_value = "/opt/homebrew/bin/codex"
+        env = {"PATH": "/opt/homebrew/bin:/usr/bin"}
+
+        assert resolve_cli_command("codex", env=env) == "/opt/homebrew/bin/codex"
+        mock_which.assert_called_once_with("codex", path="/opt/homebrew/bin:/usr/bin")

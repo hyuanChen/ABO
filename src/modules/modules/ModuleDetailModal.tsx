@@ -1,4 +1,5 @@
 import { useEffect, useState, type CSSProperties, type FC } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   AlertCircle,
   BookOpen,
@@ -664,6 +665,45 @@ function filterHistoryCards(cards: FeedCard[], query: string): FeedCard[] {
   );
 }
 
+function metadataString(metadata: Record<string, unknown>, key: string): string {
+  const value = metadata[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function resolveHistoryCardUrl(card: FeedCard): string {
+  const candidates = [
+    card.source_url,
+    metadataString(card.metadata, "source_url"),
+    metadataString(card.metadata, "url"),
+    metadataString(card.metadata, "arxiv_url"),
+    metadataString(card.metadata, "arxiv-url"),
+    metadataString(card.metadata, "s2_url"),
+    metadataString(card.metadata, "pdf_url"),
+    metadataString(card.metadata, "pdf-url"),
+    metadataString(card.metadata, "html_url"),
+    metadataString(card.metadata, "html-url"),
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (candidate.startsWith("//")) return `https:${candidate}`;
+    return candidate;
+  }
+
+  return "";
+}
+
+async function openHistoryCardUrl(card: FeedCard) {
+  const targetUrl = resolveHistoryCardUrl(card);
+  if (!targetUrl) return;
+
+  try {
+    await openUrl(targetUrl);
+  } catch {
+    window.open(targetUrl, "_blank", "noopener,noreferrer");
+  }
+}
+
 function SectionTitle({ title, helper }: { title: string; helper: string }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
@@ -707,19 +747,24 @@ function HistoryCard({
 }) {
   const [hovered, setHovered] = useState(false);
   const emoji = SOURCE_ICONS[moduleId] || "📋";
+  const targetUrl = resolveHistoryCardUrl(card);
+  const canOpen = Boolean(targetUrl);
 
   return (
     <div
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      onClick={() => card.source_url && window.open(card.source_url, "_blank")}
+      onClick={() => {
+        if (!canOpen) return;
+        void openHistoryCardUrl(card);
+      }}
       style={{
         padding: compact ? "12px 14px" : "14px 16px",
         borderRadius: "14px",
         background: hovered ? "var(--bg-hover)" : "transparent",
         border: "1px solid var(--border-light)",
         transition: "background 0.15s ease, border-color 0.15s ease",
-        cursor: card.source_url ? "pointer" : "default",
+        cursor: canOpen ? "pointer" : "default",
       }}
     >
       <div style={{ display: "flex", alignItems: "flex-start", gap: "12px" }}>
@@ -739,7 +784,7 @@ function HistoryCard({
             >
               {card.title}
             </h4>
-            {card.source_url && hovered && (
+            {canOpen && hovered && (
               <ExternalLink style={{ width: "14px", height: "14px", color: "var(--text-muted)", flexShrink: 0 }} />
             )}
           </div>

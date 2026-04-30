@@ -15,7 +15,7 @@ import {
   User,
 } from "lucide-react";
 import { Card } from "../../components/Layout";
-import { api } from "../../core/api";
+import { api, API_BASE_URL } from "../../core/api";
 import { fetchArxivPaperIntroduction } from "./arxivPaperApi";
 
 export type PaperFigureAsset = {
@@ -38,7 +38,7 @@ export interface PaperTrackingCardPaper {
   metadata: Record<string, unknown>;
 }
 
-const API_BASE = "http://127.0.0.1:8765";
+const API_BASE = API_BASE_URL;
 
 async function openExternalUrl(url: string) {
   const cleanUrl = String(url || "").trim();

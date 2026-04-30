@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 
 from abo.sdk import Module, Item, Card, agent_json
+from abo.storage_paths import get_preferences_path
 
 
 class XiaoyuzhouTracker(Module):
@@ -46,12 +47,12 @@ class XiaoyuzhouTracker(Module):
         """
         items = []
 
-        prefs_path = Path.home() / ".abo" / "preferences.json"
+        prefs_path = get_preferences_path()
         config_keywords = []
         config_podcasts = []
 
         if prefs_path.exists():
-            data = json.loads(prefs_path.read_text())
+            data = json.loads(prefs_path.read_text(encoding="utf-8"))
             xyz_config = data.get("modules", {}).get("xiaoyuzhou-tracker", {})
             config_keywords = xyz_config.get("keywords", [])
             config_podcasts = xyz_config.get("podcast_ids", [])

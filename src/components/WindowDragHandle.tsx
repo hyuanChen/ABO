@@ -21,6 +21,7 @@ export default function WindowDragHandle() {
 
   return (
     <div
+      data-tauri-drag-region
       onPointerDown={handlePointerDown}
       title="拖动窗口"
       aria-label="拖动窗口"
@@ -39,6 +40,7 @@ export default function WindowDragHandle() {
         cursor: "grab",
         userSelect: "none",
         WebkitUserSelect: "none",
+        touchAction: "none",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",

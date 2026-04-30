@@ -33,11 +33,11 @@ class Module(ABC):
 
     def _module_cookie(self) -> str:
         import json
-        from pathlib import Path
-        prefs_path = Path.home() / ".abo" / "preferences.json"
+        from ..storage_paths import get_preferences_path
+        prefs_path = get_preferences_path()
         try:
             if prefs_path.exists():
-                data = json.loads(prefs_path.read_text())
+                data = json.loads(prefs_path.read_text(encoding="utf-8"))
                 return data.get("modules", {}).get(self.id, {}).get("cookie", "")
         except (json.JSONDecodeError, OSError):
             pass

@@ -56,6 +56,12 @@ from .store.papers import PaperStore
 from .subscription_store import get_subscription_store
 from .summary import DailySummaryGenerator, SummaryScheduler
 from .vault.writer import ensure_vault_structure
+from .storage_paths import (
+    get_keyword_preferences_path,
+    get_preferences_path,
+    get_sdk_dir,
+    resolve_app_db_path,
+)
 from .bilibili_tracker_config import (
     BILIBILI_TRACKER_DEFAULT_DAYS_BACK,
     BILIBILI_TRACKER_DEFAULT_LIMIT,
@@ -788,13 +794,13 @@ init_profile_routes(_card_store)
 
 
 def _write_sdk_readme():
-    path = Path.home() / ".abo" / "sdk" / "README.md"
+    path = get_sdk_dir() / "README.md"
     if path.exists():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "# ABO Module SDK\n\n"
-        "ABO 自动发现 `~/.abo/modules/<name>/__init__.py` 中的模块。\n"
+        "ABO 自动发现 `~/Library/Application Support/ABO/modules/<name>/__init__.py` 中的模块。\n"
         "保存后立即热加载，无需重启。\n\n"
         "## 最小可用模块\n\n"
         "```python\n"
@@ -1374,7 +1380,7 @@ async def _temporary_debug_feed_flow_module_overrides(module_overrides: dict[str
         yield
         return
 
-    prefs_path = Path.home() / ".abo" / "preferences.json"
+    prefs_path = get_preferences_path()
     async with _DEBUG_FEED_FLOW_OVERRIDE_LOCK:
         original_file_text = prefs_path.read_text(encoding="utf-8") if prefs_path.exists() else None
         original_prefs_data = _copy_jsonable_data(_prefs.all_data())
@@ -1585,7 +1591,7 @@ async def debug_run_feed_flow(body: dict | None = None):
 async def clear_all_cards():
     """Delete all cards from the database."""
     import sqlite3
-    db_path = Path.home() / ".abo" / "data" / "cards.db"
+    db_path = Path(resolve_app_db_path("cards.db"))
     with sqlite3.connect(db_path) as conn:
         count = conn.execute("SELECT COUNT(*) FROM cards").fetchone()[0]
         conn.execute("DELETE FROM cards")
@@ -1922,11 +1928,21 @@ async def cancel_arxiv_crawl(data: dict):
 async def proxy_image(url: str):
     """Proxy image requests to avoid CORS issues."""
     import httpx
+    from urllib.parse import urlparse
     try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
         referer = "https://arxiv.org/"
-        if "hdslb.com" in url or "bilibili.com" in url:
+        if (
+            hostname == "xiaohongshu.com"
+            or hostname.endswith(".xiaohongshu.com")
+            or hostname == "xhscdn.com"
+            or hostname.endswith(".xhscdn.com")
+        ):
+            referer = "https://www.xiaohongshu.com/"
+        elif "hdslb.com" in hostname or "bilibili.com" in hostname:
             referer = "https://www.bilibili.com/"
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             resp = await client.get(url, headers={
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
                 "Referer": referer,
@@ -3488,8 +3504,8 @@ async def reset_preferences():
 
     # Remove preference files
     files_to_remove = [
-        Path.home() / ".abo" / "preferences.json",
-        Path.home() / ".abo" / "keyword_preferences.json",
+        get_preferences_path(),
+        get_keyword_preferences_path(),
     ]
 
     removed = []

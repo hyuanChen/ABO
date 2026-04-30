@@ -1,5 +1,5 @@
 """
-Profile data persistence — all reads/writes to ~/.abo/*.json
+Profile data persistence in the app data directory.
 """
 import json
 import os
@@ -7,12 +7,13 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-_ABO_DIR = Path.home() / ".abo"
+from ..config import get_abo_dir
 
 
 def _path(filename: str) -> Path:
-    _ABO_DIR.mkdir(parents=True, exist_ok=True)
-    return _ABO_DIR / filename
+    abo_dir = get_abo_dir()
+    abo_dir.mkdir(parents=True, exist_ok=True)
+    return abo_dir / filename
 
 
 def _read(filename: str, default: Any) -> Any:

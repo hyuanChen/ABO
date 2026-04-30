@@ -20,6 +20,7 @@ from ..store.cards import CardStore
 from ..preferences.engine import PreferenceEngine
 from ..activity import ActivityTracker
 from ..profile import store as profile_store
+from ..storage_paths import get_keyword_preferences_path, resolve_app_root_file
 
 router = APIRouter(prefix="/api/insights")
 
@@ -305,9 +306,8 @@ def get_week_count(card_store: CardStore, weeks_ago: int = 0) -> int:
 
 
 def _read_json_log(filename: str) -> list:
-    """Read a JSON log file from ~/.abo/."""
-    from pathlib import Path
-    p = Path.home() / ".abo" / filename
+    """Read a JSON log file from the app data directory."""
+    p = resolve_app_root_file(filename)
     if not p.exists():
         return []
     try:
@@ -320,9 +320,8 @@ def _read_json_log(filename: str) -> list:
 
 
 def _read_energy_history() -> list:
-    """Read energy history from ~/.abo/energy_memory.json."""
-    from pathlib import Path
-    p = Path.home() / ".abo" / "energy_memory.json"
+    """Read energy history from the app data directory."""
+    p = resolve_app_root_file("energy_memory.json")
     if not p.exists():
         return []
     try:
@@ -564,7 +563,7 @@ def _build_bucket_pairs(
 
 
 def _load_keyword_preferences(limit: int = 6) -> list[PreferenceSignal]:
-    kw_path = Path.home() / ".abo" / "keyword_preferences.json"
+    kw_path = get_keyword_preferences_path()
     if not kw_path.exists():
         return []
 
@@ -1183,8 +1182,7 @@ async def get_preferences_evolution():
     if is_demo_mode():
         return get_demo_preferences_evolution()
     # Read raw JSON to handle format mismatch in keyword_preferences.json
-    from pathlib import Path
-    kw_path = Path.home() / ".abo" / "keyword_preferences.json"
+    kw_path = get_keyword_preferences_path()
     keywords: list[PreferenceEvolutionItem] = []
 
     if kw_path.exists():

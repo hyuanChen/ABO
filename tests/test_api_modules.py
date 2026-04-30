@@ -507,6 +507,63 @@ def test_bilibili_followed_crawl_task_can_be_cancelled(client, monkeypatch):
     assert "前端已离开页面" in str(task_payload.get("error") or "")
 
 
+def test_bilibili_links_route_returns_preview_payload(client, monkeypatch):
+    import abo.routes.tools as tools_module
+
+    async def fake_fetch_links(*, sessdata, urls):
+        assert sessdata == "sess-demo"
+        assert urls == ["https://www.bilibili.com/video/BV1xx411c7mD"]
+        return {
+            "total_found": 1,
+            "fetch_stats": {
+                "source": "direct-links",
+                "input_count": 1,
+                "failed_count": 0,
+                "skipped_count": 0,
+            },
+            "dynamics": [
+                {
+                    "id": "bili-dyn-link-1",
+                    "dynamic_id": "9001",
+                    "title": "链接抓取结果",
+                    "content": "完整内容",
+                    "author": "测试UP",
+                    "author_id": "1001",
+                    "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+                    "published_at": "2026-04-28T10:00:00",
+                    "dynamic_type": "video",
+                    "pic": "",
+                    "images": [],
+                    "bvid": "BV1xx411c7mD",
+                    "tags": ["测试"],
+                    "matched_keywords": [],
+                    "matched_tags": [],
+                    "monitor_label": "",
+                    "monitor_subfolder": "主动链接导入",
+                    "crawl_source": "manual-link",
+                    "crawl_source_label": "指定链接",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(tools_module, "bilibili_fetch_dynamics_by_urls", fake_fetch_links)
+
+    response = client.post(
+        "/api/tools/bilibili/links",
+        json={
+            "sessdata": "sess-demo",
+            "urls": ["https://www.bilibili.com/video/BV1xx411c7mD"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_found"] == 1
+    assert payload["fetch_stats"]["source"] == "direct-links"
+    assert payload["dynamics"][0]["monitor_subfolder"] == "主动链接导入"
+    assert payload["dynamics"][0]["crawl_source"] == "manual-link"
+
+
 @pytest.mark.anyio
 async def test_bilibili_async_task_auto_cancels_without_heartbeat(monkeypatch):
     import abo.routes.tools as tools_module

@@ -1,12 +1,12 @@
 import hashlib
 import json
 import re
-from pathlib import Path
 from typing import Any
 
 from abo.default_modules.arxiv.category import ALL_SUBCATEGORIES
+from abo.storage_paths import get_preferences_path
 
-_PREFS_PATH = Path.home() / ".abo" / "preferences.json"
+_PREFS_PATH = get_preferences_path()
 _DEFAULT_ARXIV_MONITOR_CATEGORIES = ["cs.*"]
 
 

@@ -1,6 +1,8 @@
 import type { ChatRuntimeState, CliConfig, Conversation, Message, StreamEvent } from '../types/chat';
+import { API_BASE_URL, buildWsUrl } from '../core/api';
 
-const API_BASE = 'http://127.0.0.1:8765/api/chat';
+const API_BASE = `${API_BASE_URL}/api/chat`;
+const FRONTEND_VISIBLE_CLI_IDS = new Set(['codex', 'claude']);
 
 // Helper function to convert snake_case to camelCase
 function toCamelCase<T>(obj: unknown): T {
@@ -25,7 +27,8 @@ function toCamelCase<T>(obj: unknown): T {
 export async function detectClis(force = false): Promise<CliConfig[]> {
   const res = await fetch(`${API_BASE}/cli/detect?force=${force}`);
   if (!res.ok) throw new Error('Failed to detect CLIs');
-  return toCamelCase<CliConfig[]>(await res.json());
+  const clis = toCamelCase<CliConfig[]>(await res.json());
+  return clis.filter((cli) => FRONTEND_VISIBLE_CLI_IDS.has(cli.id));
 }
 
 export async function getCliInfo(cliId: string): Promise<CliConfig> {
@@ -137,7 +140,7 @@ export function createChatWebSocket({
   onDisconnect,
   onError,
 }: ChatWebSocketOptions): WebSocket {
-  const ws = new WebSocket(`ws://127.0.0.1:8765/api/chat/ws/${cliType}/${sessionId}`);
+  const ws = new WebSocket(buildWsUrl(`/api/chat/ws/${cliType}/${sessionId}`));
 
   ws.onopen = () => onConnect?.();
 

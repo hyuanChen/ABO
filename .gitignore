@@ -26,3 +26,7 @@ dist-ssr
 __pycache__/
 *.pyc
 .worktrees/
+.venv-packaging/
+build-sidecar/
+src-tauri/binaries/
+release/

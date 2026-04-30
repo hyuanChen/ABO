@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ABO 成长篇 - 治愈系成长记录</title>
+  
+  <!-- 站酷快乐体，阿布专属字体 -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&display=swap" rel="stylesheet">
+
+  <style>
+    :root {
+      /* 莫兰迪治愈色系，更适合小红书审美 */
+      --bg: #f5f2eb; 
+      --paper: #fffdfa;
+      --ink: #3d352e;
+      --muted: #8a8277;
+      --line: #e8ded1;
+      
+      --green: #377d66;
+      --green-soft: #edf5f2;
+      --gold: #ad8346;
+      --gold-soft: #fdf6eb;
+      --rose: #b8626e;
+      --rose-soft: #faeff1;
+      --blue: #4b80a6;
+      --blue-soft: #f2f7fb;
+      
+      --shadow: 0 24px 48px -12px rgba(90, 80, 70, 0.08), 0 0 2px rgba(90, 80, 70, 0.15);
+      --shadow-sm: 0 4px 12px -4px rgba(90, 80, 70, 0.05);
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    html {
+      background: var(--bg);
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      background-image: radial-gradient(var(--line) 1px, transparent 1px);
+      background-size: 20px 20px;
+    }
+
+    /* 锁定宽度，确保三列不乱，适合截图分享 */
+    .canvas {
+      width: min(780px, 100vw); 
+      min-width: 680px; 
+      padding: 32px 16px;
+      margin: 0 auto;
+    }
+
+    .poster {
+      display: flex;
+      flex-direction: column;
+      border: 1px solid rgba(232, 222, 209, 0.6);
+      border-radius: 24px;
+      background: 
+        radial-gradient(circle at top right, rgba(255, 255, 255, 0.8), transparent 50%),
+        var(--paper);
+      box-shadow: var(--shadow);
+      padding: 48px 40px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* 细腻的纸张噪点 */
+    .poster::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: url('data:image/svg+xml;utf8,%3Csvg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"%3E%3Cfilter id="noiseFilter"%3E%3CfeTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="3" stitchTiles="stitch"/%3E%3C/filter%3E%3Crect width="100%25" height="100%25" filter="url(%23noiseFilter)" opacity="0.025"/%3E%3C/svg%3E');
+      pointer-events: none;
+      mix-blend-mode: multiply;
+      border-radius: 24px;
+      z-index: 10;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      position: relative;
+      z-index: 2;
+    }
+    .topbar span:last-child {
+      margin-left: auto;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      background: var(--ink);
+      color: var(--paper);
+      border-radius: 8px;
+      padding: 6px 14px;
+      font-weight: bold;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    h1 {
+      margin: 24px 0 16px;
+      font-family: "Songti SC", "STSong", "Noto Serif SC", serif;
+      font-size: clamp(38px, 8vw, 48px);
+      font-weight: 900;
+      line-height: 1.2;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+      position: relative;
+      z-index: 2;
+    }
+
+    .highlight {
+      position: relative;
+      display: inline-block;
+      z-index: 1;
+    }
+
+    .highlight::after {
+      content: '';
+      position: absolute;
+      bottom: 6px;
+      left: -2%;
+      width: 104%;
+      height: 12px;
+      background: var(--gold-soft);
+      z-index: -1;
+      border-radius: 6px;
+      transform: rotate(-1deg);
+    }
+
+    .lead {
+      margin: 0 0 24px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.7;
+      position: relative;
+      z-index: 2;
+    }
+
+    .ip-name {
+      font-family: "ZCOOL KuaiLe", "YouYuan", cursive, sans-serif;
+      font-size: 26px;
+      color: var(--blue);
+      text-shadow: 
+        1px 1px 0px rgba(255, 255, 255, 1), 
+        2px 2px 0px rgba(173, 131, 70, 0.3);
+      letter-spacing: 2px;
+      margin-right: 4px;
+      display: inline-block;
+      transform: translateY(2px);
+      position: relative;
+      z-index: 1;
+    }
+
+    /* 痛点呼叫框：更柔和的提示 */
+    .who {
+      display: inline-flex;
+      flex-direction: column;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--gold-soft), rgba(255, 255, 255, 0.7));
+      border: 1px solid rgba(173, 131, 70, 0.15);
+      padding: 16px 20px;
+      color: var(--ink);
+      font-size: 15px;
+      line-height: 1.6;
+      position: relative;
+      backdrop-filter: blur(8px);
+      z-index: 2;
+      box-shadow: 0 8px 16px rgba(173, 131, 70, 0.04);
+      margin-bottom: 8px;
+    }
+    
+    .who-title {
+      font-weight: 800;
+      color: var(--gold);
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .section {
+      margin-top: 36px;
+      position: relative;
+      z-index: 2;
+    }
+
+    .section-title {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--ink);
+    }
+
+    .section-title small {
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 500;
+      position: relative;
+      padding-left: 14px;
+      margin-left: auto;
+    }
+
+    .section-title small::before {
+      content: '•';
+      position: absolute;
+      left: 0;
+      color: var(--line);
+    }
+
+    /* 强制三列的网格 */
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+    
+    .grid.three {
+      grid-template-columns: repeat(3, minmax(0, 1fr)); 
+    }
+
+    .fit {
+      border: 1px solid rgba(0,0,0,0.04);
+      border-radius: 16px;
+      padding: 20px 18px;
+      transition: all 0.3s ease;
+      box-shadow: 
+        inset 0 0 0 1px rgba(255, 255, 255, 0.9),
+        var(--shadow-sm);
+      display: flex;
+      flex-direction: column;
+      background-color: rgba(255, 255, 255, 0.4);
+    }
+
+    .fit:hover {
+      transform: translateY(-4px);
+      box-shadow: 
+        inset 0 0 0 1px rgba(255, 255, 255, 1),
+        0 8px 24px rgba(0,0,0,0.06);
+    }
+
+    .fit strong {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.3;
+    }
+
+    .fit p {
+      margin: 0;
+      color: rgba(61, 53, 46, 0.85);
+      font-size: 13px;
+      line-height: 1.65;
+      flex-grow: 1;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .chip {
+      border: 1px solid rgba(255, 255, 255, 0.5);
+      border-radius: 100px;
+      background: rgba(255, 255, 255, 0.95);
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      color: inherit;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.03);
+      white-space: nowrap;
+    }
+
+    .quote {
+      margin-top: 28px;
+      padding: 28px;
+      border-radius: 20px;
+      position: relative;
+      text-align: center;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.7);
+    }
+
+    .quote::before {
+      content: '“';
+      position: absolute;
+      top: -12px;
+      left: 20px;
+      font-family: "Songti SC", serif;
+      font-size: 80px;
+      color: var(--green);
+      opacity: 0.12;
+      line-height: 1;
+    }
+
+    .quote strong {
+      font-family: "Songti SC", "STSong", "Noto Serif SC", serif;
+      font-size: 22px;
+      line-height: 1.6;
+      color: var(--ink); 
+      display: block;
+      margin-bottom: 14px;
+      position: relative;
+      z-index: 2;
+    }
+
+    .quote p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.8;
+      position: relative;
+      z-index: 2;
+      text-align: justify;
+      text-align-last: center;
+    }
+
+    .accent-green { background: linear-gradient(180deg, var(--green-soft) 0%, rgba(237, 245, 242, 0.2) 100%); color: var(--green); }
+    .accent-gold { background: linear-gradient(180deg, var(--gold-soft) 0%, rgba(253, 246, 235, 0.2) 100%); color: var(--gold); }
+    .accent-rose { background: linear-gradient(180deg, var(--rose-soft) 0%, rgba(250, 239, 241, 0.2) 100%); color: var(--rose); }
+
+    .footer {
+      margin-top: 36px;
+      border-top: 1px dashed var(--line);
+      padding-top: 20px;
+      display: flex;
+      justify-content: center;
+      position: relative;
+      z-index: 2;
+    }
+
+    .footer-flow {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      background: rgba(255,255,255,0.7);
+      padding: 10px 20px;
+      border-radius: 100px;
+      border: 1px solid rgba(255,255,255,0.9);
+      box-shadow: 0 6px 16px rgba(90, 80, 70, 0.05);
+      backdrop-filter: blur(4px);
+    }
+
+    .footer-flow span {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .footer-flow .arrow {
+      color: var(--gold);
+      font-size: 15px;
+      margin: 0 4px;
+      opacity: 0.7;
+    }
+
+    /* 优化缩放效果，保持三列 */
+    @media (max-width: 700px) {
+      .canvas { padding: 16px; overflow-x: auto; }
+      .poster { padding: 32px 24px; }
+      h1 { font-size: 32px; }
+      .grid { gap: 12px; }
+      .fit { padding: 16px 12px; }
+      .fit strong { font-size: 14px; }
+      .fit p { font-size: 12px; }
+      .quote strong { font-size: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="canvas">
+    <article class="poster">
+      
+      <div class="topbar">
+        <span class="pill">ABO 成长篇</span>
+        <span>告别假性努力的复盘流 ☕️</span>
+      </div>
+      
+      <!-- 痛点文案更戳人 -->
+      <h1>别再只是为了打卡，<br><span class="highlight">把成长的依据留下来</span></h1>
+      
+      <!-- 增加陪伴感 -->
+      <p class="lead">嗨，我是<span class="ip-name">阿布</span>。我不是来监督你更拼命的，而是帮你把散落的任务、手记和健康状态，妥帖地收进一条时间线里。当复盘不再靠感觉，你就能看清真实的自己。</p>
+      
+      <!-- 痛点呼叫框，更吸睛 -->
+      <div class="who">
+        <div class="who-title">💡 献给常常感到「内耗」的长期学习者：</div>
+        <span>看清现在的状态，比盲目逼自己更有用。少一点“我今天够不够努力”的自责，多一点看得见的数据依据。</span>
+      </div>
+
+      <section class="section">
+        <div class="section-title">
+          <h2>一天可以这样记录</h2>
+          <small>从碎片到清晰的脉络</small>
+        </div>
+        
+        <div class="grid three">
+          <!-- 卡片 1 (蓝色) -> 强调行动与记录 -->
+          <div class="fit accent-blue">
+            <strong>🗂️ 所有的行动都有迹可循</strong>
+            <p>任务、论文、每日灵感，甚至今天的身体状态，统统收进同一条时间线。告别四处翻找记录的焦虑。</p>
+            <div class="chips">
+              <span class="chip">📌 任务追踪</span>
+              <span class="chip">🌡️ 状态记录</span>
+            </div>
+          </div>
+          
+          <!-- 卡片 2 (金色) -> 强调数据与看懂自己 -->
+          <div class="fit accent-gold">
+            <strong>🔋 看懂自己的「能量条」</strong>
+            <p>能量高低、专注度、近期节奏并排展示。最近这 7 天到底发生了什么？你的疲惫和高效，都有迹可循。</p>
+            <div class="chips">
+              <span class="chip">📈 能量趋势</span>
+              <span class="chip">⏱️ 节奏洞察</span>
+            </div>
+          </div>
+          
+          <!-- 卡片 3 (玫瑰色) -> 强调下一步的行动 -->
+          <div class="fit accent-rose">
+            <strong>🧭 知道下一步该往哪走</strong>
+            <p>哪些任务总是在拖延？让我帮你整理过去，自动生成明天和下周的合理安排，告别盲目推进。</p>
+            <div class="chips">
+              <span class="chip">☕️ 休息指南</span>
+              <span class="chip">🚀 策略调整</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-title">
+          <h2>为什么你需要它？</h2>
+          <small>重新找回掌控感</small>
+        </div>
+        <!-- 引言部分更像闺蜜/助手的谈心 -->
+        <div class="quote accent-green">
+          <strong>“我懂你的隐性压力：很忙，却说不清自己到底怎么了。”</strong>
+          <p><span class="ip-name">阿布</span>的作用，是让你的成长不再只靠当天的感觉。一周后，你不只知道自己完成了什么，更懂得了**为什么会这样**。你会更早发现自己需要推进、整理，还是停下来休息一下。</p>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <div class="footer-flow">
+          <span>收集日常碎片</span>
+          <span class="arrow">➔</span>
+          <span>时间线追踪</span>
+          <span class="arrow">➔</span>
+          <span>看见真实状态</span>
+          <span class="arrow">➔</span>
+          <span>调整下一步</span>
+        </div>
+      </footer>
+
+    </article>
+  </main>
+</body>
+</html>

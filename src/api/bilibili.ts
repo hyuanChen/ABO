@@ -1,3 +1,5 @@
+import { API_BASE_URL } from "../core/api";
+
 export interface BiliDynamic {
   id: string;
   dynamic_id: string;
@@ -34,6 +36,11 @@ export interface FetchFollowedRequest {
   monitor_subfolder?: string;
 }
 
+export interface FetchLinksRequest {
+  sessdata: string;
+  urls: string[];
+}
+
 export interface BilibiliDailyDynamicMonitor {
   id: string;
   label: string;
@@ -56,7 +63,7 @@ export interface BilibiliFollowedGroupMonitor {
 }
 
 export interface BiliDynamicFetchStats {
-  source?: "global-followed" | "author-space";
+  source?: "global-followed" | "author-space" | "direct-links";
   pages_scanned?: number;
   pages_with_recent_candidates?: number;
   matched_count_before_keep?: number;
@@ -65,6 +72,10 @@ export interface BiliDynamicFetchStats {
   scan_result_limit?: number;
   scanned_author_count?: number;
   authors_with_hits?: number;
+  input_count?: number;
+  failed_count?: number;
+  skipped_count?: number;
+  warnings?: string[];
 }
 
 export interface FetchFollowedResponse {
@@ -380,7 +391,7 @@ export interface BilibiliTaskCancelResponse {
   status: BilibiliTaskStatus;
 }
 
-const API_BASE = "http://127.0.0.1:8765/api/tools";
+const API_BASE = `${API_BASE_URL}/api/tools`;
 export const BILIBILI_TASK_STORAGE_KEYS = [
   "bilibili_followed_dynamics_task_id",
   "bilibili_followed_ups_task_id",
@@ -426,6 +437,23 @@ export async function bilibiliFetchFollowed(
     throw new Error(await readError(res, "Fetch failed"));
   }
   return readJsonResponse<FetchFollowedResponse>(res, "Fetch succeeded but response body was invalid");
+}
+
+export async function bilibiliFetchByLinks(
+  req: FetchLinksRequest
+): Promise<FetchFollowedResponse> {
+  const res = await fetch(`${API_BASE}/bilibili/links`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    throw new Error(await readError(res, "Fetch bilibili links failed"));
+  }
+  return readJsonResponse<FetchFollowedResponse>(
+    res,
+    "Bilibili link fetch succeeded but response body was invalid",
+  );
 }
 
 export async function bilibiliStartFollowedCrawl(

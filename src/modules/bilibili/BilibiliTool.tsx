@@ -50,6 +50,7 @@ import {
   BilibiliSmartGroupProfile,
   BilibiliSmartGroupTask,
   bilibiliCancelTaskSilently,
+  bilibiliFetchByLinks,
   bilibiliFetchFollowed,
   bilibiliFetchFollowedUps,
   bilibiliGetConfig,
@@ -92,11 +93,12 @@ const TIME_RANGE_OPTIONS = [
 ];
 
 const LIMIT_OPTIONS = [10, 20, 50];
+const FREQUENT_UP_PAGE_SIZE = 12;
 
 type BilibiliPanelTab = "dynamics" | "favorites" | "following";
 type TrackerFilterMode = "and" | "smart_only";
 type ManualGroupingScope = "all" | "filtered" | "managed";
-type DynamicFetchScope = "global" | "group" | "ups";
+type DynamicFetchScope = "global" | "group" | "ups" | "links";
 type PaginatedPageSize = 20 | 50;
 
 interface DynamicFetchMeta {
@@ -267,6 +269,23 @@ function matchesUpQuery(up: BiliFollowedUp, query: string): boolean {
 
 function parseStringListInput(value: string): string[] {
   const rawItems = String(value || "").split(/[,\n，]+/);
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  rawItems.forEach((item) => {
+    const text = String(item || "").trim();
+    if (!text) return;
+    const key = text.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    normalized.push(text);
+  });
+  return normalized;
+}
+
+function parseLinkListInput(value: string): string[] {
+  const rawItems = String(value || "")
+    .replace(/[，,]+/g, "\n")
+    .split(/\s*\n+\s*/);
   const normalized: string[] = [];
   const seen = new Set<string>();
   rawItems.forEach((item) => {
@@ -499,6 +518,19 @@ interface BilibiliTrackerConfig {
   };
 }
 
+interface FrequentUpCandidate {
+  upId: string;
+  up?: BiliFollowedUp;
+  profile: BilibiliSmartGroupProfile;
+  displayName: string;
+  description: string;
+  noteCount: number;
+  latestTitle: string;
+  smartGroups: string[];
+  originalGroupNames: string[];
+  tracked: boolean;
+}
+
 interface ExpandableSectionProps {
   title: string;
   summary: string;
@@ -680,6 +712,8 @@ export function BilibiliTool() {
   const [targetedGroupDaysBackInput, setTargetedGroupDaysBackInput] = useState("7");
   const [targetedGroupLimit, setTargetedGroupLimit] = useState(50);
   const [targetedGroupLimitInput, setTargetedGroupLimitInput] = useState("50");
+  const [directLinkInput, setDirectLinkInput] = useState("");
+  const [directLinkRunning, setDirectLinkRunning] = useState<"preview" | "save" | null>(null);
 
   // Results state
   const [dynamics, setDynamics] = useState<BiliDynamic[]>(() => readJsonCache(BILIBILI_DYNAMICS_CACHE_KEY, []));
@@ -718,6 +752,8 @@ export function BilibiliTool() {
   const [showSmartGroupManagementDetail, setShowSmartGroupManagementDetail] = useState(false);
   const [expandedFixedUpImportGroup, setExpandedFixedUpImportGroup] = useState("");
   const [fixedUpImportSearch, setFixedUpImportSearch] = useState("");
+  const [frequentUpGroupFilter, setFrequentUpGroupFilter] = useState<string>("all");
+  const [frequentUpPage, setFrequentUpPage] = useState(1);
   const [fixedUpImportGroupPage, setFixedUpImportGroupPage] = useState(1);
   const [showManualGroupingUpList, setShowManualGroupingUpList] = useState(true);
   const [targetedDynamicGroup, setTargetedDynamicGroup] = useState("all");
@@ -1007,6 +1043,7 @@ export function BilibiliTool() {
   }
 
   const dynamicSearchTerms = parseStringListInput([...keywords, ...tagFilters].join(", "));
+  const directLinkUrls = parseLinkListInput(directLinkInput);
 
   const handleAddKeyword = () => {
     const nextTerms = parseStringListInput(keywordInput);
@@ -1265,7 +1302,7 @@ export function BilibiliTool() {
     scope: DynamicFetchScope;
     label: string;
     authorCount?: number;
-    daysBackValue: number;
+    daysBackValue?: number;
     keepLimit: number;
     switchToResult?: boolean;
   }) => {
@@ -1289,9 +1326,21 @@ export function BilibiliTool() {
     }
 
     if ((res.dynamics || []).length === 0) {
-      toast.info(scope === "global" ? "未找到符合条件的动态" : `${label} 最近没有匹配动态`);
+      if (scope === "links") {
+        const inputCount = res.fetch_stats?.input_count ?? 0;
+        toast.info("没有解析出可预览的链接", inputCount > 0 ? `本次共尝试 ${inputCount} 条链接` : undefined);
+      } else {
+        toast.info(scope === "global" ? "未找到符合条件的动态" : `${label} 最近没有匹配动态`);
+      }
     } else if (scope === "global") {
       toast.success(`命中 ${res.total_found} 条动态，当前保留前 ${res.dynamics.length} 条`);
+    } else if (scope === "links") {
+      const inputCount = res.fetch_stats?.input_count ?? res.dynamics.length;
+      const failedCount = res.fetch_stats?.failed_count ?? 0;
+      toast.success(
+        `指定链接已解析 ${res.dynamics.length}/${inputCount} 条`,
+        failedCount > 0 ? `另有 ${failedCount} 条失败` : label,
+      );
     } else {
       toast.success(`定向动态已就绪 · 命中 ${res.total_found} 条`, label);
     }
@@ -1542,6 +1591,46 @@ export function BilibiliTool() {
       scope: "global",
       monitorSubfolder: buildGlobalSearchSubfolder(dynamicSearchTerms, dynamicSearchTerms),
     });
+  };
+
+  const handleFetchDirectLinks = async (saveImmediately = false) => {
+    if (directLinkUrls.length === 0) {
+      toast.error("请输入至少一个 Bilibili 链接");
+      return;
+    }
+
+    const resultLabel = `指定链接 ${directLinkUrls.length} 条`;
+    setLoading(true);
+    setFollowedDynamicsTask(null);
+    setDirectLinkRunning(saveImmediately ? "save" : "preview");
+    try {
+      const activeSessdata = await ensureSessdataFromEdge();
+      const res = await bilibiliFetchByLinks({
+        sessdata: activeSessdata,
+        urls: directLinkUrls,
+      });
+      applyDynamicsPreviewResult({
+        res,
+        scope: "links",
+        label: resultLabel,
+        keepLimit: Math.max(res.dynamics.length, directLinkUrls.length, 1),
+        switchToResult: true,
+      });
+      setLoading(false);
+
+      if (saveImmediately && (res.dynamics || []).length > 0) {
+        await saveDynamicsToVault(res.dynamics, `指定链接已自动入库 ${res.dynamics.length} 条`);
+      }
+    } catch (err) {
+      resetDynamicsPreviewResult({
+        scope: "links",
+        label: resultLabel,
+      });
+      toast.error("链接抓取失败", getErrorMessage(err));
+    } finally {
+      setDirectLinkRunning(null);
+      setLoading(false);
+    }
   };
 
   const handlePreviewDailyMonitor = async (monitor: BilibiliDailyDynamicMonitor) => {
@@ -1823,6 +1912,24 @@ export function BilibiliTool() {
       : [...current, upId];
     try {
       await saveManualMonitoredUps(next);
+    } catch (err) {
+      toast.error("保存失败", err instanceof Error ? err.message : "未知错误");
+    }
+  };
+
+  const handleAddFrequentUpToManualMonitor = async (upId: string, displayName?: string) => {
+    const normalizedUpId = String(upId || "").trim();
+    if (!normalizedUpId) {
+      toast.error("这个 UP 还没有解析出 mid");
+      return;
+    }
+    const current = Array.from(new Set((trackerConfig.up_uids || []).map((item) => String(item || "").trim()).filter(Boolean)));
+    if (current.includes(normalizedUpId)) {
+      toast.info(`${displayName || "这个 UP"} 已在固定监督里`);
+      return;
+    }
+    try {
+      await saveManualMonitoredUps([...current, normalizedUpId], "已加入固定监督 UP");
     } catch (err) {
       toast.error("保存失败", err instanceof Error ? err.message : "未知错误");
     }
@@ -2297,6 +2404,56 @@ export function BilibiliTool() {
     .filter((group) => group.tags.length > 0);
   const manualPoolIds = Array.from(new Set(trackerConfig.up_uids || []));
   const manualPoolIdSet = new Set(manualPoolIds);
+  const frequentUpCandidates = Object.entries(trackerConfig.creator_profiles || {})
+    .reduce<FrequentUpCandidate[]>((acc, [profileId, profile]) => {
+      const upId = String(profile.author_id || profileId || "").trim();
+      if (!upId) {
+        return acc;
+      }
+      const up = followedUpByAuthorId[upId];
+      const smartGroups = (profile.smart_groups?.length ? profile.smart_groups : (up ? getUpSmartGroups(up) : []))
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      const latestTitle = String(profile.latest_title || profile.sample_titles?.[0] || "").trim();
+      const description = String(up?.sign || up?.official_desc || profile.source_summary || "").trim();
+      acc.push({
+        upId,
+        up,
+        profile,
+        displayName: String(up?.uname || profile.author || upId).trim() || upId,
+        description,
+        noteCount: Number(profile.favorite_note_count || 0),
+        latestTitle,
+        smartGroups,
+        originalGroupNames: up ? getUpOriginalGroupNames(up) : [],
+        tracked: manualPoolIdSet.has(upId),
+      });
+      return acc;
+    }, [])
+    .filter((candidate) => (
+      candidate.noteCount > 0
+      || candidate.smartGroups.length > 0
+      || Boolean(candidate.latestTitle)
+    ))
+    .sort((left, right) =>
+      right.noteCount - left.noteCount
+      || Number(right.tracked) - Number(left.tracked)
+      || left.displayName.localeCompare(right.displayName, "zh-CN")
+    );
+  const frequentUpGroupCounts = smartGroupOptions.reduce<Record<string, number>>((acc, option) => {
+    acc[option.value] = frequentUpCandidates.filter((candidate) => candidate.smartGroups.includes(option.value)).length;
+    return acc;
+  }, {});
+  const frequentUpGroupOptions = smartGroupOptions.filter((option) => (frequentUpGroupCounts[option.value] || 0) > 0);
+  const filteredFrequentUpCandidates = frequentUpCandidates.filter((candidate) => (
+    frequentUpGroupFilter === "all" ? true : candidate.smartGroups.includes(frequentUpGroupFilter)
+  ));
+  const frequentUpTotalPages = Math.max(1, Math.ceil(filteredFrequentUpCandidates.length / FREQUENT_UP_PAGE_SIZE));
+  const safeFrequentUpPage = Math.min(frequentUpPage, frequentUpTotalPages);
+  const pagedFrequentUpCandidates = filteredFrequentUpCandidates.slice(
+    (safeFrequentUpPage - 1) * FREQUENT_UP_PAGE_SIZE,
+    safeFrequentUpPage * FREQUENT_UP_PAGE_SIZE,
+  );
   const manualPoolMembers = manualPoolIds.map((upId) => ({
     id: upId,
     up: followedUpByAuthorId[upId],
@@ -2376,6 +2533,16 @@ export function BilibiliTool() {
   const editingGroupedUpEffectiveOriginalIds = editingGroupedUp
     ? Array.from(new Set([...(editingGroupedUp.tag_ids || []), ...editingManualOriginalGroupIds]))
     : [];
+
+  useEffect(() => {
+    setFrequentUpPage(1);
+  }, [frequentUpGroupFilter]);
+
+  useEffect(() => {
+    if (frequentUpPage > frequentUpTotalPages) {
+      setFrequentUpPage(frequentUpTotalPages);
+    }
+  }, [frequentUpPage, frequentUpTotalPages]);
 
   useEffect(() => {
     if (!editingGroupedUpId) {
@@ -3510,7 +3677,7 @@ export function BilibiliTool() {
           <div>
             <div style={{ fontSize: "0.9375rem", fontWeight: 800, color: "var(--text-main)" }}>主动爬取 / 分组搜索</div>
             <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginTop: "4px", lineHeight: 1.7, maxWidth: "760px" }}>
-              这块单独处理临时动态抓取。上半部分直接抓当前监督范围，下半部分支持跨智能组勾选具体 UP 再抓。
+              这块单独处理临时动态抓取。最上面支持按指定链接直接抓取；下面继续保留当前监督范围抓取和跨智能组勾选具体 UP 的工作台。
             </div>
           </div>
           <span
@@ -3530,6 +3697,108 @@ export function BilibiliTool() {
           >
             临时抓取工作台
           </span>
+        </div>
+
+        <div
+          style={{
+            padding: "16px",
+            borderRadius: "var(--radius-sm)",
+            border: "1px solid rgba(251, 114, 153, 0.22)",
+            background: "rgba(251, 114, 153, 0.06)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "12px",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "flex-start", flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: "0.875rem", fontWeight: 800, color: "var(--text-main)" }}>指定链接主动抓取</div>
+              <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginTop: "4px", lineHeight: 1.7, maxWidth: "760px" }}>
+                每行一个 Bilibili 视频 / 动态 / opus / 专栏链接。抓取后会复用现有 B 站动态卡片预览，直接保存时也仍然走当前同一套 Markdown 入库格式。
+              </div>
+            </div>
+            <span
+              style={{
+                padding: "6px 10px",
+                borderRadius: "999px",
+                background: "rgba(255,255,255,0.72)",
+                border: "1px solid rgba(251, 114, 153, 0.18)",
+                color: "#D64078",
+                fontSize: "0.75rem",
+                fontWeight: 800,
+                whiteSpace: "nowrap",
+              }}
+            >
+              默认保存到 bilibili/主动保存/
+            </span>
+          </div>
+
+          <textarea
+            value={directLinkInput}
+            onChange={(event) => setDirectLinkInput(event.target.value)}
+            placeholder={[
+              "每行一个链接，例如：",
+              "https://www.bilibili.com/video/BV1xx411c7mD",
+              "https://t.bilibili.com/123456789012345678",
+              "https://www.bilibili.com/opus/123456789012345678",
+            ].join("\n")}
+            style={{
+              width: "100%",
+              minHeight: "124px",
+              padding: "12px 14px",
+              borderRadius: "var(--radius-sm)",
+              border: "1px solid var(--border-light)",
+              background: "var(--bg-card)",
+              color: "var(--text-main)",
+              fontSize: "0.8125rem",
+              lineHeight: 1.6,
+              resize: "vertical",
+            }}
+          />
+
+          <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
+              当前识别 {directLinkUrls.length} 条链接。仅预览时会送到下面同一个结果区；直接保存时会先预览，再按当前 B 站入库格式写到本地。
+            </div>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => void handleFetchDirectLinks(false)}
+                disabled={loading || directLinkRunning !== null || directLinkUrls.length === 0}
+                style={{
+                  padding: "9px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: loading || directLinkRunning !== null || directLinkUrls.length === 0 ? "var(--text-muted)" : "var(--text-secondary)",
+                  fontSize: "0.8125rem",
+                  fontWeight: 700,
+                  cursor: loading || directLinkRunning !== null || directLinkUrls.length === 0 ? "not-allowed" : "pointer",
+                }}
+              >
+                {directLinkRunning === "preview" ? "解析中..." : "仅预览"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleFetchDirectLinks(true)}
+                disabled={loading || directLinkRunning !== null || directLinkUrls.length === 0}
+                style={{
+                  padding: "9px 14px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "none",
+                  background: loading || directLinkRunning !== null || directLinkUrls.length === 0
+                    ? "var(--bg-muted)"
+                    : "linear-gradient(135deg, #FB7299, #00AEEC)",
+                  color: loading || directLinkRunning !== null || directLinkUrls.length === 0 ? "var(--text-muted)" : "white",
+                  fontSize: "0.8125rem",
+                  fontWeight: 800,
+                  cursor: loading || directLinkRunning !== null || directLinkUrls.length === 0 ? "not-allowed" : "pointer",
+                }}
+              >
+                {directLinkRunning === "save" ? "抓取并保存中..." : "抓取并直接保存"}
+              </button>
+            </div>
+          </div>
         </div>
 
         {renderTargetedDynamicCrawlBody()}
@@ -3856,6 +4125,331 @@ export function BilibiliTool() {
               <div style={{ marginTop: "2px", fontSize: "0.6875rem", color: "var(--text-muted)" }}>{metric.detail}</div>
             </div>
           ))}
+        </div>
+
+        <div
+          style={{
+            padding: "14px",
+            borderRadius: "var(--radius-md)",
+            border: frequentUpCandidates.length > 0 ? "1px solid rgba(0, 174, 236, 0.18)" : "1px dashed var(--border-light)",
+            background: frequentUpCandidates.length > 0
+              ? "linear-gradient(180deg, rgba(0, 174, 236, 0.07), rgba(251, 114, 153, 0.05))"
+              : "var(--bg-hover)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "12px",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: "0.875rem", fontWeight: 800, color: "var(--text-main)" }}>高频 UP 快捷添加</div>
+              <div style={{ fontSize: "0.8125rem", color: "var(--text-secondary)", marginTop: "4px", lineHeight: 1.6 }}>
+                按本地 B 站内容里 UP 出现次数排序，每页 12 个；<span style={{ fontWeight: 800, color: "#078FBF" }}>点击头像加入</span>，也可以直接用卡片按钮添加或删除固定监督。
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => void handleBuildSmartGroups()}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: "var(--text-secondary)",
+                  fontSize: "0.75rem",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                刷新共享智能分组
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleRefreshSharedCreatorAssignments()}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-light)",
+                  background: "var(--bg-card)",
+                  color: "var(--text-secondary)",
+                  fontSize: "0.75rem",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                仅整理博主 / UP
+              </button>
+            </div>
+          </div>
+
+          {frequentUpCandidates.length > 0 ? (
+            <>
+              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                已从本地内容里整理出 {frequentUpCandidates.length} 个可复用 UP，固定监督里已命中 {frequentUpCandidates.filter((candidate) => candidate.tracked).length} 个。
+              </div>
+
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={() => setFrequentUpGroupFilter("all")}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid var(--border-light)",
+                    background: frequentUpGroupFilter === "all" ? "rgba(0, 174, 236, 0.10)" : "var(--bg-card)",
+                    color: frequentUpGroupFilter === "all" ? "#078FBF" : "var(--text-secondary)",
+                    fontSize: "0.75rem",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  全部 · {frequentUpCandidates.length}
+                </button>
+                {frequentUpGroupOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => setFrequentUpGroupFilter(option.value)}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: "var(--radius-sm)",
+                      border: "1px solid var(--border-light)",
+                      background: frequentUpGroupFilter === option.value ? "rgba(0, 174, 236, 0.10)" : "var(--bg-card)",
+                      color: frequentUpGroupFilter === option.value ? "#078FBF" : "var(--text-secondary)",
+                      fontSize: "0.75rem",
+                      fontWeight: 700,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {option.label} · {frequentUpGroupCounts[option.value] || 0}
+                  </button>
+                ))}
+              </div>
+
+              {filteredFrequentUpCandidates.length > 0 ? (
+                <>
+                  <PaginationControls
+                    totalCount={filteredFrequentUpCandidates.length}
+                    page={safeFrequentUpPage}
+                    pageSize={FREQUENT_UP_PAGE_SIZE}
+                    itemLabel="个 UP"
+                    onPageChange={setFrequentUpPage}
+                    emptyText="当前筛选下没有匹配的 UP"
+                  />
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))",
+                      gap: "10px",
+                    }}
+                  >
+                    {pagedFrequentUpCandidates.map((candidate, index) => {
+                      const smartLabels = candidate.smartGroups
+                        .map((groupValue) => getSmartGroupLabel(groupValue))
+                        .filter(Boolean);
+                      const avatarText = candidate.displayName.charAt(0).toUpperCase() || "?";
+                      const rank = ((safeFrequentUpPage - 1) * FREQUENT_UP_PAGE_SIZE) + index + 1;
+                      return (
+                        <div
+                          key={`frequent-up-${candidate.upId}`}
+                          style={{
+                            padding: "12px",
+                            borderRadius: "var(--radius-sm)",
+                            border: candidate.tracked ? "1px solid rgba(0, 174, 236, 0.24)" : "1px solid var(--border-light)",
+                            background: candidate.tracked ? "rgba(0, 174, 236, 0.08)" : "var(--bg-card)",
+                            display: "flex",
+                            gap: "12px",
+                            alignItems: "flex-start",
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => void handleAddFrequentUpToManualMonitor(candidate.upId, candidate.displayName)}
+                            title={candidate.tracked ? "这个 UP 已在固定监督里" : "点击头像加入固定监督"}
+                            style={{
+                              position: "relative",
+                              width: "46px",
+                              height: "46px",
+                              borderRadius: "50%",
+                              border: "none",
+                              background: candidate.tracked
+                                ? "linear-gradient(135deg, rgba(0, 174, 236, 0.92), rgba(251, 114, 153, 0.9))"
+                                : "linear-gradient(135deg, rgba(0, 174, 236, 0.14), rgba(251, 114, 153, 0.14))",
+                              color: candidate.tracked ? "white" : "#078FBF",
+                              fontSize: "0.95rem",
+                              fontWeight: 800,
+                              cursor: "pointer",
+                              flexShrink: 0,
+                              overflow: "hidden",
+                            }}
+                          >
+                            <span>{avatarText}</span>
+                            {candidate.up?.face ? (
+                              <img
+                                src={candidate.up.face}
+                                alt=""
+                                onError={(event) => {
+                                  event.currentTarget.style.display = "none";
+                                }}
+                                style={{
+                                  position: "absolute",
+                                  inset: 0,
+                                  width: "100%",
+                                  height: "100%",
+                                  objectFit: "cover",
+                                }}
+                              />
+                            ) : null}
+                          </button>
+
+                          <div style={{ display: "flex", flexDirection: "column", gap: "6px", minWidth: 0, flex: 1 }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", alignItems: "center" }}>
+                              <span style={{ fontSize: "0.875rem", fontWeight: 700, color: "var(--text-main)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {candidate.displayName}
+                              </span>
+                              <span style={{ fontSize: "0.6875rem", color: candidate.tracked ? "#078FBF" : "var(--text-muted)", whiteSpace: "nowrap" }}>
+                                {candidate.tracked ? "已加入" : `TOP ${rank}`}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                              本地内容出现 {candidate.noteCount} 次{candidate.profile.source_summary ? ` · ${candidate.profile.source_summary}` : ""}
+                            </div>
+                            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.5 }}>
+                              最近：{candidate.latestTitle || "暂无"}
+                            </div>
+                            {(smartLabels.length > 0 || candidate.originalGroupNames.length > 0) && (
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                                {smartLabels.slice(0, 3).map((label) => (
+                                  <span
+                                    key={`frequent-smart-${candidate.upId}-${label}`}
+                                    style={{
+                                      padding: "3px 8px",
+                                      borderRadius: "999px",
+                                      background: "rgba(14, 165, 233, 0.10)",
+                                      color: "#0284C7",
+                                      fontSize: "0.6875rem",
+                                      fontWeight: 700,
+                                    }}
+                                  >
+                                    {label}
+                                  </span>
+                                ))}
+                                {candidate.originalGroupNames.slice(0, 2).map((label) => (
+                                  <span
+                                    key={`frequent-original-${candidate.upId}-${label}`}
+                                    style={{
+                                      padding: "3px 8px",
+                                      borderRadius: "999px",
+                                      background: "rgba(251, 114, 153, 0.10)",
+                                      color: "#D64078",
+                                      fontSize: "0.6875rem",
+                                      fontWeight: 700,
+                                    }}
+                                  >
+                                    {label}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "2px" }}>
+                              {candidate.tracked ? (
+                                <button
+                                  type="button"
+                                  onClick={() => void toggleManualMonitoredUp(candidate.upId)}
+                                  style={{
+                                    padding: "7px 10px",
+                                    borderRadius: "var(--radius-sm)",
+                                    border: "1px solid rgba(239, 68, 68, 0.22)",
+                                    background: "rgba(239, 68, 68, 0.08)",
+                                    color: "#DC2626",
+                                    fontSize: "0.75rem",
+                                    fontWeight: 700,
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  删除
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleAddFrequentUpToManualMonitor(candidate.upId, candidate.displayName)}
+                                  style={{
+                                    padding: "7px 10px",
+                                    borderRadius: "var(--radius-sm)",
+                                    border: "1px solid rgba(0, 174, 236, 0.22)",
+                                    background: "rgba(0, 174, 236, 0.10)",
+                                    color: "#078FBF",
+                                    fontSize: "0.75rem",
+                                    fontWeight: 700,
+                                    cursor: "pointer",
+                                  }}
+                                >
+                                  一键添加
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <PaginationControls
+                    totalCount={filteredFrequentUpCandidates.length}
+                    page={safeFrequentUpPage}
+                    pageSize={FREQUENT_UP_PAGE_SIZE}
+                    itemLabel="个 UP"
+                    onPageChange={setFrequentUpPage}
+                    emptyText="当前筛选下没有匹配的 UP"
+                  />
+                </>
+              ) : (
+                <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.7 }}>
+                  当前智能组筛选下还没有匹配到高频 UP，可以切回“全部”看看，或者重新执行一次智能分组。
+                </div>
+              )}
+            </>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.7 }}>
+                先读取关注列表并执行一次共享智能分组，这里才会按本地收藏里 UP 的出现频率整理候选，方便你快速补到固定监督。
+              </div>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={() => void handleLoadFollowedUps(false, true)}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid var(--border-light)",
+                    background: "var(--bg-card)",
+                    color: "var(--text-secondary)",
+                    fontSize: "0.75rem",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {followedUpsLoading ? "读取中..." : (followedUpsLoaded ? "刷新关注列表" : "先读取关注列表")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleBuildSmartGroups()}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid var(--border-light)",
+                    background: "var(--bg-card)",
+                    color: "var(--text-secondary)",
+                    fontSize: "0.75rem",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  共享智能分组
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div
@@ -4387,6 +4981,10 @@ export function BilibiliTool() {
     const pagesScanned = fetchStats?.pages_scanned ?? 0;
     const scannedAuthorCount = fetchStats?.scanned_author_count ?? dynamicFetchMeta.authorCount ?? 0;
     const fetchDaysBack = dynamicFetchMeta.daysBack ?? daysBack;
+    const isDirectLinkResult = dynamicFetchMeta.scope === "links" || fetchStats?.source === "direct-links";
+    const directLinkInputCount = fetchStats?.input_count ?? 0;
+    const directLinkFailedCount = fetchStats?.failed_count ?? 0;
+    const directLinkSkippedCount = fetchStats?.skipped_count ?? 0;
 
     if (loading) {
       return <LoadingState message={followedDynamicsTask?.stage || "正在获取动态..."} />;
@@ -4433,32 +5031,62 @@ export function BilibiliTool() {
         >
           <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
             <span style={{ fontSize: "0.875rem", color: "var(--text-muted)" }}>
-              共命中 <strong style={{ color: "var(--text-main)" }}>{matchedBeforeKeep}</strong> 条动态，
-              当前保留 <strong style={{ color: "var(--text-main)" }}>{keptCount}</strong> 条，
-              当前筛选 <strong style={{ color: "var(--text-main)" }}>{displayedDynamics.length}</strong> 条，
-              本页显示 <strong style={{ color: "var(--text-main)" }}>{pagedDisplayedDynamics.length}</strong> 条，
-              抓取范围 <strong style={{ color: "var(--text-main)" }}>{dynamicFetchMeta.label}</strong>
+              {isDirectLinkResult ? (
+                <>
+                  共解析 <strong style={{ color: "var(--text-main)" }}>{directLinkInputCount || matchedBeforeKeep}</strong> 条链接，
+                  成功预览 <strong style={{ color: "var(--text-main)" }}>{keptCount}</strong> 条，
+                  当前筛选 <strong style={{ color: "var(--text-main)" }}>{displayedDynamics.length}</strong> 条，
+                  本页显示 <strong style={{ color: "var(--text-main)" }}>{pagedDisplayedDynamics.length}</strong> 条，
+                  结果来源 <strong style={{ color: "var(--text-main)" }}>{dynamicFetchMeta.label}</strong>
+                </>
+              ) : (
+                <>
+                  共命中 <strong style={{ color: "var(--text-main)" }}>{matchedBeforeKeep}</strong> 条动态，
+                  当前保留 <strong style={{ color: "var(--text-main)" }}>{keptCount}</strong> 条，
+                  当前筛选 <strong style={{ color: "var(--text-main)" }}>{displayedDynamics.length}</strong> 条，
+                  本页显示 <strong style={{ color: "var(--text-main)" }}>{pagedDisplayedDynamics.length}</strong> 条，
+                  抓取范围 <strong style={{ color: "var(--text-main)" }}>{dynamicFetchMeta.label}</strong>
+                </>
+              )}
             </span>
             <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
-              实际扫了 <strong style={{ color: "var(--text-main)" }}>{pagesScanned}</strong> 页
-              {scannedAuthorCount > 0 ? ` / ${scannedAuthorCount} 个UP` : ""}
-              ，命中了 <strong style={{ color: "var(--text-main)" }}>{matchedBeforeKeep}</strong> 条，
-              现在只展示前 <strong style={{ color: "var(--text-main)" }}>{keepLimit}</strong> 条。
+              {isDirectLinkResult ? (
+                <>
+                  直接按链接解析，不再扫关注页。
+                  {directLinkFailedCount > 0 ? ` 失败 ${directLinkFailedCount} 条。` : " "}
+                  {directLinkSkippedCount > 0 ? `跳过空行或重复 ${directLinkSkippedCount} 条。` : ""}
+                </>
+              ) : (
+                <>
+                  实际扫了 <strong style={{ color: "var(--text-main)" }}>{pagesScanned}</strong> 页
+                  {scannedAuthorCount > 0 ? ` / ${scannedAuthorCount} 个UP` : ""}
+                  ，命中了 <strong style={{ color: "var(--text-main)" }}>{matchedBeforeKeep}</strong> 条，
+                  现在只展示前 <strong style={{ color: "var(--text-main)" }}>{keepLimit}</strong> 条。
+                </>
+              )}
             </span>
           </div>
           <span style={{ fontSize: "0.8125rem", color: "var(--text-muted)" }}>
-            最近 {fetchDaysBack} 天
+            {isDirectLinkResult ? "按指定链接解析" : `最近 ${fetchDaysBack} 天`}
           </span>
         </div>
 
         {displayedDynamics.length === 0 ? (
           <EmptyState
             icon={Filter}
-            title={dynamicFetchMeta.scope === "global" ? "这个分组里没有匹配推送" : "当前范围里没有匹配动态"}
+            title={
+              dynamicFetchMeta.scope === "links"
+                ? "这些链接暂时没有解析出可预览内容"
+                : dynamicFetchMeta.scope === "global"
+                  ? "这个分组里没有匹配推送"
+                  : "当前范围里没有匹配动态"
+            }
             description={
-              dynamicFetchMeta.scope === "global"
-                ? "换一个分组、清空 UP 选择，或者调整推送关键词。"
-                : "放宽最近几天、切换分组，或者清空 UP 搜索后再试。"
+              dynamicFetchMeta.scope === "links"
+                ? "检查链接格式、Cookie 登录态，或换成视频 / 动态 / opus / 专栏原链接再试。"
+                : dynamicFetchMeta.scope === "global"
+                  ? "换一个分组、清空 UP 选择，或者调整推送关键词。"
+                  : "放宽最近几天、切换分组，或者清空 UP 搜索后再试。"
             }
           />
         ) : (

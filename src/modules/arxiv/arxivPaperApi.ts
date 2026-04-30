@@ -1,4 +1,6 @@
-const API_BASE = "http://127.0.0.1:8765";
+import { API_BASE_URL } from "../../core/api";
+
+const API_BASE = API_BASE_URL;
 
 export interface ArxivIntroductionPayload {
   introduction: string;

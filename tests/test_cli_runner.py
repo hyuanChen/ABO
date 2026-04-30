@@ -1,8 +1,7 @@
 """Tests for CLI runner module"""
 
 import pytest
-from dataclasses import dataclass
-from typing import List
+from unittest.mock import patch
 
 from abo.cli.runner import StreamEvent, BaseRunner, RawRunner, AcpRunner, WebSocketRunner, RunnerFactory
 from abo.cli.detector import CliInfo
@@ -175,3 +174,33 @@ class TestBaseRunner:
         )
         with pytest.raises(TypeError):
             BaseRunner(cli_info, "session-test")
+
+
+class TestRunnerEnvResolution:
+    """Runner should resolve executables with the enhanced bundled-app PATH."""
+
+    @patch("abo.cli.runner.resolve_cli_command")
+    @patch("abo.cli.runner.get_enhanced_cli_env")
+    def test_runner_resolves_command_from_enhanced_env(self, mock_get_env, mock_resolve):
+        cli_info = CliInfo(
+            id="codex",
+            name="OpenAI Codex",
+            command="codex",
+            check_cmd="codex --version",
+            protocol="raw",
+        )
+        runner = RawRunner(cli_info, "session-test", "/workspace")
+        mock_get_env.return_value = {
+            "PATH": "/opt/homebrew/bin:/usr/bin",
+            "HOME": "/Users/test",
+            "CLAUDECODE": "1",
+        }
+        mock_resolve.return_value = "/opt/homebrew/bin/codex"
+
+        env = runner._get_env()
+        command = runner._resolve_command(env)
+
+        assert env["PATH"] == "/opt/homebrew/bin:/usr/bin"
+        assert "CLAUDECODE" not in env
+        assert command == "/opt/homebrew/bin/codex"
+        mock_resolve.assert_called_once_with("codex", env=env)

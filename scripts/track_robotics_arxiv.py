@@ -19,16 +19,18 @@ from urllib.parse import urlparse
 
 import httpx
 
+from abo.storage_paths import get_config_path
+
 
 def get_config() -> dict:
     """读取 ABO 配置获取 vault 和 literature 路径"""
-    config_path = Path.home() / ".abo-config.json"
+    config_path = get_config_path()
     if not config_path.exists():
         print(f"错误: 未找到配置文件 {config_path}")
         print("请先启动 ABO 应用并配置 Vault 和文献库路径")
         sys.exit(1)
 
-    return json.loads(config_path.read_text())
+    return json.loads(config_path.read_text(encoding="utf-8"))
 
 
 def get_literature_path(config: dict) -> Path:

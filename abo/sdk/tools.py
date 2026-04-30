@@ -12,6 +12,7 @@ import httpx
 import feedparser
 
 from ..config import get_ai_provider
+from ..storage_paths import get_audio_tmp_dir
 
 
 def _build_pref_block(prefs: dict) -> str:
@@ -120,7 +121,7 @@ async def fetch_rss(url: str) -> list[dict]:
 
 async def download_audio(url: str, output_dir: Path | None = None) -> Path:
     """yt-dlp 下载仅音频，返回 mp3 文件路径"""
-    out = output_dir or (Path.home() / ".abo" / "tmp" / "audio")
+    out = output_dir or get_audio_tmp_dir()
     out.mkdir(parents=True, exist_ok=True)
     proc = await asyncio.create_subprocess_exec(
         "yt-dlp", "--extract-audio", "--audio-format", "mp3",

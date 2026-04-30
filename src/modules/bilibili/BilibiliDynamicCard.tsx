@@ -1,5 +1,6 @@
 import { type CSSProperties, type ReactNode } from "react";
 import { ExternalLink, FileText, FolderHeart, Image as ImageIcon, MessageSquare, Play } from "lucide-react";
+import { buildImageProxyUrl } from "../../core/api";
 
 export interface BilibiliCardDynamic {
   id: string;
@@ -58,7 +59,7 @@ const DYNAMIC_TYPE_META: Record<
 
 function proxiedImage(url: string): string {
   if (!url) return "";
-  return `http://127.0.0.1:8765/api/proxy/image?url=${encodeURIComponent(url)}`;
+  return buildImageProxyUrl(url);
 }
 
 function formatDate(dateStr: string | null) {

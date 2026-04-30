@@ -72,9 +72,11 @@ crontab -e
 
 ## 配置
 
-脚本自动读取 `~/.abo-config.json` 中的配置:
+脚本自动读取 `~/Library/Application Support/ABO/config.json` 中的配置:
 - `literature_path`: 文献库主文件夹
 - `vault_path`: 如果未配置文献库，则使用 `Vault/Literature`
+
+如果你是旧版本用户，应用会在首次启动时自动把 `~/.abo-config.json` 迁移到新位置。
 
 如果配置文件不存在，请先启动 ABO 应用完成初始化。
 

@@ -3,12 +3,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from .models import Activity, ActivityType, DailyTimeline
+from ..storage_paths import get_activities_dir
 import uuid
 
 
 class ActivityTracker:
-    def __init__(self, storage_dir: Path = Path("~/.abo/activities").expanduser()):
-        self.storage_dir = storage_dir
+    def __init__(self, storage_dir: Path | None = None):
+        self.storage_dir = storage_dir or get_activities_dir()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_timeline_path(self, date: str) -> Path:

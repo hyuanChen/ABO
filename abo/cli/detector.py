@@ -1,12 +1,15 @@
 """CLI 检测和管理模块"""
 
-import shutil
 import subprocess
 import os
 import json
+import shlex
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime
+
+from ..storage_paths import resolve_app_data_file
+from .env import get_enhanced_cli_env, resolve_cli_command, reset_enhanced_cli_env_cache
 
 
 @dataclass
@@ -65,13 +68,16 @@ class CliDetector:
         ),
     }
 
-    def __init__(self, db_path: str = "~/.abo/data/cli_configs.json"):
-        self.db_path = os.path.expanduser(db_path)
+    def __init__(self, db_path: str | None = None):
+        resolved = db_path or str(resolve_app_data_file("cli_configs.json"))
+        self.db_path = os.path.expanduser(resolved)
         self._cache: Dict[str, CliInfo] = {}
         self._load_cache()
 
     def detect_all(self, force: bool = False) -> List[CliInfo]:
         """检测所有已知的 CLI 工具"""
+        if force:
+            reset_enhanced_cli_env_cache()
         available = []
 
         for cli_id, info in self.REGISTRY.items():
@@ -95,18 +101,23 @@ class CliDetector:
         )
         result.last_check = int(datetime.now().timestamp())
 
-        # 检查命令是否在 PATH 中
-        if not shutil.which(info.command):
+        env = self._get_enhanced_env()
+        resolved_command = resolve_cli_command(info.command, env=env)
+        if not resolved_command:
             return result
 
         # 尝试执行版本检查
         try:
+            check_parts = shlex.split(info.check_cmd)
+            if not check_parts:
+                return result
+            check_parts[0] = resolved_command
             proc = subprocess.run(
-                info.check_cmd.split(),
+                check_parts,
                 capture_output=True,
                 text=True,
                 timeout=10,
-                env=self._get_enhanced_env()
+                env=env,
             )
 
             if proc.returncode == 0:
@@ -125,27 +136,7 @@ class CliDetector:
 
     def _get_enhanced_env(self) -> dict:
         """获取增强的环境变量（包含 shell 配置）"""
-        env = dict(os.environ)
-
-        # 尝试加载 shell 环境
-        shell = os.environ.get('SHELL', '/bin/zsh')
-        try:
-            result = subprocess.run(
-                [shell, '-l', '-c', 'env'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-
-            for line in result.stdout.strip().split('\n'):
-                if '=' in line:
-                    key, value = line.split('=', 1)
-                    if key in ['PATH', 'HOME', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY']:
-                        env[key] = value
-        except Exception:
-            pass
-
-        return env
+        return get_enhanced_cli_env()
 
     def get_cli_info(self, cli_id: str) -> Optional[CliInfo]:
         """获取特定 CLI 的信息"""

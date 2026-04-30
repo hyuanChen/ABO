@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from abc import ABC, abstractmethod
 import logging
 
+from .env import get_enhanced_cli_env, resolve_cli_command
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,11 +68,15 @@ class BaseRunner(ABC):
 
     def _get_env(self) -> dict:
         """获取环境变量 - 移除 CLAUDECODE 避免嵌套会话检测"""
-        env = dict(os.environ)
+        env = get_enhanced_cli_env()
         # 移除 Claude Code 环境变量，允许在 Claude Code 会话中启动子 Claude 进程
         env.pop('CLAUDECODE', None)
         env.pop('CLAUDE_CODE', None)
         return env
+
+    def _resolve_command(self, env: Optional[dict] = None) -> str:
+        active_env = env or self._get_env()
+        return resolve_cli_command(self.cli_info.command, env=active_env) or self.cli_info.command
 
 
 class RawRunner(BaseRunner):
@@ -99,11 +105,13 @@ class RawRunner(BaseRunner):
             # 否则使用 stdin 传递（如 echo/cat 命令）
             acp_args = getattr(self.cli_info, 'acp_args', [])
             use_stdin = not ('--print' in acp_args or '-p' in acp_args)
+            env = self._get_env()
+            command = self._resolve_command(env)
 
             if use_stdin:
-                cmd = [self.cli_info.command] + acp_args
+                cmd = [command] + acp_args
             else:
-                cmd = [self.cli_info.command] + acp_args + [message]
+                cmd = [command] + acp_args + [message]
 
             logger.info(f"Starting process: {' '.join(cmd[:3])}...")
 
@@ -114,7 +122,7 @@ class RawRunner(BaseRunner):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.workspace,
-                env=self._get_env()
+                env=env
             )
 
             # 如果需要，通过 stdin 发送消息
@@ -239,13 +247,15 @@ class CodexRunner(BaseRunner):
         try:
             cmd = self._build_command()
             logger.info("Starting Codex process: %s", " ".join(cmd[:4]))
+            env = self._get_env()
+            cmd[0] = self._resolve_command(env)
             self.process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.workspace,
-                env=self._get_env(),
+                env=env,
             )
             await on_event(
                 StreamEvent(
@@ -507,7 +517,8 @@ class AcpRunner(BaseRunner):
 
         try:
             # 启动 ACP 模式
-            cmd = [self.cli_info.command] + getattr(self.cli_info, 'acp_args', [])
+            env = self._get_env()
+            cmd = [self._resolve_command(env)] + getattr(self.cli_info, 'acp_args', [])
 
             self.process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -515,7 +526,7 @@ class AcpRunner(BaseRunner):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.workspace,
-                env=self._get_env()
+                env=env
             )
 
             # 发送 ACP 初始化消息
@@ -668,11 +679,13 @@ class WebSocketRunner(BaseRunner):
 
         try:
             # 启动 gateway 进程
-            cmd = [self.cli_info.command] + getattr(self.cli_info, 'acp_args', [])
+            env = self._get_env()
+            cmd = [self._resolve_command(env)] + getattr(self.cli_info, 'acp_args', [])
             self.process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
 
             # 等待 gateway 启动

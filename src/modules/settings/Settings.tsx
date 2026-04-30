@@ -25,6 +25,7 @@ import {
   Layers,
   RefreshCw,
   ShoppingBag,
+  Shield,
   Tv,
 } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card } from "../../components/Layout";
@@ -1668,6 +1669,7 @@ function FeedPreferencesSection() {
 
 function GeneralSection() {
   const [paperAiScoringEnabled, setPaperAiScoringEnabled] = useState(false);
+  const [claudeCodeCompatEnabled, setClaudeCodeCompatEnabled] = useState(false);
   const [intelligenceDeliveryEnabled, setIntelligenceDeliveryEnabled] = useState(true);
   const [intelligenceDeliveryTime, setIntelligenceDeliveryTime] = useState("09:00");
   const [onboardingCompleted, setOnboardingCompleted] = useState(true);
@@ -1697,11 +1699,13 @@ function GeneralSection() {
   // Load settings state from config
   useEffect(() => {
     api.get<Record<string, unknown>>("/api/config").then((cfg) => {
+      const claudeCompat = Boolean(cfg.claude_code_compat_enabled);
+      setClaudeCodeCompatEnabled(claudeCompat);
       setPaperAiScoringEnabled(Boolean(cfg.paper_ai_scoring_enabled));
       setIntelligenceDeliveryEnabled(cfg.intelligence_delivery_enabled !== false);
       setIntelligenceDeliveryTime(String(cfg.intelligence_delivery_time || "09:00"));
       setOnboardingCompleted(cfg.onboarding_completed !== false);
-      setAiProvider(cfg.ai_provider === "codex" ? "codex" : "codex");
+      setAiProvider(cfg.ai_provider === "claude" && claudeCompat ? "claude" : "codex");
     }).catch(() => {});
     void loadSocialAuthStatus();
   }, [setAiProvider]);
@@ -1732,8 +1736,8 @@ function GeneralSection() {
   }
 
   async function updateAiProvider(provider: "codex" | "claude") {
-    if (provider !== "codex") {
-      addToast({ kind: "info", title: "Claude 暂不支持", message: "当前已禁用，避免封号风险。" });
+    if (provider === "claude" && !claudeCodeCompatEnabled) {
+      addToast({ kind: "info", title: "请先开启 Claude Code 兼容", message: "默认保持关闭；确认需要后再手动开启。" });
       return;
     }
     try {
@@ -1742,10 +1746,36 @@ function GeneralSection() {
       setAiProvider(provider);
       addToast({
         kind: "success",
-        title: "默认 AI 已切换为 Codex",
+        title: `默认 AI 已切换为 ${provider === "claude" ? "Claude Code" : "Codex"}`,
       });
     } catch {
       addToast({ kind: "error", title: "保存默认 AI 失败" });
+    }
+  }
+
+  async function toggleClaudeCodeCompat() {
+    const nextValue = !claudeCodeCompatEnabled;
+    const nextProvider = !nextValue && aiProvider === "claude" ? "codex" : aiProvider;
+
+    try {
+      const saved = await api.post<Record<string, unknown>>("/api/config", {
+        claude_code_compat_enabled: nextValue,
+        ai_provider: nextProvider,
+      });
+      setConfig(saved as any);
+      setClaudeCodeCompatEnabled(nextValue);
+      setAiProvider(nextProvider);
+      addToast({
+        kind: "success",
+        title: nextValue ? "Claude Code 兼容已开启" : "Claude Code 兼容已关闭",
+        message: nextValue
+          ? "现在可以在默认后台 Agent 中手动切换到 Claude Code。"
+          : nextProvider === "codex"
+            ? "已恢复为 Codex，避免继续走 Claude Code 后端链路。"
+            : "Claude Code 已保持关闭。",
+      });
+    } catch {
+      addToast({ kind: "error", title: "保存 Claude Code 兼容设置失败" });
     }
   }
 
@@ -2062,14 +2092,29 @@ function GeneralSection() {
       <Card title="AI 助手" icon={<Sparkles style={{ width: "18px", height: "18px" }} />}>
         <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
           <SettingItem
+            icon={<Shield style={{ width: "20px", height: "20px" }} />}
+            title="Claude Code 兼容"
+            description={claudeCodeCompatEnabled
+              ? "已开启。你现在可以把默认后台 Agent 切到 Claude Code"
+              : "默认关闭。需要兼容 Claude Code 后端时再手动开启"
+            }
+          >
+            <Toggle enabled={claudeCodeCompatEnabled} onToggle={toggleClaudeCodeCompat} />
+          </SettingItem>
+          <SettingItem
             icon={<Sparkles style={{ width: "20px", height: "20px" }} />}
             title="默认后台 Agent"
-            description="当前默认使用 Codex"
+            description={aiProvider === "claude" ? "当前默认使用 Claude Code" : "当前默认使用 Codex"}
           >
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
               {[
                 { id: "codex" as const, label: "Codex", supported: true, hint: "默认可用" },
-                { id: "claude" as const, label: "Claude", supported: false, hint: "暂不支持（易封号）" },
+                {
+                  id: "claude" as const,
+                  label: "Claude Code",
+                  supported: claudeCodeCompatEnabled,
+                  hint: claudeCodeCompatEnabled ? "兼容模式已开启" : "先开启上面的兼容开关",
+                },
               ].map((provider) => {
                 const active = aiProvider === provider.id;
                 return (
@@ -2112,7 +2157,7 @@ function GeneralSection() {
               lineHeight: 1.6,
             }}
           >
-            这个设置会影响聊天入口的默认选择，以及后端统一 AI 调用链路。当前默认使用 Codex。Claude 暂不支持，易封号。
+            这个设置会影响聊天入口的默认选择，以及后端统一 AI 调用链路。默认只启用 Codex；Claude Code 兼容默认关闭，只有在你明确需要时才建议手动开启。
           </div>
           <SettingItem
             icon={<Sparkles style={{ width: "20px", height: "20px" }} />}

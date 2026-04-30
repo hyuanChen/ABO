@@ -3,9 +3,16 @@ import type React from "react";
 import { Check, Cookie, FolderHeart, ImageOff, RefreshCw, RotateCcw, Save, Tv, Users } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
 import { useToast } from "../../components/Toast";
+import { buildImageProxyUrl } from "../../core/api";
 import { withLocationSuffix } from "../../core/pathDisplay";
 import { useStore } from "../../core/store";
-import { readJsonStorage } from "../../core/storage";
+import {
+  readJsonStorage,
+  readStringStorage,
+  removeStorageKey,
+  writeJsonStorage,
+  writeStringStorage,
+} from "../../core/storage";
 import {
   BilibiliFavoriteFolder,
   FavoriteCrawlResponse,
@@ -31,7 +38,7 @@ type FavoriteCrawlMode = "full" | "incremental";
 
 function proxiedImage(url: string): string {
   if (!url) return "";
-  return `http://127.0.0.1:8765/api/proxy/image?url=${encodeURIComponent(url)}`;
+  return buildImageProxyUrl(url);
 }
 
 function isNotFoundError(err: unknown): boolean {
@@ -73,18 +80,18 @@ function formatTaskPollingMessage(err: unknown, taskStorageKey?: string): string
   if (isTerminalTaskError(err)) {
     return message;
   }
-  if (taskStorageKey && localStorage.getItem(taskStorageKey)) {
+  if (taskStorageKey && readStringStorage(taskStorageKey, "")) {
     return `${message}；后台任务可能仍在执行，可稍后自动恢复`;
   }
   return message;
 }
 
 function cancelStoredTask(taskStorageKey: string): void {
-  const taskId = localStorage.getItem(taskStorageKey);
+  const taskId = readStringStorage(taskStorageKey, "");
   if (!taskId) {
     return;
   }
-  localStorage.removeItem(taskStorageKey);
+  removeStorageKey(taskStorageKey);
   bilibiliCancelTaskSilently(taskId);
 }
 
@@ -132,23 +139,23 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
   }, [crawlTask, selectedCount, selectedVideos]);
 
   useEffect(() => {
-    localStorage.setItem(FAVORITES_FOLDERS_CACHE_KEY, JSON.stringify(folders));
+    writeJsonStorage(FAVORITES_FOLDERS_CACHE_KEY, folders);
   }, [folders]);
 
   useEffect(() => {
-    localStorage.setItem("bilibili_favorites_selected_ids", JSON.stringify([...selectedIds]));
+    writeJsonStorage("bilibili_favorites_selected_ids", [...selectedIds]);
   }, [selectedIds]);
 
   useEffect(() => {
-    localStorage.setItem(FAVORITES_RESULT_CACHE_KEY, JSON.stringify(result));
+    writeJsonStorage(FAVORITES_RESULT_CACHE_KEY, result);
   }, [result]);
 
   useEffect(() => {
     if (didAutoLoad.current) return;
     didAutoLoad.current = true;
     void loadConfig();
-    const listTaskId = localStorage.getItem(FAVORITES_LIST_TASK_KEY);
-    const crawlTaskId = localStorage.getItem(FAVORITES_CRAWL_TASK_KEY);
+    const listTaskId = readStringStorage(FAVORITES_LIST_TASK_KEY, "");
+    const crawlTaskId = readStringStorage(FAVORITES_CRAWL_TASK_KEY, "");
     if (crawlTaskId) {
       void resumeCrawlTask(crawlTaskId, false).catch((err) => {
         toast.error("恢复爬取任务失败", formatTaskPollingMessage(err, FAVORITES_CRAWL_TASK_KEY));
@@ -176,15 +183,15 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
 
   function finalizeListTask(taskId?: string | null) {
     if (!taskId) return;
-    if (localStorage.getItem(FAVORITES_LIST_TASK_KEY) === taskId) {
-      localStorage.removeItem(FAVORITES_LIST_TASK_KEY);
+    if (readStringStorage(FAVORITES_LIST_TASK_KEY, "") === taskId) {
+      removeStorageKey(FAVORITES_LIST_TASK_KEY);
     }
   }
 
   function finalizeCrawlTask(taskId?: string | null) {
     if (!taskId) return;
-    if (localStorage.getItem(FAVORITES_CRAWL_TASK_KEY) === taskId) {
-      localStorage.removeItem(FAVORITES_CRAWL_TASK_KEY);
+    if (readStringStorage(FAVORITES_CRAWL_TASK_KEY, "") === taskId) {
+      removeStorageKey(FAVORITES_CRAWL_TASK_KEY);
     }
   }
 
@@ -371,13 +378,13 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
 
       try {
         const started = await bilibiliStartListFavoriteFolders(request);
-        localStorage.setItem(FAVORITES_LIST_TASK_KEY, started.task_id);
+        writeStringStorage(FAVORITES_LIST_TASK_KEY, started.task_id);
         await resumeListTask(started.task_id, showToast);
       } catch (err) {
         if (!isNotFoundError(err)) {
           throw err;
         }
-        finalizeListTask(localStorage.getItem(FAVORITES_LIST_TASK_KEY));
+        finalizeListTask(readStringStorage(FAVORITES_LIST_TASK_KEY, ""));
 
         const res = await bilibiliListFavoriteFolders(request);
         setLegacyStatus({
@@ -466,12 +473,12 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
       };
       try {
         const started = await bilibiliStartCrawlFavoriteFolders(request);
-        localStorage.setItem(FAVORITES_CRAWL_TASK_KEY, started.task_id);
+        writeStringStorage(FAVORITES_CRAWL_TASK_KEY, started.task_id);
         await resumeCrawlTask(started.task_id, true);
         return;
       } catch (err) {
         if (isNotFoundError(err)) {
-          finalizeCrawlTask(localStorage.getItem(FAVORITES_CRAWL_TASK_KEY));
+          finalizeCrawlTask(readStringStorage(FAVORITES_CRAWL_TASK_KEY, ""));
           setLegacyStatus({
             kind: "crawl",
             title: "收藏内容入库",
@@ -519,7 +526,7 @@ export function BilibiliFavoritesPage({ embedded = false }: BilibiliFavoritesPag
   }
 
   function openBilibiliPanel(panel: "dynamics" | "following") {
-    localStorage.setItem("bilibili_tool_panel", panel);
+    writeStringStorage("bilibili_tool_panel", panel);
     setActiveTab("bilibili");
   }
 

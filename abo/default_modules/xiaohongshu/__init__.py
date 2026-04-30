@@ -36,6 +36,7 @@ from abo.config import load as load_config
 from abo.creator_smart_groups import match_smart_groups_from_content_tags, unique_strings
 from abo.sdk import Module, Item, Card, agent_json
 from abo.store.cards import CardStore
+from abo.storage_paths import get_preferences_path
 from abo.tools.xhs_crawler import build_xhs_seed_obsidian_path
 from abo.tools.xhs_creator_safety import (
     DEFAULT_BATCH_LIMIT,
@@ -96,10 +97,22 @@ class XiaohongshuTracker(Module):
             filtered.sort(key=lambda item: published_at(item) or datetime.max, reverse=True)
         return filtered
 
-    def _build_obsidian_path(self, payload: dict, _safe_title: str) -> str:
+    def _resolve_creator_display_author(self, payload: dict, creator_profiles: dict | None = None) -> str:
+        user_id = str(payload.get("author_id") or payload.get("user_id") or "").strip()
+        author = str(payload.get("display_author") or payload.get("author") or "").strip()
+        profile = dict((creator_profiles or {}).get(user_id) or {}) if user_id else {}
+        profile_author = str(profile.get("author") or "").strip()
+
+        if author and author != user_id:
+            return author
+        if profile_author and profile_author != user_id:
+            return profile_author
+        return author or profile_author or user_id
+
+    def _build_obsidian_path(self, payload: dict, _safe_title: str, creator_profiles: dict | None = None) -> str:
         source = str(payload.get("crawl_source") or "").strip()
         matched_keywords = normalize_string_list(payload.get("matched_keywords"))
-        author = str(payload.get("author") or "").strip()
+        author = self._resolve_creator_display_author(payload, creator_profiles)
         user_id = str(payload.get("user_id") or "").strip()
 
         subfolder_parts: list[str] = []
@@ -175,8 +188,13 @@ class XiaohongshuTracker(Module):
                 *normalize_string_list(next_monitor.get("smart_group_labels")),
                 *normalize_string_list(profile.get("smart_group_labels")),
             ])
-            if profile.get("author") and not str(next_monitor.get("author") or "").strip():
-                next_monitor["author"] = profile.get("author")
+            current_author = str(next_monitor.get("author") or "").strip()
+            profile_author = str(profile.get("author") or "").strip()
+            if profile_author and (not current_author or current_author == user_id):
+                next_monitor["author"] = profile_author
+            current_label = str(next_monitor.get("label") or "").strip()
+            if profile_author and (not current_label or current_label == user_id):
+                next_monitor["label"] = profile_author
             if next_groups:
                 next_monitor["smart_groups"] = next_groups
             if next_group_labels:
@@ -275,11 +293,11 @@ class XiaohongshuTracker(Module):
         return cookie_value
 
     def _load_config(self) -> dict:
-        prefs_path = Path.home() / ".abo" / "preferences.json"
+        prefs_path = get_preferences_path()
         config: dict = {}
         if prefs_path.exists():
             try:
-                data = json.loads(prefs_path.read_text())
+                data = json.loads(prefs_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 data = {}
             config = dict((data.get("modules", {}) or {}).get(self.id, {}) or {})
@@ -826,6 +844,7 @@ class XiaohongshuTracker(Module):
             )
             user_id = str(p.get("user_id") or "")
             creator_profile = creator_profiles.get(user_id, {}) if user_id else {}
+            display_author = self._resolve_creator_display_author(p, creator_profiles)
             creator_smart_groups = [
                 str(group).strip()
                 for group in (creator_profile.get("smart_groups") or [])
@@ -850,13 +869,14 @@ class XiaohongshuTracker(Module):
                     score=min(result.get("score", 5), 10) / 10,
                     tags=result.get("tags", []) + ["小红书", result.get("category", "笔记")],
                     source_url=p["url"],
-                    obsidian_path=self._build_obsidian_path(p, safe_title),
+                    obsidian_path=self._build_obsidian_path(p, safe_title, creator_profiles),
                     metadata={
                         "abo-type": "xiaohongshu-note",
                         "platform": "xiaohongshu",
                         "user_id": p.get("user_id"),
                         "author_id": p.get("author_id") or p.get("user_id"),
-                        "author": p.get("author"),
+                        "author": display_author,
+                        "intelligence_author_label": display_author,
                         "published": p.get("published"),
                         "published_at": p.get("published_at") or p.get("published"),
                         "category": result.get("category", "笔记"),

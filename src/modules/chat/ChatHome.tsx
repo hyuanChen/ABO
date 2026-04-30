@@ -132,7 +132,7 @@ export function ChatHome({ onStartChat, isLoading: externalLoading = false }: Ch
           <EmptyState
             icon={Bot}
             title="暂无可用的 AI 助手"
-            description="请安装 Codex CLI、Claude Code 或其他支持的 CLI 工具"
+            description="请安装并配置 Codex CLI 或 Claude Code"
           />
         </PageContent>
       </PageContainer>
