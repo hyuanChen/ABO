@@ -1,11 +1,12 @@
 import { useStore, ActiveTab } from "../../core/store";
 import { useThemeMode } from "../../core/theme";
 import { filterModulesForManagement } from "../../core/moduleVisibility";
+import BrandMark from "../../components/BrandMark";
 import AvatarDisplay from "../profile/AvatarDisplay";
 import { normalizeFeedPreferences } from "../feed/intelligence";
 import {
   Inbox, BookOpen, FileText,
-  Rss, Heart, Settings, Zap, User, Menu, X, Moon, Sun, LayoutGrid, FolderOpen,
+  Rss, Heart, Settings, User, Menu, X, Moon, Sun, LayoutGrid, FolderOpen,
   ChevronDown, BookHeart, Tv, BarChart3, Bot
 } from "lucide-react";
 import { useState, useEffect } from "react";
@@ -28,6 +29,13 @@ export default function NavSidebar() {
   const [isOpen, setIsOpen] = useState(false);
   const [modulesExpanded, setModulesExpanded] = useState(false);
   const { isDark, toggleTheme } = useThemeMode();
+  const isMacDesktopApp =
+    typeof window !== "undefined" &&
+    "__TAURI_INTERNALS__" in window &&
+    navigator.platform.toLowerCase().includes("mac");
+  const desktopSidebarPadding = isMacDesktopApp
+    ? "clamp(40px, 5vw, 52px) clamp(16px, 2vw, 24px) clamp(16px, 2vw, 24px)"
+    : "clamp(16px, 2vw, 24px)";
 
   useEffect(() => {
     const checkMobile = () => {
@@ -217,54 +225,57 @@ export default function NavSidebar() {
   const sidebarContent = (
     <>
       {/* Logo Section */}
-      <div style={{ display: "flex", alignItems: "flex-start", gap: "12px", marginBottom: "24px", padding: "0 8px", flexShrink: 0 }}>
-        <div
-          style={{
-            width: "clamp(40px, 5vw, 44px)",
-            height: "clamp(40px, 5vw, 44px)",
-            borderRadius: "var(--radius-md)",
-            background: "linear-gradient(135deg, var(--color-primary), var(--color-secondary))",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            boxShadow: showcaseMode
-              ? "0 6px 24px rgba(188, 164, 227, 0.5), 0 0 40px rgba(188, 164, 227, 0.15)"
-              : "0 4px 16px rgba(188, 164, 227, 0.35)",
-            flexShrink: 0,
-            ...(showcaseMode ? { animation: "breathe 4s ease-in-out infinite" } : {}),
-          }}
-        >
-          <Zap className="w-6 h-6 text-white" aria-hidden />
-        </div>
+      <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "24px", padding: "0 8px 4px", flexShrink: 0 }}>
+        <BrandMark size="clamp(44px, 5vw, 52px)" isDark={isDark} showcase={showcaseMode} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
             style={{
               fontFamily: "'M PLUS Rounded 1c', sans-serif",
               fontSize: "clamp(1.25rem, 2vw, 1.5rem)",
-              fontWeight: 700,
-              background: "linear-gradient(135deg, var(--color-primary-dark), var(--color-secondary))",
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+              background: "linear-gradient(135deg, var(--color-primary-dark) 0%, var(--color-secondary) 56%, #B58FE6 100%)",
               WebkitBackgroundClip: "text",
               WebkitTextFillColor: "transparent",
               backgroundClip: "text",
+              filter: "drop-shadow(0 8px 18px rgba(188, 164, 227, 0.18))",
             }}
           >
             ABO
           </div>
-          <div style={{ display: "flex", alignItems: "baseline", gap: "4px", lineHeight: 1.2 }}>
+          <div style={{
+            display: "grid",
+            gap: "1px",
+            marginTop: "1px",
+            lineHeight: 1.02,
+          }}>
             <span style={{
-              display: "inline-flex", gap: "4px",
+              fontSize: "0.625rem",
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
               background: "linear-gradient(135deg, #A78BFA, #818CF8)",
-              WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text",
+              WebkitBackgroundClip: "text",
+              WebkitTextFillColor: "transparent",
+              backgroundClip: "text",
+              opacity: 0.95,
             }}>
-              <span style={{ fontSize: "0.6875rem", fontWeight: 600, letterSpacing: "0.08em" }}>Another</span>
-              <span style={{ fontSize: "0.6875rem", fontWeight: 700, letterSpacing: "0.04em" }}>Brain</span>
+              Another Brain
             </span>
             <span style={{
-              fontSize: "0.8125rem", fontWeight: 800, letterSpacing: "0.06em",
+              fontSize: "0.72rem",
+              fontWeight: 800,
+              letterSpacing: "0.16em",
+              textTransform: "uppercase",
               fontStyle: "italic",
               background: "linear-gradient(135deg, #6DD5FA, #FF6B9D, #C084FC)",
-              WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text",
-            }}>Odyssey</span>
+              WebkitBackgroundClip: "text",
+              WebkitTextFillColor: "transparent",
+              backgroundClip: "text",
+              filter: "drop-shadow(0 6px 12px rgba(192, 132, 252, 0.16))",
+            }}>
+              ODYSSEY
+            </span>
           </div>
         </div>
 
@@ -819,7 +830,7 @@ export default function NavSidebar() {
             background: "var(--bg-sidebar)",
             backdropFilter: "blur(24px) saturate(180%)",
             borderRight: showcaseMode ? "1px solid var(--border-medium)" : "1px solid var(--border-color)",
-            padding: "clamp(16px, 2vw, 24px)",
+            padding: desktopSidebarPadding,
             display: "flex",
             flexDirection: "column",
             overflow: "hidden",

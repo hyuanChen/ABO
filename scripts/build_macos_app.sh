@@ -29,6 +29,7 @@ cleanup() {
 trap cleanup EXIT
 
 cd "$ROOT"
+npm run brand:build
 npm run tauri:build
 
 if [[ ! -d "$APP_PATH" ]]; then

@@ -2,11 +2,13 @@
   "name": "tauri-app",
   "private": true,
   "version": "0.1.0",
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "brand:build": "bash scripts/build_brand_assets.sh",
     "tauri": "tauri",
     "tauri:fresh-dev": "bash scripts/tauri_fresh_dev.sh",
     "tauri:build": "tauri build --bundles app",
