@@ -1,5 +1,6 @@
 #[cfg(not(debug_assertions))]
 use std::{
+    fs,
     net::{SocketAddr, TcpStream},
     path::PathBuf,
     process::Command,
@@ -8,9 +9,9 @@ use std::{
     time::Duration,
 };
 
-use tauri::{RunEvent, WindowEvent};
 #[cfg(not(debug_assertions))]
 use tauri::{AppHandle, Manager};
+use tauri::{RunEvent, WindowEvent};
 #[cfg(not(debug_assertions))]
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
@@ -54,7 +55,11 @@ fn backend_is_reachable() -> bool {
 #[cfg(not(debug_assertions))]
 fn backend_listening_pids() -> Vec<u32> {
     let Ok(output) = Command::new("lsof")
-        .args(["-ti", &format!("TCP:{BUNDLED_BACKEND_PORT}"), "-sTCP:LISTEN"])
+        .args([
+            "-ti",
+            &format!("TCP:{BUNDLED_BACKEND_PORT}"),
+            "-sTCP:LISTEN",
+        ])
         .output()
     else {
         return Vec::new();
@@ -97,12 +102,18 @@ fn stop_stale_bundled_backends() {
 
         for _ in 0..20 {
             thread::sleep(Duration::from_millis(100));
-            if !backend_listening_pids().into_iter().any(|active_pid| active_pid == pid) {
+            if !backend_listening_pids()
+                .into_iter()
+                .any(|active_pid| active_pid == pid)
+            {
                 break;
             }
         }
 
-        if backend_listening_pids().into_iter().any(|active_pid| active_pid == pid) {
+        if backend_listening_pids()
+            .into_iter()
+            .any(|active_pid| active_pid == pid)
+        {
             let _ = Command::new("kill")
                 .args(["-KILL", &pid.to_string()])
                 .status();
@@ -155,6 +166,12 @@ fn launch_backend(app: &AppHandle) -> Result<(), String> {
         .env("ABO_DISABLE_LEGACY_MIGRATION", "1");
 
     let app_data_dir = bundled_app_data_dir(app)?;
+    fs::create_dir_all(&app_data_dir).map_err(|err| {
+        format!(
+            "failed to create bundled app data dir {:?}: {err}",
+            app_data_dir
+        )
+    })?;
     command = command.env("ABO_APP_DATA_DIR", app_data_dir);
 
     let (mut rx, child) = command
@@ -191,15 +208,10 @@ fn launch_backend(app: &AppHandle) -> Result<(), String> {
         }
     });
 
-    for _ in 0..50 {
-        if backend_is_reachable() {
-            println!("[backend] Backend sidecar is ready");
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
-
-    Err(format!("backend sidecar did not open port {BUNDLED_BACKEND_PORT} in time"))
+    println!(
+        "[backend] Spawned backend sidecar; frontend will wait for 127.0.0.1:{BUNDLED_BACKEND_PORT}"
+    );
+    Ok(())
 }
 
 #[cfg(not(debug_assertions))]

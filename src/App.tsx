@@ -52,6 +52,8 @@ export default function App() {
   const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [bootError, setBootError] = useState("");
+  const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  const bootTimeoutMs = isTauriRuntime ? 60_000 : 20_000;
 
   // Sync showcase class on mount and changes
   useEffect(() => {
@@ -64,7 +66,7 @@ export default function App() {
     const loadAppConfig = async () => {
       try {
         setBootError("");
-        await api.waitForReady();
+        await api.waitForReady({ timeoutMs: bootTimeoutMs });
         const config = await api.get<AppConfig>("/api/config");
         setConfig(config);
         setAiProvider(
@@ -92,7 +94,7 @@ export default function App() {
     return () => {
       window.removeEventListener("abo:onboarding-status-updated", handleOnboardingConfigChange);
     };
-  }, [setAiProvider, setConfig]);
+  }, [bootTimeoutMs, setAiProvider, setConfig]);
 
   // Load modules on app start so FeedSidebar shows all modules
   useEffect(() => {
@@ -329,8 +331,6 @@ export default function App() {
 
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
     if (isTauriRuntime) {
       void getCurrentWindow()
         .onCloseRequested(() => {
@@ -400,6 +400,20 @@ export default function App() {
             }}
           />
           <p style={{ fontSize: "0.9375rem", color: "var(--text-muted)" }}>加载中...</p>
+          {isTauriRuntime ? (
+            <p
+              style={{
+                margin: 0,
+                maxWidth: "320px",
+                textAlign: "center",
+                fontSize: "0.84rem",
+                lineHeight: 1.6,
+                color: "var(--text-secondary)",
+              }}
+            >
+              正在启动本地后端。打包版冷启动可能需要 20 到 40 秒。
+            </p>
+          ) : null}
         </div>
         <style>{`
           @keyframes spin {
@@ -441,7 +455,7 @@ export default function App() {
         >
           <h1 style={{ margin: 0, fontSize: "1.3rem", color: "var(--text-main)" }}>ABO 启动失败</h1>
           <p style={{ margin: 0, fontSize: "0.92rem", lineHeight: 1.7, color: "var(--text-secondary)" }}>
-            桌面壳已经打开，但本地后端服务还没准备好。打包版现在会自动拉起后端；如果这里仍然报错，通常是后端 sidecar 丢失或 macOS 拦截了执行。
+            桌面壳已经打开，但本地后端服务还没准备好。打包版冷启动会先解包并拉起后端；如果等待 1 分钟后仍然报错，再优先检查 sidecar 是否缺失或被 macOS 拦截执行。
           </p>
           <code
             style={{
