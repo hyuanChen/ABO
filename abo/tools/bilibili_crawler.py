@@ -119,6 +119,16 @@ def _format_ts(value: Any) -> str:
         return ""
 
 
+def _parse_iso_ts(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except Exception:
+        return 0.0
+
+
 def _parse_date_ts(value: str | None) -> int | None:
     if not value:
         return None
@@ -697,6 +707,63 @@ def _favorite_folder_media_count(folder: dict) -> int:
     return int(folder.get("media_count") or folder.get("count") or 0)
 
 
+def _pick_folder_preview_candidate(folder_state: dict[str, Any] | None) -> dict[str, Any]:
+    items = (folder_state or {}).get("items") or {}
+    if not isinstance(items, dict) or not items:
+        return {}
+
+    def sort_key(item: dict[str, Any]) -> tuple[float, float]:
+        return (
+            float(_parse_int(item.get("fav_time_ts")) or 0),
+            _parse_iso_ts(item.get("crawled_at")),
+        )
+
+    candidates = [item for item in items.values() if isinstance(item, dict)]
+    if not candidates:
+        return {}
+    return max(candidates, key=sort_key)
+
+
+async def _resolve_folder_preview_from_state(
+    client: httpx.AsyncClient,
+    *,
+    folder_state: dict[str, Any] | None,
+    cookie_header: str,
+) -> dict[str, str]:
+    candidate = _pick_folder_preview_candidate(folder_state)
+    if not candidate:
+        return {"cover": "", "title": "", "bvid": ""}
+
+    cover = _normalize_image_url(candidate.get("cover"))
+    title = str(candidate.get("title") or "").strip()
+    bvid = extract_bvid(candidate.get("bvid") or candidate.get("url") or "")
+    url = str(candidate.get("url") or "").strip() or (f"https://www.bilibili.com/video/{bvid}" if bvid else "")
+
+    if cover:
+        return {"cover": cover, "title": title, "bvid": bvid}
+
+    if not bvid:
+        return {"cover": "", "title": title, "bvid": ""}
+
+    metadata = await fetch_bilibili_video_metadata(
+        client,
+        bvid=bvid,
+        headers=_headers(cookie_header, url or "https://www.bilibili.com/"),
+        referer=url or f"https://www.bilibili.com/video/{bvid}",
+    )
+    resolved_cover = _normalize_image_url(metadata.get("cover"))
+    resolved_title = str(metadata.get("title") or "").strip() or title
+    if resolved_cover:
+        candidate["cover"] = resolved_cover
+    if resolved_title and not candidate.get("title"):
+        candidate["title"] = resolved_title
+    return {
+        "cover": resolved_cover,
+        "title": resolved_title,
+        "bvid": bvid,
+    }
+
+
 async def _fetch_favorite_resource_page(
     client: httpx.AsyncClient,
     *,
@@ -745,6 +812,7 @@ async def fetch_favorite_folder_previews(
     state = _load_favorite_state()
     folder_state = state.get("folders") or {}
     previews: list[dict] = []
+    state_changed = False
 
     if progress_callback:
         progress_callback(
@@ -811,19 +879,39 @@ async def fetch_favorite_folder_previews(
 
             crawled = folder_state.get(folder_id, {})
             crawled_items = crawled.get("items") or {}
+            preview_cover = _normalize_image_url(media.get("cover") or folder.get("cover"))
+            preview_title = str(media.get("title") or "").strip()
+            preview_bvid = str(media.get("bvid") or "").strip()
+            if not preview_cover or not preview_title:
+                fallback_preview = await _resolve_folder_preview_from_state(
+                    client,
+                    folder_state=crawled,
+                    cookie_header=cookie_header,
+                )
+                if not preview_cover:
+                    preview_cover = fallback_preview.get("cover") or preview_cover
+                if not preview_title:
+                    preview_title = fallback_preview.get("title") or preview_title
+                if not preview_bvid:
+                    preview_bvid = fallback_preview.get("bvid") or preview_bvid
+                if fallback_preview.get("cover"):
+                    state_changed = True
             previews.append(
                 {
                     "id": folder_id,
                     "title": folder.get("title") or folder.get("name") or f"folder-{folder_id}",
                     "media_count": folder.get("media_count") or folder.get("count") or 0,
-                    "cover": _normalize_image_url(media.get("cover") or folder.get("cover")),
-                    "first_video_title": media.get("title") or "",
-                    "first_video_bvid": media.get("bvid") or "",
+                    "cover": preview_cover,
+                    "first_video_title": preview_title,
+                    "first_video_bvid": preview_bvid,
                     "crawled_count": len(crawled_items),
                     "last_crawled_at": crawled.get("last_crawled_at") or "",
                     "source_type": "favorite",
                 }
             )
+
+    if state_changed:
+        _save_favorite_state(state)
 
     return previews
 
@@ -1155,6 +1243,8 @@ async def crawl_selected_favorites_to_vault(
             "title": note.title,
             "url": note.url,
             "bvid": note.bvid,
+            "cover": _normalize_image_url(note.images[0] if note.images else ""),
+            "fav_time_ts": _parse_int(note.metadata.get("fav_time_ts")) or 0,
             "crawled_at": now,
         }
     for note in [item for item in notes if item.source_type == "watch_later"]:

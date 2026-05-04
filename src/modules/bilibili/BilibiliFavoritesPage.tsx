@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
-import { Check, Cookie, FolderHeart, ImageOff, RefreshCw, RotateCcw, Save, Tv, Users } from "lucide-react";
+import { Check, Cookie, FolderHeart, RefreshCw, RotateCcw, Save, Tv, Users } from "lucide-react";
 import { PageContainer, PageHeader, PageContent, Card, EmptyState, LoadingState } from "../../components/Layout";
 import { useToast } from "../../components/Toast";
 import { buildImageProxyUrl } from "../../core/api";
@@ -871,12 +871,28 @@ function FavoriteFolderTile({
             style={{
               height: "100%",
               display: "flex",
+              flexDirection: "column",
               alignItems: "center",
               justifyContent: "center",
-              color: "var(--text-muted)",
+              gap: "8px",
+              padding: "16px",
+              color: "rgba(255, 255, 255, 0.92)",
+              background:
+                folder.source_type === "watch_later"
+                  ? "linear-gradient(135deg, #3B82F6, #1D4ED8)"
+                  : "linear-gradient(135deg, #FB7299, #C93D72)",
+              textAlign: "center",
             }}
           >
-            <ImageOff size={28} />
+            {folder.source_type === "watch_later" ? <Tv size={28} /> : <FolderHeart size={28} />}
+            <div style={{ fontSize: "0.8125rem", fontWeight: 700 }}>
+              {folder.source_type === "watch_later" ? "稍后再看预览" : "收藏夹封面暂不可用"}
+            </div>
+            <div style={{ fontSize: "0.75rem", opacity: 0.86, lineHeight: 1.5 }}>
+              {folder.crawled_count > 0
+                ? "已回退到本地收藏信息，可先执行一次全量爬取继续补齐。"
+                : "B站当前拦截了这类封面预览请求，先读取列表后可继续入库。"}
+            </div>
           </div>
         )}
         <div
