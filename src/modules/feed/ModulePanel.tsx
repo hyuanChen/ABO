@@ -93,7 +93,7 @@ export default function ModulePanel() {
             <button
               onClick={() => alert(
                 "在终端运行你的 Agent CLI，告诉它：\n\n" +
-                "「帮我写一个 ABO 模块，放在 ~/Library/Application Support/ABO/modules/ 目录下」\n\n" +
+                "「帮我写一个 ABO 模块，放在当前 ABO 数据目录的 modules/ 目录下」\n\n" +
                 "ABO 会自动检测并加载新模块。"
               )}
               style={{

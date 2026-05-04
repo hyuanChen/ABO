@@ -800,7 +800,7 @@ def _write_sdk_readme():
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "# ABO Module SDK\n\n"
-        "ABO 自动发现 `~/Library/Application Support/ABO/modules/<name>/__init__.py` 中的模块。\n"
+        "ABO 自动发现当前应用数据目录 `modules/<name>/__init__.py` 中的模块。\n"
         "保存后立即热加载，无需重启。\n\n"
         "## 最小可用模块\n\n"
         "```python\n"

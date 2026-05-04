@@ -19,7 +19,7 @@ bash scripts/xhs/open_browser_with_extension.sh
 - 启动 Edge 或 Chrome
 - 自动加载 `/Users/huanc/Desktop/ABO/extension`
 - 打开 CDP 端口 `9222`
-- 使用持久 profile `~/Library/Application Support/ABO/xhs-browser-profile`
+- 使用持久 profile `~/Library/Application Support/ABO Dev/xhs-browser-profile`
 
 首次使用请在这个浏览器实例里登录小红书。
 
@@ -27,7 +27,7 @@ bash scripts/xhs/open_browser_with_extension.sh
 
 ```bash
 ABO_XHS_WINDOW_MODE=dedicated \
-ABO_XHS_PROFILE_DIR="$HOME/Library/Application Support/ABO/xhs-dedicated-browser-profile" \
+ABO_XHS_PROFILE_DIR="$HOME/Library/Application Support/ABO Dev/xhs-dedicated-browser-profile" \
 ABO_XHS_CDP_PORT=9223 \
 bash scripts/xhs/open_browser_with_extension.sh
 ```

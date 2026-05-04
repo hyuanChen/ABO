@@ -72,7 +72,9 @@ crontab -e
 
 ## 配置
 
-脚本自动读取 `~/Library/Application Support/ABO/config.json` 中的配置:
+脚本自动读取当前 ABO 数据目录里的 `config.json`:
+- 本地开发默认是 `~/Library/Application Support/ABO Dev/config.json`
+- 打包 release app 会使用独立的 `~/Library/Application Support/ABO App/config.json`
 - `literature_path`: 文献库主文件夹
 - `vault_path`: 如果未配置文献库，则使用 `Vault/Literature`
 

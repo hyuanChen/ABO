@@ -2,7 +2,8 @@
 
 这些脚本复用 ABO 后端的 `abo.tools.bilibili_crawler`，默认保存到情报库的 `bilibili/` 文件夹。
 
-默认情报库来自 `~/Library/Application Support/ABO/config.json` 的 `vault_path`。
+默认情报库来自当前 ABO 数据目录下 `config.json` 的 `vault_path`。
+本地开发默认目录是 `~/Library/Application Support/ABO Dev/`；打包 release app 会使用独立的 `~/Library/Application Support/ABO App/`。
 
 ## 准备浏览器 Cookie
 

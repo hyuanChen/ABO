@@ -7,11 +7,13 @@ import shutil
 import sys
 from pathlib import Path
 
-APP_NAME = "ABO"
+DEFAULT_APP_DIRNAME = "ABO Dev"
+RELEASE_APP_DIRNAME = "ABO App"
 _APP_DATA_ENV_KEYS = ("ABO_APP_DATA_DIR", "ABO_DATA_DIR")
 _DISABLE_LEGACY_MIGRATION_ENV = "ABO_DISABLE_LEGACY_MIGRATION"
 _LEGACY_APP_DIRNAME = ".abo"
 _LEGACY_CONFIG_FILENAME = ".abo-config.json"
+_LEGACY_APP_SUPPORT_DIRNAMES = ("ABO", "com.huanc.abo")
 
 
 def _legacy_migration_enabled() -> bool:
@@ -27,16 +29,66 @@ def get_legacy_config_path() -> Path:
     return Path.home() / _LEGACY_CONFIG_FILENAME
 
 
+def _platform_app_storage_root(app_dirname: str) -> Path:
+    home = Path.home()
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / app_dirname
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "").strip()
+        if appdata:
+            return Path(appdata) / app_dirname
+        return home / "AppData" / "Roaming" / app_dirname
+
+    xdg_data_home = os.environ.get("XDG_DATA_HOME", "").strip()
+    if xdg_data_home:
+        return Path(xdg_data_home) / app_dirname
+    return home / ".local" / "share" / app_dirname
+
+
+def get_default_dev_app_storage_root() -> Path:
+    return _platform_app_storage_root(DEFAULT_APP_DIRNAME)
+
+
+def get_default_release_app_storage_root() -> Path:
+    return _platform_app_storage_root(RELEASE_APP_DIRNAME)
+
+
+def _iter_legacy_root_candidates(target: Path) -> list[Path]:
+    candidates: list[Path] = []
+    if sys.platform == "darwin":
+        candidates.extend(
+            _platform_app_storage_root(dirname)
+            for dirname in _LEGACY_APP_SUPPORT_DIRNAMES
+        )
+    candidates.append(get_legacy_abo_dir())
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except FileNotFoundError:
+            resolved = candidate.expanduser()
+        if resolved == target.resolve():
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(candidate)
+    return unique
+
+
 def _copy_legacy_root_if_needed(target: Path) -> None:
     if not _legacy_migration_enabled():
         return
-    legacy = get_legacy_abo_dir()
-    if target.exists() or not legacy.exists():
+    if target.exists():
         return
-    if legacy.resolve() == target.resolve():
+    for legacy in _iter_legacy_root_candidates(target):
+        if not legacy.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(legacy, target)
         return
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(legacy, target)
 
 
 def _copy_file_if_needed(target: Path, legacy: Path) -> None:
@@ -61,6 +113,38 @@ def _copy_dir_if_needed(target: Path, legacy: Path) -> None:
     shutil.copytree(legacy, target)
 
 
+def _legacy_path_candidates(
+    relative_path: str,
+    *,
+    target: Path,
+    legacy_relative: str | None = None,
+    legacy_path: Path | None = None,
+) -> list[Path]:
+    candidates: list[Path] = []
+    if legacy_path is not None:
+        candidates.append(legacy_path)
+    elif legacy_relative:
+        candidates.append(get_legacy_abo_dir() / legacy_relative)
+
+    for legacy_root in _iter_legacy_root_candidates(target):
+        candidates.append(legacy_root / relative_path)
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except FileNotFoundError:
+            resolved = candidate.expanduser()
+        if resolved == target.resolve():
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(candidate)
+    return unique
+
+
 def get_app_storage_root() -> Path:
     for env_key in _APP_DATA_ENV_KEYS:
         override = os.environ.get(env_key, "").strip()
@@ -69,22 +153,7 @@ def get_app_storage_root() -> Path:
             target.mkdir(parents=True, exist_ok=True)
             return target
 
-    home = Path.home()
-    if sys.platform == "darwin":
-        target = home / "Library" / "Application Support" / APP_NAME
-    elif sys.platform == "win32":
-        appdata = os.environ.get("APPDATA", "").strip()
-        if appdata:
-            target = Path(appdata) / APP_NAME
-        else:
-            target = home / "AppData" / "Roaming" / APP_NAME
-    else:
-        xdg_data_home = os.environ.get("XDG_DATA_HOME", "").strip()
-        if xdg_data_home:
-            target = Path(xdg_data_home) / APP_NAME
-        else:
-            target = home / ".local" / "share" / APP_NAME
-
+    target = get_default_dev_app_storage_root()
     _copy_legacy_root_if_needed(target)
     target.mkdir(parents=True, exist_ok=True)
     return target
@@ -97,11 +166,15 @@ def resolve_app_file(
     legacy_path: Path | None = None,
 ) -> Path:
     target = get_app_storage_root() / relative_path
-    legacy = legacy_path
-    if legacy is None and legacy_relative:
-        legacy = get_legacy_abo_dir() / legacy_relative
-    if legacy is not None:
+    for legacy in _legacy_path_candidates(
+        relative_path,
+        target=target,
+        legacy_relative=legacy_relative,
+        legacy_path=legacy_path,
+    ):
         _copy_file_if_needed(target, legacy)
+        if target.exists():
+            break
     target.parent.mkdir(parents=True, exist_ok=True)
     return target
 
@@ -113,11 +186,15 @@ def resolve_app_dir(
     legacy_path: Path | None = None,
 ) -> Path:
     target = get_app_storage_root() / relative_path
-    legacy = legacy_path
-    if legacy is None and legacy_relative:
-        legacy = get_legacy_abo_dir() / legacy_relative
-    if legacy is not None:
+    for legacy in _legacy_path_candidates(
+        relative_path,
+        target=target,
+        legacy_relative=legacy_relative,
+        legacy_path=legacy_path,
+    ):
         _copy_dir_if_needed(target, legacy)
+        if target.exists():
+            break
     target.mkdir(parents=True, exist_ok=True)
     return target
 

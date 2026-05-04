@@ -16,6 +16,23 @@ ROOT = Path(__file__).resolve().parents[1]
 BACKEND_PORT = 8765
 
 
+def _default_dev_app_data_dir() -> str:
+    home = Path.home()
+    if sys.platform == "darwin":
+        return str(home / "Library" / "Application Support" / "ABO Dev")
+
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "").strip()
+        if appdata:
+            return str(Path(appdata) / "ABO Dev")
+        return str(home / "AppData" / "Roaming" / "ABO Dev")
+
+    xdg_data_home = os.environ.get("XDG_DATA_HOME", "").strip()
+    if xdg_data_home:
+        return str(Path(xdg_data_home) / "ABO Dev")
+    return str(home / ".local" / "share" / "ABO Dev")
+
+
 def _port_is_open(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.2)
@@ -87,7 +104,15 @@ def _terminate(proc: subprocess.Popen[object] | None) -> None:
 def main() -> int:
     _stop_stale_backend()
 
-    backend = subprocess.Popen([sys.executable, "-m", "abo.main"], cwd=ROOT)
+    dev_app_data_dir = _default_dev_app_data_dir()
+    backend_env = os.environ.copy()
+    backend_env["ABO_APP_DATA_DIR"] = dev_app_data_dir
+
+    backend = subprocess.Popen(
+        [sys.executable, "-m", "abo.main"],
+        cwd=ROOT,
+        env=backend_env,
+    )
     frontend = subprocess.Popen(["npm", "run", "dev"], cwd=ROOT)
     children = [backend, frontend]
 
