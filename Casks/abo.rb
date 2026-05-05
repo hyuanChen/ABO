@@ -1,6 +1,6 @@
 cask "abo" do
   version "0.1.0"
-  sha256 "2bdd499818562feea18b175cb09424825648118e16340eb82c6fac9528030222"
+  sha256 "d2ca5971806e84c9e06ed29079115cebc41a2e3e4713c0fe5ca67c3ba9869801"
 
   url "https://github.com/hyuanChen/ABO/releases/download/v#{version}/ABO_#{version}_aarch64.dmg"
   name "ABO"

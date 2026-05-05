@@ -10,6 +10,13 @@ RELEASE_DIR="$ROOT/release"
 mkdir -p "$DMG_DIR"
 mkdir -p "$RELEASE_DIR"
 
+sign_app_bundle() {
+  local app_path="$1"
+  xattr -cr "$app_path"
+  codesign --force --deep --sign - "$app_path"
+  codesign --verify --deep --strict --verbose=2 "$app_path"
+}
+
 VERSION="$(python3 - <<'PY'
 import json
 from pathlib import Path
@@ -37,9 +44,12 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 1
 fi
 
+sign_app_bundle "$APP_PATH"
+
 rm -f "$DMG_PATH"
 rm -rf "$STAGING_DIR/$APP_NAME" "$STAGING_DIR/Applications"
-cp -R "$APP_PATH" "$STAGING_DIR/"
+ditto "$APP_PATH" "$STAGING_DIR/$APP_NAME"
+sign_app_bundle "$STAGING_DIR/$APP_NAME"
 ln -s /Applications "$STAGING_DIR/Applications"
 
 hdiutil create \
@@ -50,8 +60,10 @@ hdiutil create \
   "$DMG_PATH"
 
 rm -rf "$RELEASE_DIR/$APP_NAME"
-cp -R "$APP_PATH" "$RELEASE_DIR/"
-cp -f "$DMG_PATH" "$RELEASE_DIR/"
+rm -f "$RELEASE_DIR/${APP_NAME%.app}.dmg"
+ditto "$APP_PATH" "$RELEASE_DIR/$APP_NAME"
+sign_app_bundle "$RELEASE_DIR/$APP_NAME"
+cp -f "$DMG_PATH" "$RELEASE_DIR/$DMG_NAME"
 
 echo "App bundle: $APP_PATH"
 echo "DMG: $DMG_PATH"
