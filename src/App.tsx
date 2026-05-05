@@ -19,6 +19,27 @@ const FEED_SYNC_LIMIT = 500;
 const FEED_IDLE_SYNC_INTERVAL_MS = 12000;
 const FEED_ACTIVE_SYNC_INTERVAL_MS = 3500;
 const FEED_ACTIVE_SYNC_BOOST_MS = 30000;
+const LOADING_MEME_ROTATE_MS = 3200;
+
+type LoadingMeme = {
+  label: string;
+  src: string;
+};
+
+const loadingMemeModules = import.meta.glob(
+  ["../docs/meme/*.{png,jpg,jpeg,webp,avif}", "!../docs/meme/16x.png"],
+  {
+    eager: true,
+    import: "default",
+  },
+) as Record<string, string>;
+
+const LOADING_MEMES: LoadingMeme[] = Object.entries(loadingMemeModules)
+  .sort(([leftPath], [rightPath]) => leftPath.localeCompare(rightPath, "zh-Hans-CN"))
+  .map(([path, src]) => ({
+    label: path.split("/").pop()?.replace(/\.[^.]+$/, "") || "ABO",
+    src,
+  }));
 
 interface AppConfig {
   vault_path: string;
@@ -38,6 +59,292 @@ interface AppConfig {
   };
 }
 
+function AppLoadingScreen({
+  currentMeme,
+  isTauriRuntime,
+  memeIndex,
+}: {
+  currentMeme: LoadingMeme | null;
+  isTauriRuntime: boolean;
+  memeIndex: number;
+}) {
+  const memeLabel = currentMeme?.label === "base" ? "ABO 表情设定集" : currentMeme?.label || "ABO";
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        overflow: "hidden",
+        background: `
+          radial-gradient(circle at 16% 18%, rgba(122, 157, 184, 0.16), transparent 26%),
+          radial-gradient(circle at 86% 14%, rgba(250, 210, 132, 0.18), transparent 24%),
+          linear-gradient(180deg, color-mix(in srgb, var(--bg-app) 92%, #f7f0e3 8%) 0%, var(--bg-app) 100%)
+        `,
+      }}
+    >
+      <WindowDragHandle />
+      <div className="boot-orb boot-orb-left" />
+      <div className="boot-orb boot-orb-right" />
+      <div className="boot-shell">
+        <section className="boot-copy">
+          <div className="boot-kicker">ABO 正在启动</div>
+          <h1 className="boot-title">先把桌面壳打开，再把本地大脑叫醒。</h1>
+          <p className="boot-summary">
+            第一次启动可能需要 10-60s。之后再次打开通常会更快。
+          </p>
+          <div className="boot-status-card">
+            <div className="boot-spinner" aria-hidden />
+            <div style={{ display: "grid", gap: "6px" }}>
+              <strong className="boot-status-title">正在连接本地后端</strong>
+              <span className="boot-status-text">
+                {isTauriRuntime
+                  ? "打包版会自动拉起本地服务，启动完成后会直接进入工作台。"
+                  : "正在加载当前界面。"}
+              </span>
+            </div>
+          </div>
+          <div className="boot-meta-row">
+            <span className="boot-pill">{memeLabel}</span>
+            <span className="boot-count">
+              {String(memeIndex + 1).padStart(2, "0")} / {String(LOADING_MEMES.length).padStart(2, "0")}
+            </span>
+          </div>
+        </section>
+
+        <section className="boot-stage" aria-label="ABO 启动轮播">
+          <div className="boot-stage-frame">
+            {LOADING_MEMES.map((meme, index) => {
+              const active = index === memeIndex;
+              return (
+                <figure
+                  key={meme.label}
+                  className={`boot-slide${active ? " is-active" : ""}`}
+                  aria-hidden={!active}
+                >
+                  <img src={meme.src} alt={`ABO 启动图：${meme.label}`} />
+                </figure>
+              );
+            })}
+          </div>
+        </section>
+      </div>
+      <style>{`
+        .boot-shell {
+          position: relative;
+          z-index: 1;
+          width: min(1080px, calc(100vw - 32px));
+          display: grid;
+          grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+          gap: clamp(20px, 4vw, 44px);
+          align-items: center;
+        }
+
+        .boot-copy {
+          display: grid;
+          gap: clamp(16px, 2vw, 24px);
+          align-content: center;
+        }
+
+        .boot-kicker {
+          width: fit-content;
+          padding: 7px 12px;
+          border-radius: 999px;
+          background: rgba(122, 157, 184, 0.14);
+          border: 1px solid rgba(122, 157, 184, 0.2);
+          color: color-mix(in srgb, var(--text-main) 72%, #6d8faa 28%);
+          font-size: 0.76rem;
+          font-weight: 700;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+        }
+
+        .boot-title {
+          margin: 0;
+          max-width: 10ch;
+          font-size: clamp(2rem, 4.8vw, 3.6rem);
+          line-height: 0.94;
+          letter-spacing: -0.04em;
+          color: var(--text-main);
+        }
+
+        .boot-summary {
+          margin: 0;
+          max-width: 30ch;
+          font-size: clamp(0.98rem, 1.7vw, 1.08rem);
+          line-height: 1.75;
+          color: var(--text-secondary);
+        }
+
+        .boot-status-card {
+          display: grid;
+          grid-template-columns: auto 1fr;
+          gap: 14px;
+          align-items: center;
+          padding: 16px 18px;
+          border-radius: 22px;
+          background: rgba(255, 250, 241, 0.72);
+          border: 1px solid rgba(122, 157, 184, 0.14);
+          box-shadow: 0 18px 36px rgba(81, 68, 56, 0.08);
+          backdrop-filter: blur(12px);
+        }
+
+        .boot-spinner {
+          width: 42px;
+          height: 42px;
+          border-radius: 50%;
+          border: 3px solid rgba(122, 157, 184, 0.18);
+          border-top-color: var(--color-primary);
+          animation: boot-spin 1s linear infinite;
+        }
+
+        .boot-status-title {
+          font-size: 0.95rem;
+          color: var(--text-main);
+        }
+
+        .boot-status-text {
+          color: var(--text-secondary);
+          font-size: 0.84rem;
+          line-height: 1.6;
+        }
+
+        .boot-meta-row {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
+        .boot-pill,
+        .boot-count {
+          display: inline-flex;
+          align-items: center;
+          min-height: 34px;
+          padding: 0 14px;
+          border-radius: 999px;
+          background: rgba(255, 250, 241, 0.72);
+          border: 1px solid rgba(122, 157, 184, 0.14);
+          color: var(--text-secondary);
+          font-size: 0.82rem;
+          font-weight: 700;
+          box-shadow: 0 14px 28px rgba(81, 68, 56, 0.06);
+        }
+
+        .boot-stage {
+          min-width: 0;
+        }
+
+        .boot-stage-frame {
+          position: relative;
+          overflow: hidden;
+          width: 100%;
+          aspect-ratio: 1 / 1;
+          border-radius: clamp(26px, 4vw, 36px);
+          background:
+            linear-gradient(180deg, rgba(255, 249, 239, 0.96) 0%, rgba(248, 240, 226, 0.98) 100%);
+          border: 1px solid rgba(122, 157, 184, 0.14);
+          box-shadow:
+            0 28px 60px rgba(81, 68, 56, 0.14),
+            inset 0 1px 0 rgba(255, 255, 255, 0.7);
+          isolation: isolate;
+        }
+
+        .boot-stage-frame::before {
+          content: "";
+          position: absolute;
+          inset: 0;
+          background:
+            radial-gradient(circle at 16% 12%, rgba(122, 157, 184, 0.16), transparent 24%),
+            radial-gradient(circle at 84% 18%, rgba(250, 210, 132, 0.18), transparent 22%);
+          pointer-events: none;
+        }
+
+        .boot-slide {
+          position: absolute;
+          inset: 0;
+          margin: 0;
+          opacity: 0;
+          transform: scale(1.06);
+          transition:
+            opacity 680ms ease,
+            transform ${LOADING_MEME_ROTATE_MS}ms cubic-bezier(0.22, 1, 0.36, 1);
+        }
+
+        .boot-slide.is-active {
+          opacity: 1;
+          transform: scale(1);
+        }
+
+        .boot-slide img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          object-position: center;
+          display: block;
+        }
+
+        .boot-orb {
+          position: absolute;
+          width: clamp(220px, 28vw, 360px);
+          aspect-ratio: 1 / 1;
+          border-radius: 50%;
+          pointer-events: none;
+          filter: blur(12px);
+          opacity: 0.42;
+        }
+
+        .boot-orb-left {
+          top: -8%;
+          left: -8%;
+          background: radial-gradient(circle, rgba(122, 157, 184, 0.34), transparent 70%);
+        }
+
+        .boot-orb-right {
+          right: -8%;
+          bottom: -12%;
+          background: radial-gradient(circle, rgba(250, 210, 132, 0.34), transparent 70%);
+        }
+
+        @keyframes boot-spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 860px) {
+          .boot-shell {
+            width: min(720px, calc(100vw - 24px));
+            grid-template-columns: 1fr;
+            gap: 18px;
+          }
+
+          .boot-copy {
+            justify-items: center;
+            text-align: center;
+          }
+
+          .boot-title,
+          .boot-summary {
+            max-width: none;
+          }
+
+          .boot-status-card {
+            text-align: left;
+            width: min(100%, 520px);
+          }
+
+          .boot-meta-row {
+            justify-content: center;
+          }
+        }
+      `}</style>
+    </div>
+  );
+}
+
 export default function App() {
   const setConfig = useStore((s) => s.setConfig);
   const setAiProvider = useStore((s) => s.setAiProvider);
@@ -51,15 +358,31 @@ export default function App() {
   const activeTab = useStore((s) => s.activeTab);
   const [onboardingCompleted, setOnboardingCompleted] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadingMemeIndex, setLoadingMemeIndex] = useState(0);
   const [bootError, setBootError] = useState("");
   const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   const bootTimeoutMs = isTauriRuntime ? 60_000 : 20_000;
   const bootRetryIntervalMs = isTauriRuntime ? 250 : 150;
+  const currentLoadingMeme = LOADING_MEMES[loadingMemeIndex] ?? null;
 
   // Sync showcase class on mount and changes
   useEffect(() => {
     document.documentElement.classList.toggle("showcase", showcaseMode);
   }, [showcaseMode]);
+
+  useEffect(() => {
+    if (!isLoading || LOADING_MEMES.length <= 1) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setLoadingMemeIndex((current) => (current + 1) % LOADING_MEMES.length);
+    }, LOADING_MEME_ROTATE_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [isLoading]);
 
   // Check onboarding status on mount.
   // First-run users should see the wizard unless config explicitly marks it completed.
@@ -373,58 +696,11 @@ export default function App() {
   // Show loading state while checking onboarding status
   if (isLoading) {
     return (
-      <div
-        style={{
-          position: "fixed",
-          inset: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "var(--bg-app)",
-        }}
-      >
-        <WindowDragHandle />
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: "16px",
-          }}
-        >
-          <div
-            style={{
-              width: "48px",
-              height: "48px",
-              borderRadius: "50%",
-              border: "3px solid var(--border-light)",
-              borderTopColor: "var(--color-primary)",
-              animation: "spin 1s linear infinite",
-            }}
-          />
-          <p style={{ fontSize: "0.9375rem", color: "var(--text-muted)" }}>加载中...</p>
-          {isTauriRuntime ? (
-            <p
-              style={{
-                margin: 0,
-                maxWidth: "320px",
-                textAlign: "center",
-                fontSize: "0.84rem",
-                lineHeight: 1.6,
-                color: "var(--text-secondary)",
-              }}
-            >
-              正在连接本地后端。首次冷启动会稍慢；刚关闭后重开通常会更快。
-            </p>
-          ) : null}
-        </div>
-        <style>{`
-          @keyframes spin {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
-          }
-        `}</style>
-      </div>
+      <AppLoadingScreen
+        currentMeme={currentLoadingMeme}
+        isTauriRuntime={isTauriRuntime}
+        memeIndex={loadingMemeIndex}
+      />
     );
   }
 
