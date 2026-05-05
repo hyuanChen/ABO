@@ -7,6 +7,7 @@ APP_BUNDLE_DIR="$ROOT/src-tauri/target/release/bundle/macos"
 DMG_DIR="$ROOT/src-tauri/target/release/bundle/dmg"
 APP_PATH="$APP_BUNDLE_DIR/$APP_NAME"
 RELEASE_DIR="$ROOT/release"
+INSTALL_NOTE_NAME="请先拖到 Applications 后再打开.txt"
 mkdir -p "$DMG_DIR"
 mkdir -p "$RELEASE_DIR"
 
@@ -47,10 +48,19 @@ fi
 sign_app_bundle "$APP_PATH"
 
 rm -f "$DMG_PATH"
-rm -rf "$STAGING_DIR/$APP_NAME" "$STAGING_DIR/Applications"
+rm -rf "$STAGING_DIR/$APP_NAME" "$STAGING_DIR/Applications" "$STAGING_DIR/$INSTALL_NOTE_NAME"
 ditto "$APP_PATH" "$STAGING_DIR/$APP_NAME"
 sign_app_bundle "$STAGING_DIR/$APP_NAME"
 ln -s /Applications "$STAGING_DIR/Applications"
+cat > "$STAGING_DIR/$INSTALL_NOTE_NAME" <<'EOF'
+ABO 安装说明
+
+1. 先把 ABO.app 拖到 Applications
+2. 再从 Applications 里打开
+
+不要直接在 DMG 里双击运行。
+这样启动会更慢，也更容易触发 macOS 安全提示。
+EOF
 
 hdiutil create \
   -volname "ABO" \
