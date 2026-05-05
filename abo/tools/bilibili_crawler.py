@@ -699,6 +699,117 @@ def _favorite_folder_media_count(folder: dict) -> int:
     return int(folder.get("media_count") or folder.get("count") or 0)
 
 
+def _is_favorite_rate_limited(status_code: int, data: dict[str, Any]) -> bool:
+    return status_code == 412 or data.get("code") == -412
+
+
+def _favorite_resource_key(resource_id: Any, resource_type: Any) -> str:
+    return f"{resource_id}:{resource_type}"
+
+
+def _favorite_info_to_media(info: dict[str, Any], resource: dict[str, Any] | None = None) -> dict[str, Any]:
+    media = dict(info or {})
+    resource = resource or {}
+    if not media.get("id"):
+        media["id"] = resource.get("id")
+    if media.get("type") is None:
+        media["type"] = resource.get("type")
+    if not media.get("bvid"):
+        media["bvid"] = resource.get("bvid") or resource.get("bv_id") or ""
+    if not media.get("bv_id"):
+        media["bv_id"] = resource.get("bv_id") or resource.get("bvid") or media.get("bvid") or ""
+    if not isinstance(media.get("upper"), dict):
+        media["upper"] = {}
+    media.setdefault("intro", "")
+    media.setdefault("cnt_info", {})
+    media.setdefault("fav_time", 0)
+    return media
+
+
+async def _fetch_favorite_resource_ids(
+    client: httpx.AsyncClient,
+    *,
+    cookie_header: str,
+    folder_id: str,
+) -> list[dict[str, Any]]:
+    referer = f"https://www.bilibili.com/medialist/detail/ml{folder_id}"
+    resp = await client.get(
+        FAV_RESOURCE_IDS_API,
+        params={"media_id": folder_id, "platform": "web"},
+        headers=_headers(cookie_header, referer),
+    )
+    data = _safe_json_response(resp)
+    if resp.status_code != 200 or data.get("code") != 0:
+        raise RuntimeError(
+            f"收藏夹备用索引读取失败: folder={folder_id} http={resp.status_code} "
+            f"code={data.get('code')} {data.get('message')}"
+        )
+    resource_items = data.get("data") or []
+    if not isinstance(resource_items, list):
+        return []
+    return [item for item in resource_items if isinstance(item, dict)]
+
+
+async def _fetch_favorite_resource_infos_page(
+    client: httpx.AsyncClient,
+    *,
+    cookie_header: str,
+    mid: str,
+    folder_id: str,
+    page: int,
+    page_size: int,
+    cached_resources: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
+    resource_items = cached_resources
+    if resource_items is None:
+        resource_items = await _fetch_favorite_resource_ids(
+            client,
+            cookie_header=cookie_header,
+            folder_id=folder_id,
+        )
+    safe_page_size = max(1, min(FAV_RESOURCE_PAGE_SIZE_MAX, int(page_size or FAV_RESOURCE_PAGE_SIZE_MAX)))
+    start = max(0, (max(1, page) - 1) * safe_page_size)
+    page_resources = resource_items[start:start + safe_page_size]
+    if not page_resources:
+        return [], len(resource_items), resource_items
+
+    referer = f"https://www.bilibili.com/medialist/detail/ml{folder_id}"
+    resp = await client.get(
+        FAV_RESOURCE_INFOS_API,
+        params={
+            "resources": ",".join(
+                _favorite_resource_key(item.get("id"), item.get("type"))
+                for item in page_resources
+                if item.get("id") and item.get("type") is not None
+            ),
+            "platform": "web",
+            "folder_mid": mid,
+            "folder_id": folder_id,
+        },
+        headers=_headers(cookie_header, referer),
+    )
+    data = _safe_json_response(resp)
+    if resp.status_code != 200 or data.get("code") != 0:
+        raise RuntimeError(
+            f"收藏夹备用详情读取失败: folder={folder_id} http={resp.status_code} "
+            f"code={data.get('code')} {data.get('message')}"
+        )
+    infos = data.get("data") or []
+    info_map = {
+        _favorite_resource_key(item.get("id"), item.get("type")): item
+        for item in infos
+        if isinstance(item, dict)
+    }
+    medias = [
+        _favorite_info_to_media(
+            info_map.get(_favorite_resource_key(resource.get("id"), resource.get("type"))) or {},
+            resource,
+        )
+        for resource in page_resources
+    ]
+    return medias, len(resource_items), resource_items
+
+
 async def _fetch_favorite_preview_media(
     client: httpx.AsyncClient,
     *,
@@ -907,6 +1018,7 @@ async def fetch_favorite_items(
             max_pages = max(1, math.ceil(folder_total / FAV_RESOURCE_PAGE_SIZE_MAX) + 2) if folder_total else None
             page = 1
             stop_folder = False
+            fallback_resources: list[dict[str, Any]] | None = None
             while len([note for note in notes if note.metadata.get("folder_id") == str(folder.get("id") or "")]) < item_limit:
                 if max_pages and page > max_pages:
                     break
@@ -918,18 +1030,34 @@ async def fetch_favorite_items(
                     folder_id=folder_id,
                     page=page,
                     page_size=page_size,
-                    retries=3,
+                    retries=1,
                 )
+                using_fallback = False
                 if status_code != 200 or data.get("code") != 0:
-                    if status_code == 412 or data.get("code") == -412:
-                        raise RuntimeError("Bilibili 收藏夹接口暂时限制请求，请稍后重试")
-                    print(
-                        "[bilibili-crawler] favorite fetch failed "
-                        f"folder={folder_name} http={status_code} "
-                        f"code={data.get('code')} msg={data.get('message')}"
-                    )
-                    break
-                medias = ((data.get("data") or {}).get("medias") or [])
+                    if _is_favorite_rate_limited(status_code, data):
+                        medias, folder_total_from_fallback, fallback_resources = await _fetch_favorite_resource_infos_page(
+                            client,
+                            cookie_header=cookie_header,
+                            mid=mid,
+                            folder_id=folder_id,
+                            page=page,
+                            page_size=page_size,
+                            cached_resources=fallback_resources,
+                        )
+                        using_fallback = True
+                        if folder_total_from_fallback:
+                            folder_total = max(folder_total, folder_total_from_fallback)
+                            max_pages = max(1, math.ceil(folder_total_from_fallback / page_size) + 2)
+                        print(f"[bilibili-crawler] fallback favorite fetch via ids+infos folder={folder_name} page={page}")
+                    else:
+                        print(
+                            "[bilibili-crawler] favorite fetch failed "
+                            f"folder={folder_name} http={status_code} "
+                            f"code={data.get('code')} msg={data.get('message')}"
+                        )
+                        break
+                else:
+                    medias = ((data.get("data") or {}).get("medias") or [])
                 if not medias:
                     break
                 for media in medias:
@@ -946,9 +1074,11 @@ async def fetch_favorite_items(
                         break
                 if stop_folder:
                     break
+                if using_fallback and fallback_resources is not None and page * page_size >= len(fallback_resources):
+                    break
                 if folder_total and page * page_size >= folder_total:
                     break
-                if len(medias) < page_size and not folder_total:
+                if len(medias) < page_size and ((using_fallback and fallback_resources is not None) or not folder_total):
                     break
                 page += 1
 
@@ -1038,6 +1168,8 @@ async def crawl_selected_favorites_to_vault(
                 max_pages = max(1, math.ceil(folder_total / FAV_RESOURCE_PAGE_SIZE_MAX) + 2) if folder_total else None
                 page = 1
                 stop_folder = False
+                used_fallback = False
+                fallback_resources: list[dict[str, Any]] | None = None
                 folder_existing = existing_by_folder.setdefault(folder_id, set())
                 folder_seen_in_run: set[str] = set()
                 folder_state = state_folders.setdefault(folder_id, {"items": {}})
@@ -1074,18 +1206,48 @@ async def crawl_selected_favorites_to_vault(
                         folder_id=folder_id,
                         page=page,
                         page_size=page_size,
-                        retries=3,
+                        retries=1,
                     )
+                    using_fallback = False
                     if status_code != 200 or data.get("code") != 0:
-                        if status_code == 412 or data.get("code") == -412:
-                            raise RuntimeError("Bilibili 收藏夹接口暂时限制请求，请稍后重试")
-                        raise RuntimeError(
-                            f"收藏夹读取失败: {folder_name} http={status_code} code={data.get('code')} {data.get('message')}"
-                        )
-
-                    medias = ((data.get("data") or {}).get("medias") or [])
+                        if _is_favorite_rate_limited(status_code, data):
+                            if progress_callback:
+                                progress_callback(
+                                    {
+                                        "stage": f"收藏夹 {folder_index}/{len(folders)} 命中 412，切换备用读取",
+                                        "selected_folder_count": len(selected_ids),
+                                        "current_step": "favorites",
+                                        "current_folder": folder_name,
+                                        "current_page": page,
+                                        "fetched_count": fetched_count,
+                                        "saved_count": len(notes),
+                                        "skipped_count": skipped_count,
+                                    }
+                                )
+                            medias, folder_total_from_fallback, fallback_resources = await _fetch_favorite_resource_infos_page(
+                                client,
+                                cookie_header=cookie_header,
+                                mid=verify["mid"],
+                                folder_id=folder_id,
+                                page=page,
+                                page_size=page_size,
+                                cached_resources=fallback_resources,
+                            )
+                            used_fallback = True
+                            using_fallback = True
+                            if folder_total_from_fallback:
+                                folder_total = max(folder_total, folder_total_from_fallback)
+                                max_pages = max(1, math.ceil(folder_total_from_fallback / page_size) + 2)
+                            print(f"[bilibili-crawler] fallback favorite crawl via ids+infos folder={folder_name} page={page}")
+                        else:
+                            raise RuntimeError(
+                                f"收藏夹读取失败: {folder_name} http={status_code} code={data.get('code')} {data.get('message')}"
+                            )
+                    else:
+                        medias = ((data.get("data") or {}).get("medias") or [])
                     if not medias:
                         break
+                    page_new_count = 0
                     for media in medias:
                         fav_time = int(media.get("fav_time") or 0)
                         if fav_time > latest_seen_fav_time:
@@ -1104,6 +1266,7 @@ async def crawl_selected_favorites_to_vault(
                             skipped_count += 1
                             continue
                         notes.append(note)
+                        page_new_count += 1
                         folder_seen_in_run.add(note_key)
                         folder_existing.add(note_key)
                         folder_note_count = len([
@@ -1112,20 +1275,30 @@ async def crawl_selected_favorites_to_vault(
                         ])
                         if folder_note_count >= item_limit:
                             break
+                    if using_fallback and mode == "incremental" and page_new_count == 0:
+                        # resource/infos does not expose a reliable favorite timestamp, so once a
+                        # fallback page is fully known we stop the incremental scan conservatively.
+                        break
                     if stop_folder:
+                        break
+                    if using_fallback and fallback_resources is not None and page * page_size >= len(fallback_resources):
                         break
                     if folder_total and page * page_size >= folder_total:
                         break
-                    if len(medias) < page_size and not folder_total:
+                    if len(medias) < page_size and ((using_fallback and fallback_resources is not None) or not folder_total):
                         break
                     await asyncio.sleep(FAV_RESOURCE_REQUEST_DELAY)
                     page += 1
                 await asyncio.sleep(FAV_RESOURCE_REQUEST_DELAY)
-                if latest_seen_fav_time:
+                if used_fallback and mode == "full":
+                    # Fallback pages do not provide stable favorite times, so use the full-crawl
+                    # moment as the next incremental baseline.
+                    latest_seen_fav_time = max(latest_seen_fav_time, int(time.time()))
+                if latest_seen_fav_time and (mode == "full" or not used_fallback):
                     folder_state["title"] = folder_name
                     folder_state["latest_fav_time"] = latest_seen_fav_time
                     folder_state["latest_fav_at"] = _format_ts(latest_seen_fav_time)
-                    folder_state["last_checked_at"] = datetime.now().isoformat(timespec="seconds")
+                folder_state["last_checked_at"] = datetime.now().isoformat(timespec="seconds")
 
             await _enrich_video_notes(notes, client=client, cookie_header=cookie_header)
 
