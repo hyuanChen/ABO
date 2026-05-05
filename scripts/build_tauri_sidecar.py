@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 VENV_DIR = ROOT / ".venv-packaging"
 BUILD_ROOT = ROOT / "build-sidecar"
 ENTRYPOINT = ROOT / "scripts" / "packaging" / "abo_backend_entry.py"
-TAURI_BIN_DIR = ROOT / "src-tauri" / "binaries"
+TAURI_RESOURCE_DIR = ROOT / "src-tauri" / "resources" / "abo-backend"
+LEGACY_TAURI_BIN_DIR = ROOT / "src-tauri" / "binaries"
 BACKEND_NAME = "abo-backend"
 
 
@@ -46,26 +47,6 @@ def ensure_venv() -> None:
     run([sys.executable, "-m", "venv", str(VENV_DIR)])
 
 
-def host_triple() -> str:
-    try:
-        value = run(["rustc", "--print", "host-tuple"])
-        if value:
-            return value.splitlines()[-1].strip()
-    except subprocess.CalledProcessError:
-        pass
-
-    value = run(["rustc", "-Vv"])
-    for line in value.splitlines():
-        if line.startswith("host:"):
-            return line.split(":", 1)[1].strip()
-    raise RuntimeError("Failed to determine Rust target triple")
-
-
-def sidecar_filename(target: str) -> str:
-    extension = ".exe" if target.endswith("windows-msvc") or target.endswith("windows-gnu") else ""
-    return f"{BACKEND_NAME}-{target}{extension}"
-
-
 def relevant_sources() -> list[Path]:
     sources = [
         ROOT / "requirements.txt",
@@ -76,10 +57,16 @@ def relevant_sources() -> list[Path]:
     return sources
 
 
-def is_sidecar_current(output: Path) -> bool:
-    if not output.exists():
+def _dir_mtime(output_dir: Path) -> float:
+    mtimes = [path.stat().st_mtime for path in output_dir.rglob("*") if path.exists()]
+    mtimes.append(output_dir.stat().st_mtime)
+    return max(mtimes)
+
+
+def is_sidecar_current(output_dir: Path) -> bool:
+    if not output_dir.exists():
         return False
-    output_mtime = output.stat().st_mtime
+    output_mtime = _dir_mtime(output_dir)
     newest_source = max(path.stat().st_mtime for path in relevant_sources() if path.exists())
     return output_mtime >= newest_source
 
@@ -119,7 +106,7 @@ def build_sidecar() -> Path:
             "PyInstaller",
             "--noconfirm",
             "--clean",
-            "--onefile",
+            "--onedir",
             "--name",
             BACKEND_NAME,
             "--distpath",
@@ -147,33 +134,40 @@ def build_sidecar() -> Path:
         env=env,
     )
 
-    executable = dist_dir / (f"{BACKEND_NAME}.exe" if sys.platform == "win32" else BACKEND_NAME)
+    executable_name = f"{BACKEND_NAME}.exe" if sys.platform == "win32" else BACKEND_NAME
+    executable = dist_dir / BACKEND_NAME / executable_name
     if not executable.exists():
         raise FileNotFoundError(f"Built sidecar not found: {executable}")
-    return executable
+    return executable.parent
 
 
-def install_sidecar(executable: Path) -> Path:
-    target = host_triple()
-    TAURI_BIN_DIR.mkdir(parents=True, exist_ok=True)
-    output = TAURI_BIN_DIR / sidecar_filename(target)
-    shutil.copy2(executable, output)
-    output.chmod(0o755)
-    print(f"[sidecar-build] installed {output}")
-    return output
+def install_sidecar(bundle_dir: Path) -> Path:
+    if TAURI_RESOURCE_DIR.exists():
+        shutil.rmtree(TAURI_RESOURCE_DIR)
+    TAURI_RESOURCE_DIR.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(bundle_dir, TAURI_RESOURCE_DIR)
+
+    executable = TAURI_RESOURCE_DIR / (f"{BACKEND_NAME}.exe" if sys.platform == "win32" else BACKEND_NAME)
+    executable.chmod(0o755)
+
+    legacy_target = LEGACY_TAURI_BIN_DIR
+    if legacy_target.exists():
+        shutil.rmtree(legacy_target)
+
+    print(f"[sidecar-build] installed {TAURI_RESOURCE_DIR}")
+    return TAURI_RESOURCE_DIR
 
 
 def main() -> None:
-    target = host_triple()
-    output = TAURI_BIN_DIR / sidecar_filename(target)
+    output = TAURI_RESOURCE_DIR
     if is_sidecar_current(output):
         print(f"[sidecar-build] up to date: {output}")
         return
 
     ensure_venv()
     install_build_dependencies()
-    executable = build_sidecar()
-    install_sidecar(executable)
+    bundle_dir = build_sidecar()
+    install_sidecar(bundle_dir)
 
 
 if __name__ == "__main__":
