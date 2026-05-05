@@ -36,19 +36,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-async function waitForReady(options: WaitForReadyOptions = {}): Promise<void> {
+async function retryUntilAvailable<T>(
+  attempt: () => Promise<T>,
+  options: WaitForReadyOptions = {},
+): Promise<T> {
   const timeoutMs = options.timeoutMs ?? 20000;
-  const intervalMs = options.intervalMs ?? 400;
+  const intervalMs = options.intervalMs ?? 250;
   const deadline = Date.now() + timeoutMs;
   let lastError = "后端尚未启动";
 
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`${BASE}/api/health`);
-      if (res.ok) {
-        return;
-      }
-      lastError = `API ${res.status}`;
+      return await attempt();
     } catch (error) {
       lastError = error instanceof Error ? error.message : "后端连接失败";
     }
@@ -57,6 +56,19 @@ async function waitForReady(options: WaitForReadyOptions = {}): Promise<void> {
   }
 
   throw new Error(`等待后端启动超时：${lastError}`);
+}
+
+async function waitForReady(options: WaitForReadyOptions = {}): Promise<void> {
+  await retryUntilAvailable(async () => {
+    const res = await fetch(`${BASE}/api/health`);
+    if (!res.ok) {
+      throw new Error(`API ${res.status}`);
+    }
+  }, options);
+}
+
+async function waitForGet<T>(path: string, options: WaitForReadyOptions = {}): Promise<T> {
+  return retryUntilAvailable(() => request<T>(path), options);
 }
 
 export const api = {
@@ -73,4 +85,5 @@ export const api = {
       body: body ? JSON.stringify(body) : undefined,
     }),
   waitForReady,
+  waitForGet,
 };

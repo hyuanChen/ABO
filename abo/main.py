@@ -40,6 +40,13 @@ from .paper_tracking import normalize_followup_monitors, normalize_keyword_monit
 from .paper_paths import build_arxiv_grouped_relative_dir, sanitize_paper_title_for_path
 from .paper_cards import sanitize_feed_card_payload
 from .runtime.broadcaster import broadcaster
+from .runtime.bundled_idle import (
+    bundled_backend_websocket_connected,
+    bundled_backend_websocket_disconnected,
+    mark_bundled_backend_activity,
+    start_bundled_idle_watchdog,
+    stop_bundled_idle_watchdog,
+)
 from .runtime.discovery import ModuleRegistry, start_watcher
 from .runtime.feed_visibility import (
     is_card_temporarily_hidden,
@@ -838,6 +845,7 @@ def _write_sdk_readme():
 async def lifespan(app: FastAPI):
     global _scheduler, _activity_tracker, _summary_generator, _summary_scheduler
     vault_path = get_vault_path()
+    start_bundled_idle_watchdog()
     _registry.load_all()
     _state_store.apply_to_registry(_registry)
     _apply_intelligence_schedule_config(load_config().get("intelligence_delivery_time", _DEFAULT_INTELLIGENCE_DELIVERY_TIME))
@@ -857,6 +865,7 @@ async def lifespan(app: FastAPI):
         _scheduler.shutdown()
     if _summary_scheduler:
         _summary_scheduler.shutdown()
+    await stop_bundled_idle_watchdog()
 
 
 app = FastAPI(title="ABO Backend", version="1.0.0", lifespan=lifespan)
@@ -874,6 +883,12 @@ app.include_router(modules_router)
 app.include_router(assistant_router)
 app.include_router(insights_router)
 app.include_router(wiki_router)
+
+
+@app.middleware("http")
+async def record_bundled_release_activity(request, call_next):
+    mark_bundled_backend_activity()
+    return await call_next(request)
 
 
 # ── Health ───────────────────────────────────────────────────────
@@ -938,10 +953,12 @@ async def feed_ws(ws: WebSocket):
     print(f"[websocket] New connection from {ws.client}")
     await ws.accept()
     print(f"[websocket] Connection accepted")
+    bundled_backend_websocket_connected()
     broadcaster.register(ws)
     try:
         while True:
             msg = await ws.receive_text()
+            mark_bundled_backend_activity()
             clean_msg = str(msg or "").strip()
             if not clean_msg:
                 continue
@@ -971,6 +988,8 @@ async def feed_ws(ws: WebSocket):
     except Exception as e:
         print(f"[websocket] Connection closed with error: {e}")
         broadcaster.unregister(ws)
+    finally:
+        bundled_backend_websocket_disconnected()
 
 
 # ── Cards ────────────────────────────────────────────────────────

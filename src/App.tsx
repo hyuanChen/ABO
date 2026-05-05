@@ -54,6 +54,7 @@ export default function App() {
   const [bootError, setBootError] = useState("");
   const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   const bootTimeoutMs = isTauriRuntime ? 60_000 : 20_000;
+  const bootRetryIntervalMs = isTauriRuntime ? 250 : 150;
 
   // Sync showcase class on mount and changes
   useEffect(() => {
@@ -66,8 +67,10 @@ export default function App() {
     const loadAppConfig = async () => {
       try {
         setBootError("");
-        await api.waitForReady({ timeoutMs: bootTimeoutMs });
-        const config = await api.get<AppConfig>("/api/config");
+        const config = await api.waitForGet<AppConfig>("/api/config", {
+          timeoutMs: bootTimeoutMs,
+          intervalMs: bootRetryIntervalMs,
+        });
         setConfig(config);
         setAiProvider(
           config.ai_provider === "claude" && config.claude_code_compat_enabled
@@ -94,7 +97,7 @@ export default function App() {
     return () => {
       window.removeEventListener("abo:onboarding-status-updated", handleOnboardingConfigChange);
     };
-  }, [bootTimeoutMs, setAiProvider, setConfig]);
+  }, [bootRetryIntervalMs, bootTimeoutMs, setAiProvider, setConfig]);
 
   // Load modules on app start so FeedSidebar shows all modules
   useEffect(() => {
@@ -411,7 +414,7 @@ export default function App() {
                 color: "var(--text-secondary)",
               }}
             >
-              正在启动本地后端。打包版冷启动可能需要 20 到 40 秒。
+              正在连接本地后端。首次冷启动会稍慢；刚关闭后重开通常会更快。
             </p>
           ) : null}
         </div>
@@ -455,7 +458,7 @@ export default function App() {
         >
           <h1 style={{ margin: 0, fontSize: "1.3rem", color: "var(--text-main)" }}>ABO 启动失败</h1>
           <p style={{ margin: 0, fontSize: "0.92rem", lineHeight: 1.7, color: "var(--text-secondary)" }}>
-            桌面壳已经打开，但本地后端服务还没准备好。打包版冷启动会先解包并拉起后端；如果等待 1 分钟后仍然报错，再优先检查 sidecar 是否缺失或被 macOS 拦截执行。
+            桌面壳已经打开，但本地后端服务还没准备好。打包版会自动拉起本地后端；如果等待约 1 分钟后仍然报错，再优先检查 sidecar 是否缺失或被 macOS 拦截执行。
           </p>
           <code
             style={{

@@ -18,6 +18,11 @@ from ..chat.runtime_manager import BACKEND_SESSION_ID_KEY
 from ..cli.detector import detector
 from ..cli.runner import StreamEvent
 from ..config import get_ai_provider
+from ..runtime.bundled_idle import (
+    bundled_backend_websocket_connected,
+    bundled_backend_websocket_disconnected,
+    mark_bundled_backend_activity,
+)
 from ..store.conversations import Conversation, Message, conversation_store
 
 logger = logging.getLogger(__name__)
@@ -776,6 +781,7 @@ async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
     - { "type": "error", "data": "...", "msg_id": "..." }
     """
     await manager.connect(websocket, session_id)
+    bundled_backend_websocket_connected()
 
     # 查找或创建对话
     conv = conversation_store.get_conversation_by_session(session_id)
@@ -802,6 +808,7 @@ async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
         while True:
             # 接收客户端消息
             data = await websocket.receive_json()
+            mark_bundled_backend_activity()
             msg_type = data.get("type", "message")
 
             if msg_type == "pong":
@@ -903,3 +910,4 @@ async def chat_websocket(websocket: WebSocket, cli_type: str, session_id: str):
             pass
     finally:
         manager.disconnect(session_id)
+        bundled_backend_websocket_disconnected()

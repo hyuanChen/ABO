@@ -1,9 +1,8 @@
 #[cfg(not(debug_assertions))]
 use std::{
-    fs,
-    io::{BufRead, BufReader},
+    fs::{self, OpenOptions},
     net::{SocketAddr, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
     thread,
@@ -20,6 +19,8 @@ const BUNDLED_BACKEND_PORT: u16 = 8766;
 const BUNDLED_BACKEND_DIRNAME: &str = "abo-backend";
 #[cfg(not(debug_assertions))]
 const BUNDLED_BACKEND_EXECUTABLE: &str = "abo-backend";
+#[cfg(not(debug_assertions))]
+const BUNDLED_BACKEND_IDLE_EXIT_SECONDS: u64 = 90;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -88,10 +89,18 @@ fn is_bundled_backend_command(command: &str) -> bool {
 }
 
 #[cfg(not(debug_assertions))]
-fn stop_stale_bundled_backends() {
+fn command_matches_backend_path(command: &str, backend_path: &Path) -> bool {
+    command.contains(backend_path.to_string_lossy().as_ref())
+}
+
+#[cfg(not(debug_assertions))]
+fn stop_stale_bundled_backends(current_backend: &Path) {
     for pid in backend_listening_pids() {
         let command = command_for_pid(pid);
         if !is_bundled_backend_command(&command) {
+            continue;
+        }
+        if command_matches_backend_path(&command, current_backend) {
             continue;
         }
 
@@ -144,6 +153,18 @@ fn bundled_app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 #[cfg(not(debug_assertions))]
+fn bundled_backend_log_path(app_data_dir: &Path) -> Result<PathBuf, String> {
+    let log_dir = app_data_dir.join("logs");
+    fs::create_dir_all(&log_dir).map_err(|err| {
+        format!(
+            "failed to create bundled backend log dir {:?}: {err}",
+            log_dir
+        )
+    })?;
+    Ok(log_dir.join("bundled-backend.log"))
+}
+
+#[cfg(not(debug_assertions))]
 fn bundled_backend_executable(app: &AppHandle) -> Result<PathBuf, String> {
     let resource_dir = app
         .path()
@@ -177,25 +198,10 @@ fn bundled_backend_executable(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 #[cfg(not(debug_assertions))]
-fn pipe_backend_output(prefix: &'static str, reader: impl std::io::Read + Send + 'static) {
-    thread::spawn(move || {
-        let reader = BufReader::new(reader);
-        for line in reader.lines() {
-            match line {
-                Ok(line) => println!("{prefix} {line}"),
-                Err(err) => {
-                    eprintln!("[backend] Failed reading sidecar output: {err}");
-                    break;
-                }
-            }
-        }
-    });
-}
-
-#[cfg(not(debug_assertions))]
 fn launch_backend(app: &AppHandle) -> Result<(), String> {
+    let backend_executable = bundled_backend_executable(app)?;
     if backend_is_reachable() {
-        stop_stale_bundled_backends();
+        stop_stale_bundled_backends(&backend_executable);
     }
 
     if backend_is_reachable() {
@@ -211,16 +217,32 @@ fn launch_backend(app: &AppHandle) -> Result<(), String> {
         )
     })?;
 
-    let backend_executable = bundled_backend_executable(app)?;
-    let mut child = Command::new(&backend_executable)
+    let log_path = bundled_backend_log_path(&app_data_dir)?;
+    let stdout_log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|err| format!("failed to open bundled backend log {:?}: {err}", log_path))?;
+    let stderr_log = stdout_log.try_clone().map_err(|err| {
+        format!(
+            "failed to clone bundled backend log handle {:?}: {err}",
+            log_path
+        )
+    })?;
+
+    let child = Command::new(&backend_executable)
         .current_dir(&app_data_dir)
         .env("ABO_BACKEND_HOST", "127.0.0.1")
         .env("ABO_BACKEND_PORT", BUNDLED_BACKEND_PORT.to_string())
         .env("ABO_RUNNING_BUNDLED_APP", "1")
         .env("ABO_DISABLE_LEGACY_MIGRATION", "1")
+        .env(
+            "ABO_BUNDLED_IDLE_EXIT_SECONDS",
+            BUNDLED_BACKEND_IDLE_EXIT_SECONDS.to_string(),
+        )
         .env("ABO_APP_DATA_DIR", &app_data_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(stdout_log))
+        .stderr(Stdio::from(stderr_log))
         .spawn()
         .map_err(|err| {
             format!(
@@ -229,38 +251,15 @@ fn launch_backend(app: &AppHandle) -> Result<(), String> {
             )
         })?;
 
-    if let Some(stdout) = child.stdout.take() {
-        pipe_backend_output("[backend][stdout]", stdout);
-    }
-    if let Some(stderr) = child.stderr.take() {
-        pipe_backend_output("[backend][stderr]", stderr);
-    }
-
     if let Ok(mut guard) = app.state::<BackendProcessState>().child.lock() {
         *guard = Some(child);
     }
 
     println!(
-        "[backend] Spawned backend sidecar; frontend will wait for 127.0.0.1:{BUNDLED_BACKEND_PORT}"
+        "[backend] Spawned backend sidecar at {:?}; frontend will wait for 127.0.0.1:{BUNDLED_BACKEND_PORT}",
+        backend_executable
     );
     Ok(())
-}
-
-#[cfg(not(debug_assertions))]
-fn stop_backend(app: &AppHandle) {
-    let Some(mut child) = app
-        .state::<BackendProcessState>()
-        .child
-        .lock()
-        .ok()
-        .and_then(|mut guard| guard.take())
-    else {
-        return;
-    };
-
-    if let Err(err) = child.kill() {
-        eprintln!("[backend] Failed to stop backend sidecar: {err}");
-    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -292,8 +291,6 @@ pub fn run() {
         } if label == "main" => {
             app_handle.exit(0);
         }
-        #[cfg(not(debug_assertions))]
-        RunEvent::Exit | RunEvent::ExitRequested { .. } => stop_backend(app_handle),
         _ => {}
     });
 }
