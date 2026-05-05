@@ -42,6 +42,8 @@ DYNAMIC_API = "https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/dynamic_ne
 NAV_API = "https://api.bilibili.com/x/web-interface/nav"
 FAV_FOLDERS_API = "https://api.bilibili.com/x/v3/fav/folder/created/list-all"
 FAV_RESOURCES_API = "https://api.bilibili.com/x/v3/fav/resource/list"
+FAV_RESOURCE_IDS_API = "https://api.bilibili.com/x/v3/fav/resource/ids"
+FAV_RESOURCE_INFOS_API = "https://api.bilibili.com/x/v3/fav/resource/infos"
 WATCH_LATER_API = "https://api.bilibili.com/x/v2/history/toview/web"
 FAV_RESOURCE_PAGE_SIZE_MAX = 20
 FAV_RESOURCE_REQUEST_DELAY = 1.2
@@ -117,16 +119,6 @@ def _format_ts(value: Any) -> str:
         return datetime.fromtimestamp(int(value)).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return ""
-
-
-def _parse_iso_ts(value: Any) -> float:
-    text = str(value or "").strip()
-    if not text:
-        return 0.0
-    try:
-        return datetime.fromisoformat(text).timestamp()
-    except Exception:
-        return 0.0
 
 
 def _parse_date_ts(value: str | None) -> int | None:
@@ -707,60 +699,59 @@ def _favorite_folder_media_count(folder: dict) -> int:
     return int(folder.get("media_count") or folder.get("count") or 0)
 
 
-def _pick_folder_preview_candidate(folder_state: dict[str, Any] | None) -> dict[str, Any]:
-    items = (folder_state or {}).get("items") or {}
-    if not isinstance(items, dict) or not items:
-        return {}
-
-    def sort_key(item: dict[str, Any]) -> tuple[float, float]:
-        return (
-            float(_parse_int(item.get("fav_time_ts")) or 0),
-            _parse_iso_ts(item.get("crawled_at")),
-        )
-
-    candidates = [item for item in items.values() if isinstance(item, dict)]
-    if not candidates:
-        return {}
-    return max(candidates, key=sort_key)
-
-
-async def _resolve_folder_preview_from_state(
+async def _fetch_favorite_preview_media(
     client: httpx.AsyncClient,
     *,
-    folder_state: dict[str, Any] | None,
     cookie_header: str,
+    mid: str,
+    folder_id: str,
 ) -> dict[str, str]:
-    candidate = _pick_folder_preview_candidate(folder_state)
-    if not candidate:
+    if not folder_id:
         return {"cover": "", "title": "", "bvid": ""}
 
-    cover = _normalize_image_url(candidate.get("cover"))
-    title = str(candidate.get("title") or "").strip()
-    bvid = extract_bvid(candidate.get("bvid") or candidate.get("url") or "")
-    url = str(candidate.get("url") or "").strip() or (f"https://www.bilibili.com/video/{bvid}" if bvid else "")
-
-    if cover:
-        return {"cover": cover, "title": title, "bvid": bvid}
-
-    if not bvid:
-        return {"cover": "", "title": title, "bvid": ""}
-
-    metadata = await fetch_bilibili_video_metadata(
-        client,
-        bvid=bvid,
-        headers=_headers(cookie_header, url or "https://www.bilibili.com/"),
-        referer=url or f"https://www.bilibili.com/video/{bvid}",
+    referer = f"https://www.bilibili.com/medialist/detail/ml{folder_id}"
+    ids_resp = await client.get(
+        FAV_RESOURCE_IDS_API,
+        params={"media_id": folder_id, "platform": "web"},
+        headers=_headers(cookie_header, referer),
     )
-    resolved_cover = _normalize_image_url(metadata.get("cover"))
-    resolved_title = str(metadata.get("title") or "").strip() or title
-    if resolved_cover:
-        candidate["cover"] = resolved_cover
-    if resolved_title and not candidate.get("title"):
-        candidate["title"] = resolved_title
+    ids_payload = _safe_json_response(ids_resp)
+    if ids_resp.status_code != 200 or ids_payload.get("code") != 0:
+        return {"cover": "", "title": "", "bvid": ""}
+    resource_items = ids_payload.get("data") or []
+    if not isinstance(resource_items, list) or not resource_items:
+        return {"cover": "", "title": "", "bvid": ""}
+
+    first_item = resource_items[0] if isinstance(resource_items[0], dict) else {}
+    resource_id = first_item.get("id")
+    resource_type = first_item.get("type")
+    if not resource_id or resource_type is None:
+        return {"cover": "", "title": "", "bvid": extract_bvid(first_item.get("bvid") or first_item.get("bv_id"))}
+
+    infos_resp = await client.get(
+        FAV_RESOURCE_INFOS_API,
+        params={
+            "resources": f"{resource_id}:{resource_type}",
+            "platform": "web",
+            "folder_mid": mid,
+            "folder_id": folder_id,
+        },
+        headers=_headers(cookie_header, referer),
+    )
+    infos_payload = _safe_json_response(infos_resp)
+    if infos_resp.status_code != 200 or infos_payload.get("code") != 0:
+        return {
+            "cover": "",
+            "title": "",
+            "bvid": extract_bvid(first_item.get("bvid") or first_item.get("bv_id")),
+        }
+
+    infos_data = infos_payload.get("data") or []
+    info = infos_data[0] if isinstance(infos_data, list) and infos_data and isinstance(infos_data[0], dict) else {}
     return {
-        "cover": resolved_cover,
-        "title": resolved_title,
-        "bvid": bvid,
+        "cover": _normalize_image_url(info.get("cover")),
+        "title": str(info.get("title") or "").strip(),
+        "bvid": extract_bvid(info.get("bvid") or info.get("bv_id") or first_item.get("bvid") or first_item.get("bv_id")),
     }
 
 
@@ -812,7 +803,6 @@ async def fetch_favorite_folder_previews(
     state = _load_favorite_state()
     folder_state = state.get("folders") or {}
     previews: list[dict] = []
-    state_changed = False
 
     if progress_callback:
         progress_callback(
@@ -852,7 +842,6 @@ async def fetch_favorite_folder_previews(
     async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
         for index, folder in enumerate(folders, start=1):
             folder_id = str(folder.get("id") or "")
-            media: dict = {}
             if progress_callback:
                 progress_callback(
                     {
@@ -862,56 +851,29 @@ async def fetch_favorite_folder_previews(
                         "current_folder": folder.get("title") or folder.get("name") or folder_id,
                     }
                 )
-            if folder_id:
-                status_code, data = await _fetch_favorite_resource_page(
-                    client,
-                    cookie_header=cookie_header,
-                    mid=mid,
-                    folder_id=folder_id,
-                    page=1,
-                    page_size=1,
-                    retries=1,
-                )
-                if status_code == 200 and data.get("code") == 0:
-                    medias = ((data.get("data") or {}).get("medias") or [])
-                    media = medias[0] if medias else {}
-                await asyncio.sleep(0.08)
+            preview_media = await _fetch_favorite_preview_media(
+                client,
+                cookie_header=cookie_header,
+                mid=mid,
+                folder_id=folder_id,
+            )
+            await asyncio.sleep(0.08)
 
             crawled = folder_state.get(folder_id, {})
             crawled_items = crawled.get("items") or {}
-            preview_cover = _normalize_image_url(media.get("cover") or folder.get("cover"))
-            preview_title = str(media.get("title") or "").strip()
-            preview_bvid = str(media.get("bvid") or "").strip()
-            if not preview_cover or not preview_title:
-                fallback_preview = await _resolve_folder_preview_from_state(
-                    client,
-                    folder_state=crawled,
-                    cookie_header=cookie_header,
-                )
-                if not preview_cover:
-                    preview_cover = fallback_preview.get("cover") or preview_cover
-                if not preview_title:
-                    preview_title = fallback_preview.get("title") or preview_title
-                if not preview_bvid:
-                    preview_bvid = fallback_preview.get("bvid") or preview_bvid
-                if fallback_preview.get("cover"):
-                    state_changed = True
             previews.append(
                 {
                     "id": folder_id,
                     "title": folder.get("title") or folder.get("name") or f"folder-{folder_id}",
                     "media_count": folder.get("media_count") or folder.get("count") or 0,
-                    "cover": preview_cover,
-                    "first_video_title": preview_title,
-                    "first_video_bvid": preview_bvid,
+                    "cover": preview_media.get("cover") or _normalize_image_url(folder.get("cover")),
+                    "first_video_title": preview_media.get("title") or "",
+                    "first_video_bvid": preview_media.get("bvid") or "",
                     "crawled_count": len(crawled_items),
                     "last_crawled_at": crawled.get("last_crawled_at") or "",
                     "source_type": "favorite",
                 }
             )
-
-    if state_changed:
-        _save_favorite_state(state)
 
     return previews
 
@@ -1243,8 +1205,6 @@ async def crawl_selected_favorites_to_vault(
             "title": note.title,
             "url": note.url,
             "bvid": note.bvid,
-            "cover": _normalize_image_url(note.images[0] if note.images else ""),
-            "fav_time_ts": _parse_int(note.metadata.get("fav_time_ts")) or 0,
             "crawled_at": now,
         }
     for note in [item for item in notes if item.source_type == "watch_later"]:
